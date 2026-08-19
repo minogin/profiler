@@ -9,3 +9,8 @@
 * Never start long-running operations without my consent
 * Explain to me the code you generated briefly after every turn
 * Try to be concise when explaining things
+* The process:
+  * We discuss things first
+  * I ask questions, you give advices
+  * Then you propose the implementation
+  * Only when I confirm I like it, you code.
