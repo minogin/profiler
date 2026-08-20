@@ -94,6 +94,29 @@ fun expandCalls(rootCalls: LongArray, subtree: Array<LongArray>): LongArray {
     return total
 }
 
+/**
+ * Mean self duration of an operation call, weighted by how often each one is actually called.
+ *
+ * Weighted, not a plain average over the catalogue: the long operations are rare — tinyStep alone
+ * is 2000 calls in every 4096 — so the unweighted mean is 339 ns while the operation a hook
+ * actually lands on averages 88 ns. Using the unweighted figure makes any per-call overhead look
+ * four times cheaper than it is.
+ */
+fun meanOperationNanos(): Double {
+    val subtree = subtreeCounts()
+    var calls = 0L
+    var nanos = 0.0
+    for (root in 0 until OP_COUNT) {
+        val weight = ROOT_WEIGHTS[root]
+        if (weight == 0) continue
+        for (op in 0 until OP_COUNT) {
+            calls += weight.toLong() * subtree[root][op]
+            nanos += weight * subtree[root][op] * OPS[op].selfNanos
+        }
+    }
+    return nanos / calls
+}
+
 /** Total time of one call of an operation together with its children, per configuration. */
 fun inclusiveNanos(subtree: Array<LongArray>): DoubleArray = DoubleArray(OP_COUNT) { id ->
     var sum = 0.0

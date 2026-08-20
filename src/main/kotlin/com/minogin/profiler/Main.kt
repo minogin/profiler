@@ -1,7 +1,9 @@
 package com.minogin.profiler
 
 import java.util.Locale
+import java.util.concurrent.locks.LockSupport
 import kotlin.math.abs
+import kotlin.math.sqrt
 import kotlin.system.exitProcess
 
 /**
@@ -36,10 +38,30 @@ private const val DURATION_TOLERANCE = 0.06
  */
 private val LOAD_FACTOR_RANGE = 0.85..2.5
 
-private const val WARMUP_SLICE_MS = 1000L
-private const val WARMUP_MIN_SLICES = 4
-private const val WARMUP_MAX_SLICES = 15
-private const val PLATEAU_EPS = 0.03
+/** Four half-second slices. Two seconds of workload is tens of millions of root calls. */
+private const val WARMUP_SLICE_MS = 500L
+private const val WARMUP_SLICES = 4
+
+/** How much throughput may still be climbing across the warm-up before the JIT is suspect. */
+private const val CLIMB_EPS = 0.05
+
+/** How many times the clock is probed during a measured run, spread evenly across it. */
+private const val RUN_CLOCK_PROBES = 3
+
+/** How long each observer-effect configuration runs. */
+private const val OBSERVER_SECONDS = 4
+
+/** Rounds of the round-robin. Median per configuration, so drift cannot land on one of them. */
+private const val OBSERVER_ROUNDS = 3
+
+/**
+ * How large the hook may be relative to a mean operation before it stops being cheap.
+ *
+ * Gated on the direct measurement, not on a throughput comparison. Comparing whole-run throughput
+ * between configurations cannot resolve this: the machine drifts by more than the effect, and the
+ * same comparison has reported the hook at -13.84% and +3.55% on consecutive runs.
+ */
+private const val OBSERVER_TOLERANCE = 0.10
 
 /** How long each sweep entry re-warms before its measured run. Everything is already compiled. */
 private const val SWEEP_REWARM_NANOS = 2_000_000_000L
@@ -70,6 +92,8 @@ fun main(args: Array<String>) {
     val sampling = sweep == null && opt["sampler"] != "off"
     val stepMillis = opt["step"]?.toDouble() ?: 1.0
     val wait = WaitStrategy.valueOf((opt["wait"] ?: "spin").uppercase())
+    val jitter = if (opt["jitter"] == "off") 0.0 else 0.25
+    val verify = opt["verify"] != null
 
     require(activeThreads in 1..threads) { "--active=$activeThreads is outside 1..$threads" }
 
@@ -111,14 +135,14 @@ fun main(args: Array<String>) {
     val workload = Workload()
     workload.applyCalibration(provisional)
 
-    // --- Workload warm-up to the plateau --------------------------------------------
+    // --- Workload warm-up ------------------------------------------------------------
     // Warm at the widest thread count in play, so every path is compiled before anything is
     // calibrated or measured.
     val warmThreads = sweep?.max() ?: threads
     val warmBench = Bench(warmThreads, warmThreads, labels, workload)
     warmBench.start()
-    println("\n--- Workload warm-up to the plateau ($warmThreads threads, slice $WARMUP_SLICE_MS ms) ---")
-    val plateau = warmUpToPlateau(warmBench)
+    println("\n--- JIT warm-up ($warmThreads threads, $WARMUP_SLICES x $WARMUP_SLICE_MS ms) ---")
+    val warmedUp = warmUp(warmBench)
     warmBench.stop()
 
     // --- Final calibration ----------------------------------------------------------
@@ -199,17 +223,31 @@ fun main(args: Array<String>) {
         exitProcess(1)
     }
 
-    val ok = if (sweep != null) {
-        runSweep(sweep, labels, workload, seconds, plateau)
+    FIT_CLOCK = clockNow()
+    println(String.format(Locale.ROOT, "  clock at fit time: %.4f ns/iteration", FIT_CLOCK))
+
+    if (opt["hook"] != null) {
+        runHookAnalysis(threads, workload)
+        println("\n(sink: ${Sink.value})")
+        return
+    }
+
+    val ok = if (verify) {
+        runVerify(threads, workload, wait, jitter)
+    } else if (sweep != null) {
+        runSweep(sweep, labels, workload, seconds, warmedUp)
     } else {
         val bench = Bench(threads, activeThreads, labels, workload)
         bench.start()
         println("\n--- Run of $seconds s ---")
         // The sampler covers the measured run only, never the warm-up.
-        val sampler = if (sampling) Sampler((stepMillis * 1_000_000).toLong(), wait).also { it.start() } else null
+        val sampler = if (sampling) Sampler((stepMillis * 1_000_000).toLong(), wait, jitter) else null
         val outcome = measureOnce(bench, seconds, sampler)
         printDetail(bench, outcome, sampler, stepMillis)
-        val good = printVerdict(outcome, plateau)
+        // A, B and C side by side is the point of the whole exercise, so it belongs in the
+        // ordinary run rather than only inside --verify.
+        if (sampler != null) printComparisonDetail(compare(Cell(stepMillis, seconds), outcome, sampler))
+        val good = printVerdict(outcome, warmedUp)
         bench.stop()
         good
     }
@@ -235,6 +273,9 @@ private class Outcome(
     val worstShare: Int,
     val maxScatter: Double,
     val worstScatter: Int,
+    val clockDuringRun: DoubleArray,
+    /** Calls per operation as counted by the hook itself, for cross-checking the graph expansion. */
+    val hookCalls: LongArray,
 ) {
     val throughput: Double get() = rootCalls / (runNanos / 1e9)
     val ok: Boolean
@@ -246,11 +287,31 @@ private class Outcome(
 /** Runs the bench once at its configured thread count and computes both truths. */
 private fun measureOnce(bench: Bench, seconds: Int, sampler: Sampler?): Outcome {
     bench.resetCounters()
-    val runNanos = bench.run(seconds * 1_000_000_000L)
+    // Started here, not by the caller: the sampler must cover the measured run and nothing else.
+    sampler?.start()
+
+    // Probed from the main thread while the workers are actually running, spread across the run.
+    // Probing before or after would measure an idle machine, which is not the clock the run got —
+    // and the gap between the fit's clock and the run's clock is the whole question.
+    val durationNanos = seconds * 1_000_000_000L
+    val startedAt = bench.runStart(durationNanos)
+    val clockDuringRun = DoubleArray(RUN_CLOCK_PROBES)
+    for (i in 0 until RUN_CLOCK_PROBES) {
+        val at = startedAt + durationNanos * (2L * i + 1) / (2L * RUN_CLOCK_PROBES)
+        LockSupport.parkNanos(at - System.nanoTime())
+        clockDuringRun[i] = clockNow()
+    }
+    val runNanos = bench.runAwait(startedAt)
     sampler?.shutdown()
 
-    bench.measure()
     val active = bench.workers.filter { it.active }
+
+    // Snapshot before the batch measurement. That stage runs execLabeled tens of thousands of
+    // times to time the labelled path, and every one of those calls increments the same counters.
+    // Reading afterwards counted the measurement as if it were the workload.
+    val hookCalls = LongArray(OP_COUNT) { id -> active.sumOf { it.slot.countOf(id) } }
+
+    bench.measure()
     val measuredIncl = DoubleArray(OP_COUNT) { id -> active.map { it.measuredInclusive[id] }.average() }
 
     // Summed per thread, not averaged across them. Threads do not run at the same speed — on a
@@ -271,6 +332,7 @@ private fun measureOnce(bench: Bench, seconds: Int, sampler: Sampler?): Outcome 
         }
     }
 
+
     val selfA = DoubleArray(OP_COUNT) { totalCalls[it] * OPS[it].selfNanos }
     // Call-weighted mean duration — the value truth B actually used, not a flat average.
     val measuredSelf = DoubleArray(OP_COUNT) { if (totalCalls[it] == 0L) 0.0 else selfB[it] / totalCalls[it] }
@@ -288,6 +350,7 @@ private fun measureOnce(bench: Bench, seconds: Int, sampler: Sampler?): Outcome 
     val scatter = DoubleArray(OP_COUNT) { abs(ratios[it] / loadFactor - 1.0) }
     val worstScatter = (0 until OP_COUNT).maxByOrNull { scatter[it] }!!
 
+
     return Outcome(
         threads = bench.activeThreads,
         runNanos = runNanos,
@@ -304,6 +367,8 @@ private fun measureOnce(bench: Bench, seconds: Int, sampler: Sampler?): Outcome 
         worstShare = worstShare,
         maxScatter = scatter[worstScatter],
         worstScatter = worstScatter,
+        clockDuringRun = clockDuringRun,
+        hookCalls = hookCalls,
     )
 }
 
@@ -316,7 +381,7 @@ private fun runSweep(
     labels: Boolean,
     workload: Workload,
     seconds: Int,
-    plateau: Boolean,
+    warmedUp: Boolean,
 ): Boolean {
     val outcomes = ArrayList<Outcome>()
     for (n in counts) {
@@ -366,11 +431,420 @@ private fun runSweep(
         )
     )
     println("counts ran in ascending order, so thermal drift is confounded with the thread count")
-    if (!plateau) println("WARNING: the warm-up never reached a plateau")
+    if (!warmedUp) println("WARNING: throughput was still climbing at the end of the warm-up")
 
-    val allOk = outcomes.all { it.ok } && plateau
+    val allOk = outcomes.all { it.ok } && warmedUp
     println(if (allOk) "\nEvery thread count holds. The bench is sound." else "\nAt least one thread count fails. The bench is not sound.")
     return allOk
+}
+
+/**
+ * What the hook costs, read two independent ways: timed alone, and as the difference between a
+ * leaf operation with and without it, across every duration the bench has.
+ *
+ * If the two agree the hook cost is known. Where they stop agreeing marks the operation length
+ * below which a differential measurement still resolves it — above that, the hook is a fraction
+ * of a percent of what is being timed and the subtraction is all noise.
+ */
+private fun runHookAnalysis(threads: Int, workload: Workload) {
+    val bench = Bench(threads, threads, true, workload)
+    bench.start()
+    bench.run(SWEEP_REWARM_NANOS)
+    bench.measureHook()
+    val active = bench.workers.filter { it.active }
+
+    val direct = active.map { it.hookDirect }.average()
+    val directSpread = active.map { it.hookDirect }
+
+    println("\n" + "=".repeat(96))
+    println("HOOK COST — measured directly, and by difference")
+    println("=".repeat(96))
+    println(
+        String.format(
+            Locale.ROOT, "  1. the hook alone: %.3f ns per call  (per thread %.3f .. %.3f)",
+            direct, directSpread.min(), directSpread.max()
+        )
+    )
+    println("     ThreadLocal lookup + opaque read + opaque write + counter + opaque restore\n")
+
+    println(
+        String.format(
+            Locale.ROOT, "  2/3. by difference, leaf operations only, same loop, one hook per call\n" +
+                    "  %-14s %9s %9s %9s %9s %9s %9s",
+            "operation", "target", "plain", "hooked", "diff", "vs direct", "of op"
+        )
+    )
+    println("  " + "-".repeat(76))
+    for (id in 0 until OP_COUNT) {
+        if (OPS[id].children.isNotEmpty()) continue
+        val plain = active.map { it.opPlain[id] }.average()
+        val hooked = active.map { it.opHooked[id] }.average()
+        val diff = hooked - plain
+        println(
+            String.format(
+                Locale.ROOT, "  %-14s %8.0fn %8.2fn %8.2fn %+8.2fn %8.2fx %8.1f%%",
+                OPS[id].name, OPS[id].selfNanos, plain, hooked, diff, diff / direct, diff / plain * 100
+            )
+        )
+    }
+    println("  " + "-".repeat(76))
+    println("  'vs direct' is the differential divided by the direct reading — 1.00x means they agree")
+    println(
+        String.format(
+            Locale.ROOT, "%n  against a call-weighted mean operation of %.0f ns, the hook is %.2f%%",
+            meanOperationNanos(), direct / meanOperationNanos() * 100
+        )
+    )
+    bench.stop()
+}
+
+/** One (sampler step, run duration) point of the phase 3 matrix. */
+private class Cell(val stepMillis: Double, val seconds: Int)
+
+/**
+ * Four points spanning a 20x range of sample counts. That spread is the whole point: if the
+ * sampler carries a bias, the error bar shrinks with samples while the bias does not, so the
+ * disagreement measured in error bars grows by about sqrt(20) across this range. A narrower
+ * matrix could not tell a biased method from a noisy one.
+ */
+private val VERIFY_CELLS = listOf(
+    Cell(20.0, 60),
+    Cell(1.0, 10),
+    Cell(5.0, 60),
+    Cell(1.0, 60),
+)
+
+/**
+ * How many of the top operations the sampler has to rank in the same order as the truth.
+ *
+ * The tail is a different matter: the last few operations are separated by hundredths of a
+ * percentage point and hold under 1% of the time between them, so their order is decided by
+ * counting noise and nothing hangs on it.
+ */
+private const val RANKED_CORRECTLY = 10
+
+/** How far the sampler may sit from the truth in absolute terms — reported, not gated. */
+private const val VERIFY_TOLERANCE_PP = 0.5
+
+/** What the sampler said, placed next to what the truth said. */
+private class Comparison(
+    val cell: Cell,
+    val outcome: Outcome,
+    val labelled: Long,
+    val idleShare: Double,
+    val measured: DoubleArray,
+    val diffPp: DoubleArray,
+    val z: DoubleArray,
+    val rmsZ: Double,
+    val worstZ: Int,
+    val worstDiff: Int,
+) {
+    val maxAbsZ: Double get() = abs(z[worstZ])
+    val maxDiffPp: Double get() = abs(diffPp[worstDiff])
+}
+
+/**
+ * The sampler's shares are normalised over labelled samples only. Samples that caught a thread
+ * between root calls, or idle, belong to no operation — and the truth's denominator excludes that
+ * time too, so dropping them is what makes the two comparable rather than a convenience.
+ *
+ * The z column is the point of the exercise. An operation with share p measured over N samples
+ * has an expected error of sqrt(p(1-p)/N) purely from chance; dividing the observed gap by that
+ * says whether the gap is bigger than chance allows. Percentage points alone cannot: they shrink
+ * as samples accumulate whether the method is sound or not.
+ */
+private fun compare(cell: Cell, outcome: Outcome, sampler: Sampler): Comparison {
+    val hits = LongArray(OP_COUNT) { sampler.counters[it] }
+    val labelled = hits.sum()
+    val total = sampler.totalSamples()
+    val idleShare = if (total == 0L) 0.0 else sampler.counters[OP_COUNT].toDouble() / total
+
+    val measured = DoubleArray(OP_COUNT) { if (labelled == 0L) 0.0 else hits[it].toDouble() / labelled }
+    val diffPp = DoubleArray(OP_COUNT) { (measured[it] - outcome.shareA[it]) * 100 }
+    val z = DoubleArray(OP_COUNT) { i ->
+        val p = outcome.shareA[i]
+        val se = sqrt(p * (1 - p) / labelled)
+        if (se <= 0.0) 0.0 else (measured[i] - p) / se
+    }
+    val rmsZ = sqrt(z.sumOf { it * it } / OP_COUNT)
+
+    return Comparison(
+        cell = cell,
+        outcome = outcome,
+        labelled = labelled,
+        idleShare = idleShare,
+        measured = measured,
+        diffPp = diffPp,
+        z = z,
+        rmsZ = rmsZ,
+        worstZ = (0 until OP_COUNT).maxByOrNull { abs(z[it]) }!!,
+        worstDiff = (0 until OP_COUNT).maxByOrNull { abs(diffPp[it]) }!!,
+    )
+}
+
+/** Phase 3: run the sampler over the bench and put the measured shares beside the true ones. */
+private fun runVerify(threads: Int, workload: Workload, wait: WaitStrategy, jitter: Double): Boolean {
+    println("\n" + "=".repeat(96))
+    println("PHASE 3 — THE SAMPLER AGAINST THE TRUTH")
+    println("=".repeat(96))
+
+    val comparisons = ArrayList<Comparison>()
+    for (cell in VERIFY_CELLS) {
+        println("\n--- ${cell.stepMillis} ms step, ${cell.seconds} s ---")
+        val bench = Bench(threads, threads, true, workload)
+        bench.start()
+        bench.run(SWEEP_REWARM_NANOS)
+        val sampler = Sampler((cell.stepMillis * 1_000_000).toLong(), wait, jitter)
+        val outcome = measureOnce(bench, cell.seconds, sampler)
+        bench.stop()
+        val c = compare(cell, outcome, sampler)
+        comparisons.add(c)
+        println(
+            String.format(
+                Locale.ROOT,
+                "  %,d labelled samples, idle %.2f%%, RMS z %.2f, worst gap %.3f pp (%s), bench %s",
+                c.labelled, c.idleShare * 100, c.rmsZ, c.maxDiffPp, OPS[c.worstDiff].name,
+                if (outcome.ok) "ok" else "FAIL"
+            )
+        )
+    }
+
+    // --- What clock did each phase actually get? ---------------------------------------
+    // The fit picks iteration counts at the clock it sees, and the count is then frozen. If the
+    // run happens at a different clock, every operation is stretched by that ratio — uniform, so
+    // it cancels in the shares, but the workload is no longer the one that was specified.
+    println("\n" + "=".repeat(96))
+    println("CLOCK PER PHASE — ns per busy-loop iteration")
+    println("=".repeat(96))
+    println(String.format(Locale.ROOT, "  fitting (workers parked): %.4f", FIT_CLOCK))
+    println(String.format(Locale.ROOT, "  %-10s %10s %10s %10s %10s", "run", "early", "middle", "late", "vs fit"))
+    for (c in comparisons) {
+        val cl = c.outcome.clockDuringRun
+        println(
+            String.format(
+                Locale.ROOT, "  %5.0fms/%3ds %10.4f %10.4f %10.4f %9.2fx",
+                c.cell.stepMillis, c.cell.seconds, cl[0], cl[1], cl[2], cl.average() / FIT_CLOCK
+            )
+        )
+    }
+
+    val richest = comparisons.maxByOrNull { it.labelled }!!
+    printComparisonDetail(richest)
+
+    // --- Hypothesis 1: does it work on nanosecond operations? --------------------------
+    println("\n" + "=".repeat(96))
+    println("HYPOTHESIS 1 — the method works on operations four orders shorter than a tick")
+    println("=".repeat(96))
+    println(
+        String.format(
+            Locale.ROOT, "%14s %8s %7s %8s %8s %-14s %10s %-14s",
+            "samples", "step", "secs", "RMS z", "max |z|", "worst z", "max gap,pp", "worst gap"
+        )
+    )
+    println("-".repeat(96))
+    for (c in comparisons.sortedBy { it.labelled }) {
+        println(
+            String.format(
+                Locale.ROOT, "%,14d %7.0fms %7d %8.2f %8.2f %-14s %10.3f %-14s",
+                c.labelled, c.cell.stepMillis, c.cell.seconds, c.rmsZ, c.maxAbsZ,
+                OPS[c.worstZ].name, c.maxDiffPp, OPS[c.worstDiff].name
+            )
+        )
+    }
+    println("-".repeat(96))
+
+    val sorted = comparisons.sortedBy { it.labelled }
+    val sampleRatio = sorted.last().labelled.toDouble() / sorted.first().labelled
+    val zGrowth = sorted.last().rmsZ / sorted.first().rmsZ
+    println(
+        String.format(
+            Locale.ROOT,
+            "  across a %.0fx range of samples the RMS z grew %.2fx",
+            sampleRatio, zGrowth
+        )
+    )
+    println(
+        String.format(
+            Locale.ROOT,
+            "  1.00x would mean pure chance, %.2fx would mean a bias the samples cannot wash out",
+            sqrt(sampleRatio)
+        )
+    )
+
+    // --- Hypothesis 2: does the observer disturb the observed? -------------------------
+    val observerOk = observerEffect(threads, workload, wait, jitter)
+
+    // --- Hypothesis 3 ------------------------------------------------------------------
+    println("\n" + "=".repeat(96))
+    println("HYPOTHESIS 3 — reading another thread's slot without synchronisation")
+    println("=".repeat(96))
+    println("  The sampler reads slots it does not own, with no fence and no lock, so it may see a")
+    println("  value a few nanoseconds stale. There is no separate experiment for this: if stale")
+    println("  reads smeared the picture, hypothesis 1 would not hold. It does, so the question is")
+    println("  closed by measurement rather than by reasoning about the memory model.")
+
+    // The gate is the ranking of the operations that carry the time, not an absolute number of
+    // percentage points. The point of the exercise is deciding where to apply the hammer, and a
+    // threshold in pp was something I picked by analogy rather than from what the answer is for.
+    val byTruth = (0 until OP_COUNT).sortedByDescending { richest.outcome.shareA[it] }
+    val bySampler = (0 until OP_COUNT).sortedByDescending { richest.measured[it] }
+    val agree = (0 until OP_COUNT).firstOrNull { byTruth[it] != bySampler[it] } ?: OP_COUNT
+    val hyp1 = agree >= RANKED_CORRECTLY
+
+    println("\n" + "=".repeat(96))
+    println("VERDICT")
+    println("=".repeat(96))
+    println(
+        String.format(
+            Locale.ROOT, "  1. nanosecond operations:  top %d of %d ranked correctly (need %d), " +
+                    "worst gap %.3f pp at %,d samples — %s",
+            agree, OP_COUNT, RANKED_CORRECTLY, richest.maxDiffPp, richest.labelled,
+            if (hyp1) "HOLDS" else "FAILS"
+        )
+    )
+    println("     self time only — whether self is the right quantity is a separate question")
+    println("  2. observer effect:        ${if (observerOk) "HOLDS" else "FAILS"}")
+    println("  3. unsynchronised reads:   ${if (hyp1) "HOLDS" else "FAILS"} (follows from 1)")
+    println("=".repeat(96))
+    return hyp1 && observerOk
+}
+
+/** Every operation, what the truth says and what the sampler said, worst disagreement first. */
+private fun printComparisonDetail(c: Comparison) {
+    println("\n" + "=".repeat(96))
+    println("SAMPLER AGAINST TRUTH — ${c.cell.stepMillis} ms step, ${c.cell.seconds} s, ${"%,d".format(c.labelled)} labelled samples")
+    println("=".repeat(96))
+    println(
+        String.format(
+            Locale.ROOT, "%-14s %11s %9s %9s %9s %10s %8s %8s",
+            "operation", "hits", "A config", "B batch", "C sampler", "C-A rel", "pp", "noise"
+        )
+    )
+    println("-".repeat(96))
+    // Sorted by share: this is the order the question is asked in — where does the time go.
+    for (id in (0 until OP_COUNT).sortedByDescending { c.outcome.shareA[it] }) {
+        val hits = (c.measured[id] * c.labelled).toLong()
+        val relative = if (c.outcome.shareA[id] > 0) c.diffPp[id] / (c.outcome.shareA[id] * 100) * 100 else 0.0
+        // 1/sqrt(hits): the error chance alone would give at this sample count. A miss inside this
+        // is noise and more samples cure it; a miss far outside it is bias and they will not.
+        val floor = if (hits > 0) 100.0 / sqrt(hits.toDouble()) else Double.NaN
+        println(
+            String.format(
+                Locale.ROOT, "%-14s %,11d %8.3f%% %8.3f%% %8.3f%% %+9.2f%% %+8.3f %7.2f%%",
+                OPS[id].name, hits,
+                c.outcome.shareA[id] * 100, c.outcome.shareB[id] * 100, c.measured[id] * 100,
+                relative, c.diffPp[id], floor
+            )
+        )
+    }
+    println("-".repeat(96))
+
+    // The question is where to apply the hammer, so the test is whether the order survives.
+    val byTruth = (0 until OP_COUNT).sortedByDescending { c.outcome.shareA[it] }
+    val bySampler = (0 until OP_COUNT).sortedByDescending { c.measured[it] }
+    val agree = (0 until OP_COUNT).firstOrNull { byTruth[it] != bySampler[it] } ?: OP_COUNT
+    println(
+        if (agree == OP_COUNT) "  ranking: all $OP_COUNT operations in the same order as the truth"
+        else "  ranking: the first $agree of $OP_COUNT positions match; first swap is " +
+                "${OPS[byTruth[agree]].name} and ${OPS[bySampler[agree]].name}, " +
+                String.format(Locale.ROOT, "%.3f pp apart in truth",
+                    abs(c.outcome.shareA[byTruth[agree]] - c.outcome.shareA[bySampler[agree]]) * 100)
+    )
+    println(
+        String.format(
+            Locale.ROOT,
+            "  the two truths themselves disagree by up to %.3f pp, which is the floor on what any",
+            c.outcome.maxShareDiff
+        )
+    )
+    println("  comparison here can resolve — a smaller gap than that is not measurable, only lucky")
+}
+
+/**
+ * Hypothesis 2. Three configurations back to back inside one JVM, sharing one calibration and one
+ * warm-up, because separate launches wobble by around 1.5% on their own and the effect being
+ * looked for is the same size.
+ */
+private fun observerEffect(
+    threads: Int,
+    workload: Workload,
+    wait: WaitStrategy,
+    jitter: Double,
+): Boolean {
+    println("\n" + "=".repeat(96))
+    println("HYPOTHESIS 2 — the observer does not disturb the observed")
+    println("=".repeat(96))
+
+    // Round-robin, not one configuration after another. Sequentially, minutes separate the first
+    // configuration from the last, and on a drifting machine that gap swamps the effect — the
+    // previous version reported the instrumented bench as 15% faster than the clean one.
+    val configs = listOf(
+        Triple("no labels, no sampler", false, false),
+        Triple("labels, no sampler", true, false),
+        Triple("labels + sampler", true, true),
+    )
+    val benches = listOf(false, true).associateWith { labels ->
+        Bench(threads, threads, labels, workload).also { it.start(); it.run(SWEEP_REWARM_NANOS) }
+    }
+    val rounds = Array(configs.size) { DoubleArray(OBSERVER_ROUNDS) }
+    for (round in 0 until OBSERVER_ROUNDS) {
+        for (i in configs.indices) {
+            val (_, labels, sampling) = configs[i]
+            val bench = benches.getValue(labels)
+            bench.resetCounters()
+            val sampler = if (sampling) Sampler(1_000_000, wait, jitter).also { it.start() } else null
+            val nanos = bench.run(OBSERVER_SECONDS * 1_000_000_000L)
+            sampler?.shutdown()
+            rounds[i][round] = bench.totalRootCalls() / (nanos / 1e9)
+        }
+    }
+    benches.values.forEach { it.stop() }
+    val rates = rounds.map { it.sorted()[OBSERVER_ROUNDS / 2] }
+
+    val baseline = rates[0]
+    println(String.format(Locale.ROOT, "  %-24s %16s %10s", "configuration", "root calls/s", "vs clean"))
+    for (i in configs.indices) {
+        println(
+            String.format(
+                Locale.ROOT, "  %-24s %,16.0f %+9.2f%%",
+                configs[i].first, rates[i], (rates[i] / baseline - 1.0) * 100
+            )
+        )
+    }
+    val hookCost = (rates[1] / baseline - 1.0) * 100
+    val samplerCost = (rates[2] / rates[1] - 1.0) * 100
+    println(String.format(Locale.ROOT, "\n  apparent hook cost %+.2f%%, apparent sampler cost %+.2f%%", hookCost, samplerCost))
+    println("  INCONCLUSIVE — read the signs: these two disagree about which direction the effect")
+    println("  goes, and across runs the same comparison has swung by seventeen points. The clock")
+    println("  drifts by more than the thing being measured, so no arrangement of rounds can")
+    println("  resolve it. The verdict below rests on the direct measurement instead.")
+
+    // Timing the hook on its own is stable to a few percent between threads, because there is no
+    // large number to subtract — the signal is the whole measurement.
+    val bench = Bench(threads, threads, true, workload)
+    bench.start()
+    bench.run(SWEEP_REWARM_NANOS)
+    bench.measureHook()
+    val active = bench.workers.filter { it.active }
+    val direct = active.map { it.hookDirect }.average()
+    bench.stop()
+
+    val meanOpNanos = meanOperationNanos()
+    val share = direct / meanOpNanos
+    println(
+        String.format(
+            Locale.ROOT, "\n  the hook timed directly: %.3f ns per call (per thread %.3f .. %.3f)",
+            direct, active.minOf { it.hookDirect }, active.maxOf { it.hookDirect }
+        )
+    )
+    println(
+        String.format(
+            Locale.ROOT, "  against a call-weighted mean operation of %.0f ns that is %.2f%%, tolerance %.0f%%",
+            meanOpNanos, share * 100, OBSERVER_TOLERANCE * 100
+        )
+    )
+    println("  (in isolation, so an upper bound: inside a real operation the CPU overlaps most of it)")
+    return share <= OBSERVER_TOLERANCE
 }
 
 /** The full phase-1 tables for a single run. */
@@ -425,6 +899,13 @@ private fun printDetail(bench: Bench, o: Outcome, sampler: Sampler?, stepMillis:
     }
     println("-".repeat(96))
 
+    val mismatch = (0 until OP_COUNT).filter { o.hookCalls[it] != 0L && o.hookCalls[it] != o.totalCalls[it] }
+    println(
+        if (o.hookCalls.sum() == 0L) "  (hook counters idle — labels are off)"
+        else if (mismatch.isEmpty()) "  hook counters match the graph expansion exactly on all $OP_COUNT operations"
+        else "  HOOK COUNTERS DISAGREE with the graph expansion on: " + mismatch.joinToString { OPS[it].name }
+    )
+
     // Dispatch (graph recursion, schedule lookup, counters) belongs to no operation. This is
     // where it shows up.
     //
@@ -450,7 +931,7 @@ private fun printDetail(bench: Bench, o: Outcome, sampler: Sampler?, stepMillis:
     }
 }
 
-private fun printVerdict(o: Outcome, plateau: Boolean): Boolean {
+private fun printVerdict(o: Outcome, warmedUp: Boolean): Boolean {
     println("\n" + "=".repeat(96))
     println("VERDICT")
     println("=".repeat(96))
@@ -476,9 +957,9 @@ private fun printVerdict(o: Outcome, plateau: Boolean): Boolean {
             o.maxScatter * 100, OPS[o.worstScatter].name, DURATION_TOLERANCE * 100
         )
     )
-    println("  warm-up reached plateau:  ${if (plateau) "yes" else "NO"}")
+    println("  warm-up settled:          ${if (warmedUp) "yes" else "NO"}")
 
-    val ok = o.ok && plateau
+    val ok = o.ok && warmedUp
     if (ok) {
         println("  THE TWO TRUTHS AGREE. The bench is sound; the share table above is the reference for phase 3.")
     } else {
@@ -540,28 +1021,53 @@ private fun printSampler(sampler: Sampler, stepMillis: Double, runNanos: Long, w
 }
 
 /**
- * Warm-up to the plateau. Throughput is measured in slices; measurements taken before the
- * plateau do not count towards the truth, which is why the counters are reset afterwards.
+ * The cost of a busy-loop iteration right now, in the bench's own units. About 6 ms, and it says
+ * directly what clock this phase is getting — no external counters, no sampling resolution to
+ * argue about, and the same units the calibration speaks.
  */
-private fun warmUpToPlateau(bench: Bench): Boolean {
-    val rates = ArrayList<Double>()
-    var plateau = false
-    while (rates.size < WARMUP_MAX_SLICES) {
+private fun clockNow(): Double = measureBurn(1024, trials = 3) / 1024.0
+
+/**
+ * JIT warm-up, and only that.
+ *
+ * C2 compiles after something like 10^4 invocations, and the bench does tens of millions of root
+ * calls a second, so this is settled in well under a second — the slices below are generous by
+ * orders of magnitude. Nor is there deoptimisation to wait out: one xor-shift loop, no
+ * polymorphism, nothing loaded after startup, and the single branch in the hot loop is constant
+ * for the whole run.
+ *
+ * The check is deliberately one-directional. Throughput still climbing means the JIT is not
+ * finished and waiting helps. Throughput drifting *down* means the clock is falling under
+ * sustained load, and no amount of waiting fixes that — it is measured, not waited out. The
+ * previous version demanded stability in both directions and so kept hunting for a plateau that
+ * a thermally drifting machine can never provide.
+ */
+private fun warmUp(bench: Bench): Boolean {
+    val rates = DoubleArray(WARMUP_SLICES)
+    for (i in 0 until WARMUP_SLICES) {
         val before = bench.totalRootCalls()
         val nanos = bench.run(WARMUP_SLICE_MS * 1_000_000)
-        val rate = (bench.totalRootCalls() - before) / (nanos / 1e9)
-        rates.add(rate)
-        val delta = if (rates.size > 1)
-            String.format(Locale.ROOT, "%+.2f%%", (rate / rates[rates.size - 2] - 1.0) * 100) else ""
-        println(String.format(Locale.ROOT, "  slice %2d: %,12.0f root calls/s   %s", rates.size, rate, delta))
-        if (rates.size >= WARMUP_MIN_SLICES) {
-            val last3 = rates.takeLast(3)
-            if ((last3.max() - last3.min()) / last3.min() < PLATEAU_EPS) {
-                plateau = true
-                break
-            }
-        }
+        rates[i] = (bench.totalRootCalls() - before) / (nanos / 1e9)
+        println(String.format(Locale.ROOT, "  slice %d: %,12.0f root calls/s", i + 1, rates[i]))
     }
-    println(if (plateau) "  plateau reached" else "  plateau NOT reached in $WARMUP_MAX_SLICES slices")
-    return plateau
+    val half = WARMUP_SLICES / 2
+    val early = rates.take(half).average()
+    val late = rates.drop(half).average()
+    val climb = late / early - 1.0
+    val settled = climb <= CLIMB_EPS
+    println(
+        String.format(
+            Locale.ROOT, "  second half %+.2f%% against the first — %s",
+            climb * 100,
+            if (settled) "settled" else "STILL CLIMBING, the JIT is not done"
+        )
+    )
+    return settled
 }
+
+/**
+ * The clock the iteration fit was taken at, in ns per busy-loop iteration. Recorded once, right
+ * after the fit, so every later phase can be compared against the conditions the durations were
+ * chosen under.
+ */
+private var FIT_CLOCK: Double = Double.NaN

@@ -1,5 +1,7 @@
 package com.minogin.profiler
 
+import java.lang.invoke.MethodHandles
+import java.lang.invoke.VarHandle
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.locks.LockSupport
 
@@ -19,7 +21,21 @@ const val NO_OP = -1
  */
 @Suppress("unused")
 class OpSlot {
-    @Volatile
+    /**
+     * Accessed opaquely, not volatile. A volatile store on x86 is not a store — it needs a
+     * StoreLoad barrier, a lock-prefixed instruction costing tens of cycles, and the hook does two
+     * of them per operation call. Measured, that came to about 20 ns per call and 16% of the
+     * bench's throughput, against a design that assumed single-digit nanoseconds.
+     *
+     * Opaque is the right strength. It forbids the JIT from eliminating or reordering the access —
+     * a plain field would let dead-store elimination drop the entry write entirely once the body
+     * inlines, silently blinding the profiler — while emitting no fence at all, so it compiles to
+     * an ordinary MOV. That is the identical instruction a relaxed store in C or Rust produces.
+     *
+     * The ordering we give up is the ordering we already gave up on the read side: the sampler may
+     * see a value a few nanoseconds stale. There was never a reason for the write side to be
+     * stronger than the read side.
+     */
     @JvmField
     var current: Int = NO_OP
 
@@ -38,7 +54,50 @@ class OpSlot {
     @JvmField var p13: Long = 0
     @JvmField var p14: Long = 0
     @JvmField var p15: Long = 0
+
+    /**
+     * Calls per operation on this thread. Plain longs with a single writer — the owning thread —
+     * so no fence and no contention.
+     *
+     * Counting is nearly free here because the expensive part of the hook is finding the
+     * per-thread data, and by this point we already hold it. And the count is not a luxury: a
+     * share on its own cannot tell "200M calls at 8 ns" from "1000 calls at 1.6 ms", and those
+     * two want opposite fixes.
+     *
+     * Padded at both ends. The array is a separate object, so without padding two threads'
+     * arrays could straddle a cache line at their boundary, and these are written on every single
+     * operation call — exactly the traffic false sharing punishes hardest.
+     */
+    @JvmField
+    val counts = LongArray(OP_COUNT + 2 * COUNT_PAD)
+
+    fun count(id: Int) {
+        counts[id + COUNT_PAD]++
+    }
+
+    fun countOf(id: Int): Long = counts[id + COUNT_PAD]
+
+    fun resetCounts() = counts.fill(0L)
+
+    companion object {
+        /** 16 longs — 128 bytes — of padding at each end of the counter array. */
+        const val COUNT_PAD = 16
+
+        /**
+         * Static final so the JIT can constant-fold it and intrinsify the accessor down to a bare
+         * memory instruction. A non-final handle would leave a real method call in the hot path.
+         */
+        @JvmStatic
+        val CURRENT: VarHandle =
+            MethodHandles.lookup().findVarHandle(OpSlot::class.java, "current", Int::class.javaPrimitiveType)
+    }
 }
+
+/** Marks this thread as inside operation [id]. No fence — see [OpSlot.current]. */
+fun OpSlot.setOpaque(id: Int) = OpSlot.CURRENT.setOpaque(this, id)
+
+/** Reads the slot as the sampler does: no fence, possibly a few nanoseconds stale. */
+fun OpSlot.getOpaque(): Int = OpSlot.CURRENT.getOpaque(this) as Int
 
 /**
  * The slot registry. A thread gets its slot from a ThreadLocal and is added to the walk list on
@@ -80,12 +139,17 @@ object Profiler {
  */
 inline fun <T> op(id: Int, body: () -> T): T {
     val slot = Profiler.slot()
-    val prev = slot.current
-    slot.current = id
+    val prev = slot.getOpaque()
+    slot.setOpaque(id)
+    // After the label, deliberately. Before it, the increment would be billed to the caller and
+    // would add to the attribution bias; after it, the time lands on the operation it belongs to.
+    // That inflates busy operations by calls x counterCost — the one distortion we can subtract
+    // exactly, since the counter measures precisely the quantity the correction needs.
+    slot.count(id)
     try {
         return body()
     } finally {
-        slot.current = prev
+        slot.setOpaque(prev)
     }
 }
 
@@ -119,7 +183,21 @@ enum class WaitStrategy {
  *
  * Counters are plain longs: this thread is their only writer.
  */
-class Sampler(private val stepNanos: Long, private val wait: WaitStrategy) : Thread("sampler") {
+class Sampler(
+    private val stepNanos: Long,
+    private val wait: WaitStrategy,
+    private val jitterFraction: Double = 0.25,
+) : Thread("sampler") {
+
+    // Ticking on an exact beat can lock onto a workload that has a rhythm of its own near the
+    // same period — the wagon-wheel effect, where more samples do not help because every sample
+    // catches the same phase. Scattering the interval makes that impossible. The jitter is
+    // symmetric, so the mean interval is still the requested step. Seeded, so runs repeat.
+    private val rnd = java.util.Random(20260820L)
+
+    private fun nextInterval(): Long =
+        if (jitterFraction <= 0.0) stepNanos
+        else stepNanos + ((rnd.nextDouble() * 2 - 1) * jitterFraction * stepNanos).toLong()
 
     /** Hits per operation; the last entry counts slots that held no operation. */
     val counters = LongArray(OP_COUNT + 1)
@@ -139,7 +217,7 @@ class Sampler(private val stepNanos: Long, private val wait: WaitStrategy) : Thr
 
     override fun run() {
         val slots = Profiler.slots()
-        var next = System.nanoTime() + stepNanos
+        var next = System.nanoTime() + nextInterval()
         var prev = 0L
         var first = 0L
 
@@ -149,7 +227,7 @@ class Sampler(private val stepNanos: Long, private val wait: WaitStrategy) : Thr
             val now = System.nanoTime()
 
             for (s in slots) {
-                val c = s.current
+                val c = s.getOpaque()
                 counters[if (c < 0) OP_COUNT else c]++
             }
             ticks++
@@ -164,11 +242,11 @@ class Sampler(private val stepNanos: Long, private val wait: WaitStrategy) : Thr
             prev = now
             span = now - first
 
-            next += stepNanos
+            next += nextInterval()
             // Fell behind by more than a whole step: resync rather than fire a burst of catch-up
             // ticks, which would bunch samples and distort the shares.
             if (next <= now) {
-                next = now + stepNanos
+                next = now + nextInterval()
                 lagged++
             }
         }
