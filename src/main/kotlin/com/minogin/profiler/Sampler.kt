@@ -2,11 +2,28 @@ package com.minogin.profiler
 
 import java.lang.invoke.MethodHandles
 import java.lang.invoke.VarHandle
+import java.util.Locale
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.LockSupport
+import kotlin.math.sqrt
 
 /** Slot value meaning "this thread is not inside any instrumented operation right now". */
 const val NO_OP = -1
+
+/**
+ * Ceiling on how many distinct operations may be registered.
+ *
+ * Fixed rather than growable on purpose. The hot path indexes a counter array by operation id, and
+ * a growable array would need either an indirection through a volatile reference or a copy that
+ * races with the writers. A fixed ceiling costs 2 KB of counters per thread and nothing on the hot
+ * path, and 256 hand-placed labels is far past what anyone will write.
+ */
+const val MAX_OPERATIONS = 256
+
+/** Where the sampler counts slots that held no operation. */
+const val NO_OP_INDEX = MAX_OPERATIONS
 
 /**
  * One thread's slot: the id of the operation that thread is currently inside.
@@ -69,7 +86,7 @@ class OpSlot {
      * operation call — exactly the traffic false sharing punishes hardest.
      */
     @JvmField
-    val counts = LongArray(OP_COUNT + 2 * COUNT_PAD)
+    val counts = LongArray(MAX_OPERATIONS + 2 * COUNT_PAD)
 
     fun count(id: Int) {
         counts[id + COUNT_PAD]++
@@ -113,6 +130,35 @@ object Profiler {
         s
     }
 
+    private val names = arrayOfNulls<String>(MAX_OPERATIONS)
+    private val ids = ConcurrentHashMap<String, Int>()
+    private val nextId = AtomicInteger(0)
+
+    /** Calls from threads that have already exited, folded in so a report does not lose them. */
+    private val retiredCounts = LongArray(MAX_OPERATIONS)
+
+    @Volatile
+    private var sampler: Sampler? = null
+    private var startedAt: Long = 0
+
+    /**
+     * Id for an operation name, assigned on first call and stable thereafter. Idempotent, so it is
+     * safe to call from a static initialiser, a lazy holder, or once per call site.
+     *
+     * Do this at startup, not on the hot path — it takes a map lookup, which is many times the cost
+     * of the hook it feeds.
+     */
+    fun register(name: String): Int = ids.computeIfAbsent(name) {
+        val id = nextId.getAndIncrement()
+        check(id < MAX_OPERATIONS) { "more than $MAX_OPERATIONS distinct operations registered" }
+        names[id] = name
+        id
+    }
+
+    fun nameOf(id: Int): String = names[id] ?: "op#$id"
+
+    fun registeredCount(): Int = nextId.get()
+
     /** The calling thread's slot, registering it on first call. */
     fun slot(): OpSlot = local.get()
 
@@ -121,14 +167,102 @@ object Profiler {
      * its slot reads empty forever, inflating the sampler's denominator and — worse for occupancy
      * work — counting a dead thread as an idle one. A registry that only ever grows is also a
      * plain leak in anything long-lived with a thread pool that recycles.
+     *
+     * Its call counts are folded into the retired totals first, or a pool that recycles threads
+     * would silently lose everything the retired ones did.
      */
     fun release() {
-        allSlots.remove(local.get())
+        val s = local.get()
+        synchronized(retiredCounts) {
+            for (id in 0 until MAX_OPERATIONS) retiredCounts[id] += s.countOf(id)
+        }
+        allSlots.remove(s)
         local.remove()
     }
 
     /** Every live registered slot. Read by the sampler. */
     fun slots(): List<OpSlot> = allSlots
+
+    /** Total calls of an operation: live threads plus those that have already exited. */
+    fun callsOf(id: Int): Long =
+        synchronized(retiredCounts) { retiredCounts[id] } + allSlots.sumOf { it.countOf(id) }
+
+    /** Starts sampling. One sampler at a time. */
+    fun start(stepMillis: Double = 1.0, wait: WaitStrategy = WaitStrategy.SPIN, jitter: Double = 0.25) {
+        check(sampler == null) { "already sampling" }
+        startedAt = System.nanoTime()
+        sampler = Sampler((stepMillis * 1_000_000).toLong(), wait, jitter).also { it.start() }
+    }
+
+    /** Stops sampling and returns what was collected. */
+    fun stop(): Report {
+        val s = checkNotNull(sampler) { "not sampling" }
+        s.shutdown()
+        sampler = null
+        val duration = System.nanoTime() - startedAt
+        val stats = (0 until registeredCount()).map { id ->
+            OperationStat(id, nameOf(id), s.counters[id], callsOf(id))
+        }
+        return Report(stats, s.counters[NO_OP_INDEX], s.ticks, s.span, duration, s.maxSlots)
+    }
+}
+
+/** One operation's line in a [Report]. */
+class OperationStat(val id: Int, val name: String, val hits: Long, val calls: Long)
+
+/**
+ * What a sampling session collected.
+ *
+ * Shares are over *labelled* samples. Samples that caught a thread outside any operation are
+ * reported separately as [idleHits] rather than folded into the denominator — mixing them in would
+ * make every share depend on how much uninstrumented code happened to be running.
+ */
+class Report(
+    val operations: List<OperationStat>,
+    val idleHits: Long,
+    val ticks: Long,
+    val samplingSpanNanos: Long,
+    val durationNanos: Long,
+    val threads: Int,
+) {
+    val labelledHits: Long get() = operations.sumOf { it.hits }
+
+    fun shareOf(op: OperationStat): Double =
+        if (labelledHits == 0L) 0.0 else op.hits.toDouble() / labelledHits
+
+    /** Error chance alone would produce at this hit count — anything smaller is not measurable. */
+    fun noiseFloorOf(op: OperationStat): Double =
+        if (op.hits > 0) 1.0 / sqrt(op.hits.toDouble()) else Double.NaN
+
+    fun render(): String = buildString {
+        val achieved = if (ticks > 1) samplingSpanNanos.toDouble() / (ticks - 1) / 1e6 else Double.NaN
+        appendLine("=".repeat(84))
+        appendLine(
+            String.format(
+                Locale.ROOT, "%,d labelled samples over %.1f s, %,d ticks at %.3f ms, %d threads",
+                labelledHits, durationNanos / 1e9, ticks, achieved, threads
+            )
+        )
+        appendLine(
+            String.format(
+                Locale.ROOT, "outside any operation: %,d samples (%.1f%% of all)",
+                idleHits, idleHits * 100.0 / (labelledHits + idleHits).coerceAtLeast(1)
+            )
+        )
+        appendLine("=".repeat(84))
+        appendLine(String.format(Locale.ROOT, "%-32s %10s %14s %9s %8s", "operation", "share", "calls", "hits", "noise"))
+        appendLine("-".repeat(84))
+        for (op in operations.sortedByDescending { it.hits }) {
+            appendLine(
+                String.format(
+                    Locale.ROOT, "%-32s %9.3f%% %,14d %9d %7.2f%%",
+                    op.name, shareOf(op) * 100, op.calls, op.hits, noiseFloorOf(op) * 100
+                )
+            )
+        }
+        appendLine("-".repeat(84))
+        appendLine("share is of labelled samples; noise is 1/sqrt(hits), the error chance alone gives")
+    }
 }
 
 /**
@@ -200,13 +334,16 @@ class Sampler(
         else stepNanos + ((rnd.nextDouble() * 2 - 1) * jitterFraction * stepNanos).toLong()
 
     /** Hits per operation; the last entry counts slots that held no operation. */
-    val counters = LongArray(OP_COUNT + 1)
+    val counters = LongArray(MAX_OPERATIONS + 1)
 
     var ticks: Long = 0; private set
     var lagged: Long = 0; private set
     var minStep: Long = Long.MAX_VALUE; private set
     var maxStep: Long = 0; private set
     var span: Long = 0; private set
+
+    /** Most slots seen at any one tick. Read after the fact, when the threads may already be gone. */
+    var maxSlots: Int = 0; private set
 
     @Volatile private var running = true
 
@@ -228,8 +365,9 @@ class Sampler(
 
             for (s in slots) {
                 val c = s.getOpaque()
-                counters[if (c < 0) OP_COUNT else c]++
+                counters[if (c < 0) NO_OP_INDEX else c]++
             }
+            if (slots.size > maxSlots) maxSlots = slots.size
             ticks++
 
             if (prev == 0L) {

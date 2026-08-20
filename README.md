@@ -86,7 +86,31 @@ of those per call cost 16% of throughput. Opaque access emits no barrier while s
 the JIT from optimising the write away. It compiles to the same instruction a relaxed store in C
 or Rust would, which is why a native implementation would not help.
 
-## Running it
+## Using it
+
+Everything a caller needs, and there is nothing else:
+
+```kotlin
+val parse = Profiler.register("parseRecord")     // once, at startup — keep the id
+
+Profiler.start(stepMillis = 1.0)
+
+s = op(parse) { parseRecord(input) }             // wrap the work; nesting is fine
+
+println(Profiler.stop().render())
+```
+
+`./gradlew run --args="--demo"` runs exactly that against a toy workload and prints the report, so
+there is a working example to copy. Up to 256 operations, registered by name at runtime. Call
+`Profiler.release()` when a thread exits, or dead threads keep reading as idle ones.
+
+**One trap worth knowing.** A label is only a boundary if the compiler cannot see through it. Three
+adjacent tiny operations whose work has compile-time-constant bounds get unrolled and interleaved,
+and the shares come out wrong — we measured 0.46% where 8.7% was correct. Opaque slot writes stop
+the labels being reordered against *each other*; they do not fence anything else. See
+`docs/findings.md`.
+
+## Running the bench
 
 Needs a JDK; Gradle provisions the toolchain itself.
 
@@ -96,6 +120,8 @@ Needs a JDK; Gradle provisions the toolchain itself.
 ./gradlew run --args="--sweep=1,2,4,8,16"      # the bench across thread counts
 ./gradlew run --args="--hook"                  # what the instrumentation costs
 ```
+
+`--demo` uses only the public API and touches none of the bench machinery.
 
 Useful flags: `--threads`, `--seconds`, `--step` (sampling interval, ms), `--active` (starve some
 threads), `--labels=off`, `--sampler=off`, `--jitter=off`.

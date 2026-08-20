@@ -110,6 +110,13 @@ fun main(args: Array<String>) {
         }
     }
 
+    // Before anything else: the demo must see a profiler nobody has touched, or the bench's own
+    // twenty operations appear in its report carrying counts from the warm-up.
+    if (opt["demo"] != null) {
+        runApiDemo(threads, seconds)
+        return
+    }
+
     println("=".repeat(96))
     println("PHASE 1 — BENCH + PHASE 2 — SAMPLER")
     if (sweep != null) {
@@ -127,6 +134,7 @@ fun main(args: Array<String>) {
     // --- Provisional calibration ----------------------------------------------------
     // The cost of a busy-loop iteration is not a constant: it is taken at runtime, and only
     // after a warm-up.
+    registerOperations()
     warmUpBurn(500)
     val provisional = calibrate()
     println("\n--- Busy-loop calibration (provisional, before the workload warm-up) ---")
@@ -439,6 +447,66 @@ private fun runSweep(
 }
 
 /**
+ * Everything a third party has to do to use this, and nothing else. No bench, no truth, no
+ * calibration — register some names, wrap some code, start, stop, print.
+ *
+ * This exists to be copied. It is also the only test that the public surface works without the
+ * bench's machinery propping it up.
+ */
+private fun runApiDemo(threads: Int, seconds: Int) {
+    // 1. Register at startup. Idempotent, so a `val` in an object works; keep the id.
+    val parse = Profiler.register("parseRecord")
+    val validate = Profiler.register("validateRecord")
+    val index = Profiler.register("indexRecord")
+
+    println("profiling $threads threads for $seconds s\n")
+
+    // Read from an array, not written as literals. With constant trip counts the JIT unrolls all
+    // three loops, inlines them into one body, and interleaves them freely — and opaque access
+    // does not prevent that. It stops the label writes being eliminated or reordered against each
+    // other; it creates no ordering with anything else. Written as literals this demo reported
+    // indexRecord at 0.46% against 8.7% by construction, because the work had been shuffled across
+    // the boundaries its labels claimed.
+    val work = intArrayOf(40, 120, 15)
+
+    // 2. Start sampling.
+    Profiler.start(stepMillis = 1.0)
+
+    val deadline = System.nanoTime() + seconds * 1_000_000_000L
+    val workers = List(threads) { n ->
+        Thread {
+            var s = (n + 1).toLong()
+            try {
+                while (System.nanoTime() < deadline) {
+                    // 3. Wrap the work. Nesting is fine; the innermost label wins.
+                    s = op(parse) { burn(s, work[0]) }
+                    s = op(validate) { burn(s, work[1]) }
+                    s = op(index) { burn(s, work[2]) }
+                }
+            } finally {
+                Sink.consume(s)
+                // 4. Release on thread exit, so a dead thread stops reading as an idle one.
+                Profiler.release()
+            }
+        }.also { it.start() }
+    }
+    workers.forEach { it.join() }
+
+    // 5. Stop and read.
+    println(Profiler.stop().render())
+
+    val ratio = work[1].toDouble() / work.sum()
+    println(
+        String.format(
+            Locale.ROOT,
+            "%nby construction validateRecord does %.1f%% of the busy-loop work — that is the number",
+            ratio * 100
+        )
+    )
+    println("to compare the share above against; the rest is dispatch outside any operation")
+}
+
+/**
  * What the hook costs, read two independent ways: timed alone, and as the difference between a
  * leaf operation with and without it, across every duration the bench has.
  *
@@ -557,7 +625,7 @@ private fun compare(cell: Cell, outcome: Outcome, sampler: Sampler): Comparison 
     val hits = LongArray(OP_COUNT) { sampler.counters[it] }
     val labelled = hits.sum()
     val total = sampler.totalSamples()
-    val idleShare = if (total == 0L) 0.0 else sampler.counters[OP_COUNT].toDouble() / total
+    val idleShare = if (total == 0L) 0.0 else sampler.counters[NO_OP_INDEX].toDouble() / total
 
     val measured = DoubleArray(OP_COUNT) { if (labelled == 0L) 0.0 else hits[it].toDouble() / labelled }
     val diffPp = DoubleArray(OP_COUNT) { (measured[it] - outcome.shareA[it]) * 100 }
@@ -1008,9 +1076,9 @@ private fun printSampler(sampler: Sampler, stepMillis: Double, runNanos: Long, w
     println(String.format(Locale.ROOT, "  covered %.2f%% of the run", sampler.span.toDouble() / runNanos * 100))
 
     println(String.format(Locale.ROOT, "\n  %-14s %14s %9s", "operation", "hits", "of total"))
-    for (id in (0..OP_COUNT).sortedByDescending { sampler.counters[it] }) {
+    for (id in (0 until OP_COUNT).sortedByDescending { sampler.counters[it] } + listOf(NO_OP_INDEX)) {
         val hits = sampler.counters[id]
-        val name = if (id == OP_COUNT) "(no operation)" else OPS[id].name
+        val name = if (id == NO_OP_INDEX) "(no operation)" else OPS[id].name
         println(
             String.format(
                 Locale.ROOT, "  %-14s %,14d %8.3f%%",

@@ -11,7 +11,8 @@ live in [profiler.md](profiler.md).
 | 1 | The bench — a workload whose true answer is known | **done** |
 | 2 | The fine tier — slots, hook, sampling thread | **done** |
 | 3 | Verification — sampler against the truth | **done** |
-| 4 | The coarse tier — contexts, spans, cross-tabulation | next |
+| — | Trial — the fine tier on somebody else's code | **next** |
+| 4 | The coarse tier — contexts, spans, cross-tabulation | after the trial |
 | 5 | Crossing threads — propagation, and per-operation parallelism | not started |
 | 6 | Thread state and the whole-application parallelism coefficient | not started |
 | 7 | Library surface — annotations, agent, results API | not started |
@@ -131,7 +132,54 @@ effect.
 
 **3. Unsynchronised slot reads do not smear the picture.** Follows from 1 holding.
 
-## Phase 4 — the coarse tier · next
+## Trial — the fine tier on somebody else's code · next
+
+Everything so far is self-referential: we built a bench, built a tool, and proved the tool reads
+the bench. That proves the **instrument** works. It says nothing about whether the **tool** is
+useful, and the decisions about to be taken in phase 4 — the context API, where propagation hooks
+go, what the report says — are precisely what a real trial would inform. Doing it after would mean
+designing against a workload we invented.
+
+**The qualifying test for a candidate.** Not "is it CPU-bound" — necessary but weak. The question
+is:
+
+> Does a conventional flame graph fail to answer the question, in the characteristic way?
+
+That is: the profile is dominated by `HashMap.get`, `equals`, `visit()` — generic machinery,
+correctly identified as hot, telling you nothing about what the program was *doing*. When someone
+looks at that and says "yes, and?", domain labels are the answer. If async-profiler already names a
+culprit, no new tool is needed and the trial proves nothing.
+
+So the first step on any candidate is to profile it conventionally and check whether the flame
+graph disappoints.
+
+**Candidate: Apache Calcite query planning.** Pure CPU, entirely in memory, reproducible from a
+single complex query with no data at all — which is what killed an earlier attempt on DHIS2, where
+the pain needed a 700 GB database. Planning time growing badly with query complexity is a familiar
+complaint. And the hot path is rule matching and expression-tree traversal, so a flame graph shows
+`RelOptRuleCall` and `HashMap` rather than "matching rule *X* against subtree *Y*". Verify the
+current state before committing — this may have moved.
+
+Fallbacks if it does not qualify: static analysis (PMD, SpotBugs, Error Prone) — reproducible
+against any codebase, millions of tiny AST visits, flame graph wall-to-wall `visit()` and
+`accept()`. Then Lucene analysis and indexing, then Drools rule matching.
+
+**Two deliverables, and the second is the one that gets forgotten:**
+
+- **A finding** — something actionable about the target.
+- **The friction** — where labels were awkward to place, where the coarse/fine boundary was
+  unclear, where the output did not say what was needed. This is what feeds phase 4, and it is what
+  gets dropped when the finding goes well.
+
+**What exists to do it with.** `Profiler.register(name)`, `op(id) { }`, `Profiler.start()`,
+`Profiler.stop().render()`. `--demo` in this repo is a complete worked example using nothing but
+that surface. Registration is by name at runtime, up to 256 operations, and slots are released on
+thread exit so pools that recycle do not lose counts.
+
+**What does not exist yet:** no annotations, no agent, no JFR, no coarse tier. Labels go in by hand,
+which is itself part of what the trial is measuring.
+
+## Phase 4 — the coarse tier · after the trial
 
 Contexts, spans, and the cross-tabulation. Same-thread to begin with — crossing threads is phase 5,
 and the two are worth separating so that propagation bugs cannot be confused with tier bugs.

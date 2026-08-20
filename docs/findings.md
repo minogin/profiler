@@ -158,6 +158,24 @@ label is set, so the cost lands on the operation rather than its caller.
 means the instrument costs more than the thing it measures. The practical floor is a few tens of
 nanoseconds; below that, label the enclosing loop and divide.
 
+**Opaque labels do not fence the work between them, and the JIT will move it.** The API demo
+originally wrote its three operations with literal trip counts — `burn(s, 40)`, `burn(s, 120)`,
+`burn(s, 15)` — all inlined into one loop body over a single dependency chain. Measured shares came
+out **19.4% / 78.4% / 0.46%** against **22.9% / 68.6% / 8.7%** by construction: the shortest
+operation lost 95% of itself.
+
+Opaque access guarantees the label writes are not eliminated, duplicated, or reordered against
+*each other*. It creates no ordering with anything else. With constant trip counts the JIT unrolls
+all three loops, interleaves them, and the boundaries the labels claim are not the boundaries the
+CPU executes. Reading the counts from an array instead — so the loops cannot be fully unrolled —
+gave 19.4% / 71.8% / **8.80%**, with the shortest operation landing on its 8.6% expectation.
+
+The bench never showed this because its trip counts come from `iters[id]`. Real code rarely looks
+like the broken version either, but the limit is real: **a label is only a boundary if the compiler
+cannot see through it**, and adjacent tiny operations with compile-time-constant work are exactly
+where it can. Worth knowing before someone labels three consecutive constant-size loops and
+believes the answer.
+
 ## The sampler
 
 **Parking cannot hold a millisecond step under load.** Measured at a 1 ms request with 8 workers

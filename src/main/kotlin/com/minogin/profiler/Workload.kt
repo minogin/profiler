@@ -38,6 +38,20 @@ val OPS = arrayOf(
     /* 19 */ OpSpec("traverse", 60.0, 13, 14),
 )
 
+/**
+ * Registers the catalogue with the profiler, checking that ids come back matching array indices.
+ *
+ * The bench indexes [OPS] by operation id throughout, which is only valid because it registers its
+ * operations first and in order. A library user has no such luxury and must keep the id `register`
+ * hands back.
+ */
+fun registerOperations() {
+    for (id in 0 until OP_COUNT) {
+        val assigned = Profiler.register(OPS[id].name)
+        check(assigned == id) { "${OPS[id].name} got id $assigned, expected $id" }
+    }
+}
+
 /** How many times the worker loop calls an operation over one pass of the schedule. */
 val ROOT_WEIGHTS = IntArray(OP_COUNT).also {
     it[18] = 2000  // very frequent and very short
