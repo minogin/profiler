@@ -123,31 +123,34 @@ an unrolled loop; three separate places where measuring things sequentially alia
 onto the comparison; why 8 threads is the worst case for measurement stability on a hybrid CPU
 while 16 is fine; and why percentage points cannot tell noise from bias while standard errors can.
 
-## Status
+## Where it is going
 
-The method is validated for **self** time: the bench, the sampler and the verification are done,
-and the numbers above are what came out.
+What works today is the **fine tier** — physical operations, identified by an integer in a
+thread-local slot and measured by sampling. That answers *which operation is hot*.
 
-Still between here and a usable library:
+The tool being built has a second tier above it. **Coarse operations** are logical units of work —
+expanding a frontier, applying a filter set, serving a query — thousands of executions rather than
+billions, milliseconds rather than nanoseconds, and crossing thread boundaries freely. Those get a
+real context object: allocated, propagated across hand-offs, timestamped at both ends. At a
+millisecond an allocation and two clock reads are free; at twenty nanoseconds they are impossible.
 
-- **Inclusive time.** The slot holds the innermost operation, so a parent's share is only the work
-  it does outside its children — `frontierStep` is 5.8% self against 51.9% inclusive, and those
-  point at completely different fixes.
-- **Thread state and an empirical parallelism coefficient.** The sampler snapshots every thread at
-  one instant, so "how many were busy at once" is already in the data. Ordinary profilers destroy
-  that by summing per thread.
-- **Coroutines.** Without a bridge the method does not merely lose data, it invents it: a coroutine
-  that suspends without clearing its slot leaves its label on a thread that goes on to do something
-  else entirely.
-- **The library surface.** Two ways of placing labels, because operations do not always coincide
-  with method boundaries: `@Profiled("expand")` on a method transformed by a bytecode agent, and
-  explicit calls for a loop body or half a method. Plus operations registered at runtime rather
-  than from a fixed array, and results read through an API instead of `println`.
-- **JFR output.** As the transport, not the mechanism — an event per operation is hopeless at
-  these costs, but one aggregated event per second lands in a format people already have tooling
-  for.
+The two meet at the slot, which carries the current fine operation *and* the current coarse
+context. So every sample records the pair, and the result is not just a list of hot operations:
 
-Constraint carried throughout: it must not require you to hand over your thread creation. That
+> Of the 400 ms of CPU under "apply filters", 180 ms was `matchCondition`, and it ran at 3.7×
+> parallelism.
+
+Neither tier gives you that alone. Fine sampling says what is hot but not what it was for; coarse
+spans say where the time went but not why. The parallelism figure needs both — CPU comes from
+samples across every thread, the span from the context, and their ratio is how well that operation
+actually spread out.
+
+**Still to build:** the coarse tier, propagation across thread boundaries (executors, coroutines,
+futures), thread state and a whole-application parallelism coefficient, the library surface
+(annotations plus a bytecode agent, and explicit calls where operations do not align with methods),
+and JFR as an output format.
+
+**Constraint carried throughout:** it must not require you to hand over your thread creation. That
 ruled out an otherwise attractive optimisation, and it is why the sampler is built the way it is.
 
-See `docs/plan.md` for where things stand, and `docs/profiler.md` for the design and the prior art.
+See `docs/plan.md` for where things stand and `docs/profiler.md` for the design and the prior art.

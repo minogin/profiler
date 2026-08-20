@@ -84,6 +84,63 @@ Somebody has to say where an operation begins and ends. That is irreducible: the
 cannot be recovered from outside the code, which is exactly why stack-based tools fail here. What
 can vary is how the labels get into the code — see *Delivery* below.
 
+## Two tiers
+
+Everything above is thread-scoped: the slot lives on a thread and the sampler walks threads. A
+logical operation that forks across four threads appears as four unrelated operations, because
+nothing ties them together.
+
+Tying them together needs an identity that travels — a context object propagated at every
+hand-off — and you cannot allocate one per twenty-nanosecond operation executed billions of times.
+So the two cannot share a mechanism, and the tool has two tiers.
+
+**Fine — physical operations.** A hash probe, one filter condition. Billions of executions, tens of
+nanoseconds, calling nothing interesting. An integer in a thread slot, measured by sampling. No
+identity, no allocation, no timestamps. Self time is all they have, and since they are atomic, self
+time *is* their inclusive time.
+
+**Coarse — logical operations.** Expanding a frontier, applying a filter set. Thousands of
+executions, milliseconds each, crossing threads freely. A context object with a type, a parent
+reference and timestamps at both ends. At these durations a clock read costs nothing.
+
+**They meet at the slot**, which carries the fine operation id *and* a reference to the current
+coarse context. Every sample records the pair.
+
+### Two quantities both called "inclusive"
+
+Take a parent doing 10 ms of its own work, forking four children of 100 ms each, and waiting.
+
+- **Subtree thread-time — 410 ms.** All the CPU consumed by this operation and everything under it.
+- **Own span — 110 ms.** How long the operation took, start to finish.
+
+In sequential code they coincide. In parallel code they diverge, **and their ratio is the effective
+parallelism of that operation** — 3.7× here. Not the whole-application coefficient, but per
+operation: *this* subtree spreads out well, *that* one does not.
+
+The two tiers produce one each. Sampling under a propagated context gives the thread-time, because
+samples on every thread carry the context. The context's own timestamps give the span. Neither
+alone answers the question.
+
+### What this replaces
+
+An earlier design derived inclusive time from a per-thread stack of ids. That brought torn reads,
+recursion handling, and the problem that a stack is far harder to carry across a coroutine
+suspension than a single value — and it could never have crossed a thread boundary at all, since a
+forked child's stack does not contain the parent that forked it. The two-tier arrangement dissolves
+all of it.
+
+### Aggregation
+
+Per coarse *type*, not per instance: fifty types is bounded, fifty thousand executions is not.
+Instances fold into their type's statistics and are forgotten.
+
+Spans are measured exactly, so they support a full distribution — count, mean, min, max and
+percentiles from a logarithmic-bucket histogram at fixed memory cost. CPU is *sampled*, so
+per-instance CPU and parallelism are meaningful only for instances long enough to have collected
+samples: an 8 ms instance at a 1 ms tick with four threads busy gathers around 32, a 100 µs
+instance gathers zero. Statistics over those must be computed above a sample threshold, and the
+report has to say how many instances it left out.
+
 ## The coroutine bridge
 
 Without it the method does not merely lose data, it invents it. Two failure modes:

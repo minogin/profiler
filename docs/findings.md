@@ -224,11 +224,13 @@ whole effect, subtracting the modelled part leaves us confident and wrong. There
 model-free route: measure at two hook costs (adding a known delay before the label) and
 extrapolate to zero, with a third point validating linearity.
 
-**The bench cannot produce time-varying occupancy.** Every thread runs the same mix flat out.
-Phase 5's interesting shapes — level barriers, stragglers, lock convoys — need a workload whose
-parallelism changes over time, and whose true occupancy is still knowable. Occupancy is emergent
-rather than configured, so the ground truth would have to be recorded (per-level timestamps)
-rather than computed.
+**The bench distributes no work.** Every thread independently runs the same schedule flat out, so
+nothing ever crosses a thread boundary and occupancy never varies. Two later phases need more:
+cross-thread coarse operations need fork and join, and the interesting occupancy shapes — level
+barriers, stragglers, lock convoys — need parallelism that changes over time. Building work
+distribution once serves both. Note that occupancy is emergent rather than configured, so its
+ground truth has to be *recorded* (per-phase timestamps) rather than computed, which is a
+departure from how every truth in this project has worked so far.
 
 **The fit tolerance should scale with achievable quantisation** rather than being a fixed 3%.
 
