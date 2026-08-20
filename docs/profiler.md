@@ -1,155 +1,239 @@
-# Сэмплирование с метками операций — дизайн
+# Sampling with operation labels — the design
 
-Черновик по итогам обсуждения 18.08.2026. Всё, что здесь есть, требует проверки на реальном коде.
+The original idea, written up 18.08.2026 and revised as things were measured. Numbers that have
+since been established by experiment are marked as such; the rest is still reasoning.
 
-## Задача
+## The problem
 
-In-memory граф. \~20 разных операций, каждая выполняется миллионы раз, каждая очень короткая (десятки–сотни наносекунд). Работа запараллелена и идёт в корутинах, распределение сложное. Вопрос: какая из операций съедает время.
+A class of workload that ordinary profilers cannot answer questions about: a few dozen distinct
+operations, each executed millions of times, each taking tens to hundreds of nanoseconds, running
+in parallel with a complicated distribution of work. Which operation is eating the time?
 
-Почему существующие инструменты не отвечают:
+An in-memory graph engine is the example this started from — expanding a frontier, probing a hash
+map, scoring a node — but nothing about the method is specific to graphs. Any system with hot,
+short, repeated operations has the same problem.
 
-- **Гранулярность.** Сэмплирование с шагом в миллисекунды не видит наносекундную операцию как отдельную сущность. После инлайнинга JIT она может вообще исчезнуть как фрейм.  
-- **Инструментация таймером не годится.** `System.nanoTime()` стоит порядка двух-трёх десятков наносекунд — замер операции длиной 200 нс исказил бы её на десятки процентов.  
-- **Корутины.** Стек потока не соответствует логической задаче: работа размазана по потокам диспетчера, приостановки рвут атрибуцию.
+Why the usual tools do not answer it:
 
-Отсюда текущий обходной путь — мерить тотал и считать количество операций счётчиками. Количество вместо времени.
+- **Granularity.** Sampling stack traces every few milliseconds cannot see a 200 ns operation as a
+  distinct thing. After inlining it may not exist as a frame at all.
+- **Timer instrumentation is worse than useless here.** `System.nanoTime()` costs twenty to thirty
+  nanoseconds. Measuring a 200 ns operation with it distorts the result by tens of percent.
+- **Coroutines break attribution.** The thread stack does not correspond to the logical task: work
+  is spread across dispatcher threads and suspensions cut the trail.
 
-## Идея
+Which leaves counting operations instead of timing them — how often, never how long.
 
-Не измерять операцию, а **считать попадания в неё**. Метод Монте-Карло.
+## The idea
 
-У каждого рабочего потока — слот с номером операции, которая на нём сейчас выполняется. На входе в операцию слот выставляется, на выходе восстанавливается прежнее значение. Отдельный поток-сэмплер раз в \~1 мс обходит все рабочие потоки, читает слоты и увеличивает счётчики по номерам.
+Do not measure the operation. **Count how often a random glance catches a thread inside it.**
+Monte Carlo.
 
-class OpSlot { @Volatile @JvmField var current: Int \= 0 }
+Each worker thread has a slot holding the id of the operation currently running on it. Entry
+writes the id, exit restores the previous value. A separate sampling thread wakes every
+millisecond or so, reads every slot, and increments a counter per id.
 
-inline fun \<T\> op(id: Int, body: () \-\> T): T {
-
-    val slot \= slotOfCurrentThread
-
-    val prev \= slot.current
-
-    slot.current \= id
-
-    try { return body() } finally { slot.current \= prev }
-
+```kotlin
+inline fun <T> op(id: Int, body: () -> T): T {
+    val slot = Profiler.slot()
+    val prev = slot.getOpaque()
+    slot.setOpaque(id)
+    try { return body() } finally { slot.setOpaque(prev) }
 }
 
-// поток-сэмплер, раз в 1 мс:
+// the sampling thread, every ~1 ms:
+for (slot in allSlots) counters[slot.getOpaque()]++
+```
 
-for (slot in allSlots) counters\[slot.current\]++
+Restoring the previous value rather than clearing it is what lets operations nest.
 
-Восстановление прежнего значения (а не обнуление) позволяет операциям вкладываться друг в друга.
+### Why it works on nanosecond operations
 
-### Почему это работает на наносекундных операциях
+You never need to catch an individual call. The probability that a random sample finds a thread
+inside operation 7 *is* the share of time that operation takes. Twenty operations, a minute, eight
+threads, a millisecond step — about half a million samples, so an operation holding 5% of the time
+collects tens of thousands of hits. Accuracy comes from the number of samples, not from the
+resolution of a clock.
 
-Ловить одно обращение к мапе не нужно. Вероятность того, что случайный сэмпл застанет поток внутри операции №7, равна доле времени этой операции. 20 операций, минута прогона, 8 потоков, шаг 1 мс — порядка полумиллиона сэмплов. Операция с долей 5% наберёт тысячи попаданий. Точность растёт от количества сэмплов, а не от разрешения таймера.
+**Confirmed by experiment.** At 476,000 samples the top ten of twenty operations came out in the
+same order as an independently computed truth, and the largest consumers were accurate to within
+one percent of themselves.
 
-### Почему это дёшево
+### Why it is cheap
 
-На входе-выходе — запись одного числа, единицы наносекунд. Измерения времени нет вообще, наблюдатель почти не влияет на наблюдаемое.
+Entry and exit write one integer each. No time is measured anywhere.
 
-### Чем лучше обычного профайлера здесь
+**Measured: 1.7–2.3 ns per hook call**, roughly 2% of a call-weighted mean operation of 88 ns.
 
-- Не ходит по стекам: нет safepoint bias, инлайнинг метку не съедает — она стоит в коде явно.  
-- Параллелизм учитывается сам собой: сэмплер обходит все потоки.  
-- Метка своя, в терминах предметной области («расширение фронтира»), а не `HashMap.get`.
+That number was not free. The first implementation used a `volatile` slot and cost **16% of
+throughput** — on x86 a volatile store requires a StoreLoad barrier, a lock-prefixed instruction
+of tens of cycles, and the hook does two per call. Opaque access emits no barrier while still
+preventing the JIT from eliminating the write. Since an opaque store compiles to the same
+instruction a relaxed store in C or Rust would, a native implementation would gain nothing here.
 
-## Мост к корутинам
+### Why it beats a general profiler for this
 
-Без него метод даёт не пробелы, а **ложные данные**. Две поломки:
+- It does not walk stacks: no safepoint bias, and inlining cannot eat a label that is written
+  explicitly in the code.
+- Parallelism is accounted for naturally — the sampler visits every thread.
+- The label is in domain terms ("expanding the frontier") rather than `HashMap.get`.
 
-- **Потеря.** Корутина возобновилась на другом потоке, слот там никто не выставил — работа не приписана ни к чему, операция выглядит дешевле, чем есть.  
-- **Загрязнение (хуже).** Корутина ушла в приостановку, не почистив слот. На этот поток сел кто-то другой, а слот всё ещё говорит «expand» — чужая работа записывается на счёт экспансии. По таким данным оптимизируется не та операция.
+### What it costs you
 
-Крючок в kotlinx-coroutines: `ThreadContextElement` вызывает `updateThreadContext` перед возобновлением корутины на потоке и `restoreThreadContext` после её приостановки. Это ровно «монтирование / размонтирование».
+Somebody has to say where an operation begins and ends. That is irreducible: the domain knowledge
+cannot be recovered from outside the code, which is exactly why stack-based tools fail here. What
+can vary is how the labels get into the code — see *Delivery* below.
 
-class OpLabel(private val op: String) : ThreadContextElement\<String?\> {
+## The coroutine bridge
 
-    companion object Key : CoroutineContext.Key\<OpLabel\>
+Without it the method does not merely lose data, it invents it. Two failure modes:
 
-    override val key get() \= Key
+- **Loss.** A coroutine resumes on a different thread where nobody set the slot. The work is
+  attributed to nothing and the operation looks cheaper than it is.
+- **Contamination, which is worse.** A coroutine suspends without clearing its slot. Another
+  coroutine runs on that thread while the slot still says `expand`, and unrelated work is billed
+  to expansion. Optimising from that data means optimising the wrong thing.
+
+kotlinx-coroutines provides the hook: `ThreadContextElement` calls `updateThreadContext` before
+resuming a coroutine on a thread and `restoreThreadContext` after it suspends. That is exactly
+mount and unmount.
+
+```kotlin
+class OpLabel(private val op: String) : ThreadContextElement<String?> {
+    companion object Key : CoroutineContext.Key<OpLabel>
+    override val key get() = Key
 
     override fun updateThreadContext(context: CoroutineContext): String? {
-
-        val prev \= Profiler.currentLabel()
-
+        val prev = Profiler.currentLabel()
         Profiler.setLabel(op)
-
         return prev
-
     }
 
     override fun restoreThreadContext(context: CoroutineContext, oldState: String?) {
-
         Profiler.setLabel(oldState)
-
     }
-
 }
 
 withContext(OpLabel("expand")) { expandFrontier(node) }
+```
 
-Оговорка из документации kotlinx: `restoreThreadContext` может выполняться параллельно с последующими вызовами update/restore, реализация обязана быть потокобезопасной. Для сложной вложенности есть более тяжёлый вариант интерфейса (`CopyableThreadContextElement`).
+The kotlinx documentation warns that `restoreThreadContext` may run concurrently with later
+update/restore calls, so the implementation must be thread-safe. `CopyableThreadContextElement` is
+the heavier option for complicated nesting.
 
-### Пример прогона
+**Open interaction with inclusive attribution.** A single value survives mount and unmount
+trivially. If inclusive time is implemented as a per-thread *stack*, the whole stack has to be
+saved and restored instead, which is materially harder. That may constrain the inclusive design.
 
-Два потока диспетчера, две корутины, шаг сэмплера 1 мс.
+### Worked example
 
-t=0   C1 монтируется на T1 → update: T1.slot \= "expand"
+Two dispatcher threads, two coroutines, a 1 ms step.
 
-t=1   сэмпл: T1="expand", T2=пусто        expand=1
+```
+t=0   C1 mounts on T1        → update: T1.slot = "expand"
+t=1   sample: T1="expand", T2=empty          expand=1
+t=2   sample: T1="expand"                    expand=2
+t=3   C1 reaches a suspension point, unmounts
+      → restore: T1.slot = previous (empty)
+      C2 mounts on T1        → update: T1.slot = "filter"
+t=4   sample: T1="filter"                    filter=1
+t=5   C1 resumes, on T2 now  → update: T2.slot = "expand"
+t=6   sample: T1="filter", T2="expand"       filter=2, expand=3
+t=7   sample: T1="filter", T2="expand"       filter=3, expand=4
+```
 
-t=2   сэмпл: T1="expand"                  expand=2
+## The parallelism coefficient — the main side benefit
 
-t=3   C1 доходит до точки приостановки, размонтируется
+An observation that motivated a lot of this: the empirical parallelism coefficient on a real
+workload came out small — around 3 — with considerably more threads than that, and it was not
+clear why.
 
-      → restore: T1.slot \= прежнее (пусто)
+**The sampler snapshots every thread at one instant.** One tick is a cross-section: who is doing
+what, right now. Existing profilers destroy that by summing time per thread — a flame graph
+cannot answer "how many threads were busy at once", because it is about totals. Here the quantity
+is already in the data.
 
-      C2 монтируется на T1 → update: T1.slot \= "filter"
+**What to record besides the label:** the thread's state — executing an operation, spinning in the
+dispatcher looking for work, parked with nothing to do, blocked on a lock. Without state the
+analysis does not go anywhere.
 
-t=4   сэмпл: T1="filter"                  filter=1
+**What falls out immediately:** a histogram of how often 1, 2, 3, … N threads were busy. Its mean
+is the empirical coefficient. The shape is more interesting than the mean:
 
-t=5   C1 возобновляется, но уже на T2 → update: T2.slot \= "expand"
+- **Always exactly 3 busy, the rest parked** → there is simply no work. A structural limit: in a
+  frontier traversal the level width *is* the parallelism ceiling, and no amount of pool tuning
+  raises it.
+- **Sawtooth — a spike to 16, then a long trough down to 1** → barriers between phases. A mean of
+  3 with peaks at 16 means the joins are the problem, not the work.
+- **All 16 busy, much of it blocked** → serialisation on a shared structure.
+- **All 16 busy, state "executing", and throughput flat** → the threads are running but each one
+  slower. That is memory: contention for bandwidth and cache. The one case where hardware
+  counters are genuinely needed.
 
-t=6   сэмпл: T1="filter", T2="expand"     filter=2, expand=3
+**The decisive fork.** Two opposite diagnoses look identical from outside ("it parallelises
+badly") and can only be told apart by comparing two curves against N = 1, 2, 4, 8, 16 — threads
+busy, and throughput:
 
-t=7   сэмпл: T1="filter", T2="expand"     filter=3, expand=4
+- busy count rises linearly, throughput does not → memory is the limit, adding threads is pointless
+- busy count plateaus at 3 → the problem is work supply, fixed by the scheduler or the traversal
 
-## Коэффициент параллелизации — главный побочный выигрыш
+The share of time spent in the dispatcher comes from the same data — a direct answer to "too much
+management overhead".
 
-Наблюдение: эмпирический коэффициент параллелизации на графе выходил маленьким (\~3) при заметно большем числе потоков, и было непонятно почему.
+**What the sampler cannot see:** *why* there is no work. Telling "the frontier is narrow" from
+"there are tasks but the scheduler has not handed them out" needs the dispatcher's queue length in
+the sample. That is a later addition.
 
-**Сэмплер снимает все потоки одновременно.** Один тик — это срез: кто чем занят прямо сейчас. Существующие профайлеры этот срез разрушают, суммируя время по потокам: флеймграф в принципе не отвечает на вопрос, сколько потоков работало одновременно, потому что он про суммы. Здесь нужная величина уже лежит в данных.
+## Delivery
 
-**Что писать в сэмпл, кроме метки:** состояние потока — выполняет операцию / крутится в диспетчере (ищет работу, ворует задачи) / припаркован без работы / заблокирован на локе. Без состояния разбор не поедет.
+The labels are irreducible, but how they reach the code is a choice, and so is where the results
+come out.
 
-**Что считается сразу:** гистограмма занятости — какую долю времени работал 1 поток, 2, 3, … 16\. Среднее по ней и есть эмпирический коэффициент. Интереснее форма:
+**Labels in.** Both are wanted, because operations do not always coincide with method boundaries:
 
-- **Всегда ровно 3 занято, остальные припаркованы** → работы просто нет. Структурное ограничение: при обходе фронтиром ширина уровня и есть потолок параллелизма, тюнинг пула его не поднимет.  
-- **Пила: всплеск на 16, потом долгий провал до 1** → барьеры между фазами. Среднее 3 при пике 16 значит, что режут стыки, а не сама работа.  
-- **Заняты все 16, но много времени в блокировках** → сериализация на общей структуре.  
-- **Заняты все 16, состояние «выполняет», тотал не падает** → потоки работают, но каждый медленнее. Это память: конкуренция за пропускную способность и кэш. Единственный случай, где нужны аппаратные счётчики.
+- **Annotations plus a bytecode agent** — `@Profiled("expand")` on a method, transformed at class
+  load. No runtime dependency at the call site, attachable to a running JVM, removable by dropping
+  a flag. This is how the established Java APM agents work.
+- **Explicit calls** for everything else — a loop body, half a method, a span across several calls.
 
-**Ключевая развилка.** Различить два противоположных диагноза, которые снаружи выглядят одинаково («параллелится плохо»), можно только сравнив два графика — число занятых потоков и пропускную способность при N \= 1, 2, 4, 8, 16:
+The agent does not fight the JIT: it rewrites bytecode, and C2 still inlines the wrapper
+afterwards.
 
-- занятость растёт линейно, пропускная нет → виновата память, добавлять потоки бессмысленно;  
-- занятость упирается в 3 → проблема в снабжении работой, лечится планировщиком или структурой обхода.
+**Results out.** JFR as the transport, not as the mechanism. A custom JFR event per *operation* is
+hopeless — events cost tens of nanoseconds even without stack traces, and Datadog's attempt at
+scope-events inflated recordings more than tenfold. But one aggregated event per second carrying
+the counters is free, and it lands in a format people already have tooling for.
 
-Побочно оттуда же — доля времени в диспетчере, прямой ответ на «слишком много расходов на менеджмент».
+**Ruled out:**
 
-**Чего сэмплер не увидит:** причину, по которой работы нет. Отличить «фронтир узкий» от «задачи есть, но планировщик их не раздал» без длины очереди диспетчера в момент сэмпла нельзя. Это дописывается, но во втором заходе.
+- **Inferring operations from stack traces** — the thing that already fails. Inlining eats the
+  frames, coroutines break the attribution.
+- **A bridge to async-profiler.** Tempting: its v4 C API exposes thread-local profiling context, so
+  domain labels could ride along with its stack traces and flame graphs. But it samples each
+  thread on its own timer signal, so there is no simultaneous cross-thread snapshot — and that
+  snapshot is exactly what makes the parallelism coefficient possible. It could answer "which
+  operation is expensive" and never "how many threads were busy at once".
+- **External polling through attach, JMX or the Serviceability Agent** — milliseconds per query,
+  often stopping the world. Three orders of magnitude too slow.
+- **An external sampling process over shared memory.** Technically workable, and it moves the
+  spinning out of the JVM — but not off the machine, since holding a millisecond cadence costs a
+  core either way. A great deal of complexity for a thread that does one microsecond of work per
+  millisecond.
 
-## Что проверить перед реализацией
+## Known prior art (checked 18.08.2026)
 
-- Достаётся ли `Profiler.currentLabel()` — то есть есть ли «получить/установить текущее», или доступен только блочный вызов. Смотреть в исходниках.  
-- Цена `updateThreadContext` на реальной частоте диспетчеризации.  
-- Насколько смазывается доля из\-за того, что сэмплер читает чужой слот без синхронизации и может видеть слегка устаревшее значение.
-
-## Известное окружение (проверено 18.08.2026)
-
-- Штатного аналога Go-шных pprof labels в JVM нет. JFR не позволяет контекстуализировать встроенные события; кастомные события контекст нести могут.  
-- В async-profiler v4.0 вошёл C API для доступа к thread-local контексту профилирования (`asprof_get_thread_local_data`). Более ранний PR \#576 с `setContextId`/`clearContextId` доведён не был; в обсуждении всплыло, что thread-local'ы в общем случае не async-signal-safe, кроме initial-exec.  
-- Datadog: разреженная карта «идентификатор потока → 64-байтный блок контекста», слоты получают смысл в начале сессии и указывают на словарные строки. Их первый подход через события-скоупы развалился на асинхронных приложениях — запись раздувалась более чем в 10 раз.  
-- В dd-trace-java есть проброс контекста в виртуальные потоки (ноябрь 2025): состояние захватывается при создании, активируется при монтировании продолжения, закрывается при размонтировании. Схема аналогична нужной для корутин.  
-- В pyroscope-java метки не пробрасываются на воркер-потоки — issue открыт с января 2026\.
-
+- The JVM has no standard equivalent of Go's pprof labels. JFR cannot contextualise its built-in
+  events; custom events can carry context.
+- async-profiler v4 added a C API for thread-local profiling context
+  (`asprof_get_thread_local_data`). The earlier PR #576 with `setContextId`/`clearContextId` was
+  never finished; the discussion noted that thread-locals are not in general async-signal-safe,
+  except under initial-exec.
+- Datadog uses a sparse map from thread identifier to a 64-byte context block; slots are given
+  meaning at the start of a session and point into a string dictionary. Their first approach,
+  through scope events, fell apart on asynchronous applications — recordings inflated more than
+  tenfold.
+- dd-trace-java propagates context into virtual threads (November 2025): state captured at
+  creation, activated when the continuation mounts, closed when it unmounts. The same shape as
+  what coroutines need.
+- pyroscope-java does not propagate labels to worker threads; the issue has been open since
+  January 2026.

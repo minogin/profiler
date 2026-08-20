@@ -9,10 +9,12 @@ sampler's answer can be checked against it rather than believed.
 
 ## The problem
 
-An in-memory graph engine runs about twenty distinct operations, millions of times each, and every
-one of them takes tens to hundreds of nanoseconds. Which one is the bottleneck?
+Your application runs a few dozen distinct operations, millions of times each, and every one of
+them takes tens to hundreds of nanoseconds. Which is the bottleneck?
 
-Ordinary profilers cannot say.
+An in-memory graph engine is the example this started from — expanding a frontier, probing a hash
+map, scoring a node — but nothing here is specific to graphs. Any system with hot, short, repeated
+operations has the same problem, and ordinary profilers cannot answer it.
 
 - **Sampling stack traces at millisecond intervals** cannot see a 200 ns operation as a distinct
   thing. After inlining it may not exist as a frame at all.
@@ -137,11 +139,15 @@ Still between here and a usable library:
 - **Coroutines.** Without a bridge the method does not merely lose data, it invents it: a coroutine
   that suspends without clearing its slot leaves its label on a thread that goes on to do something
   else entirely.
-- **The library surface itself** — registering operations at runtime rather than from a fixed
-  array, surviving pools that recycle threads, and reporting through an API instead of `println`.
+- **The library surface.** Two ways of placing labels, because operations do not always coincide
+  with method boundaries: `@Profiled("expand")` on a method transformed by a bytecode agent, and
+  explicit calls for a loop body or half a method. Plus operations registered at runtime rather
+  than from a fixed array, and results read through an API instead of `println`.
+- **JFR output.** As the transport, not the mechanism — an event per operation is hopeless at
+  these costs, but one aggregated event per second lands in a format people already have tooling
+  for.
 
 Constraint carried throughout: it must not require you to hand over your thread creation. That
-ruled out an otherwise attractive optimisation, and it is the reason the sampler is built the way
-it is.
+ruled out an otherwise attractive optimisation, and it is why the sampler is built the way it is.
 
-See `docs/plan.md` for where things stand.
+See `docs/plan.md` for where things stand, and `docs/profiler.md` for the design and the prior art.

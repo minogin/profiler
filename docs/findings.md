@@ -232,6 +232,6 @@ rather than computed.
 
 **The fit tolerance should scale with achievable quantisation** rather than being a fixed 3%.
 
-**`profiler.md` has stale claims** — notably that the hook costs "units of nanoseconds" and barely
-perturbs the observed, which was true only after the opaque change, and its
-"what to check before implementing" section is now answered.
+**Can the profiler be left on permanently?** At ~2 ns per hook it may well be cheap enough that
+there is no reason to switch it off, which would be a much better story than a build flag. That
+should be decided with a measurement on a realistic workload, not by assertion.

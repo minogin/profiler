@@ -13,9 +13,15 @@ Findings, techniques and dead ends live in [findings.md](findings.md). The idea 
 | 3 | Verification — sampler against the truth | **done** |
 | 4 | Inclusive against self time | next |
 | 5 | Thread state and the parallelism coefficient | not started |
-| 6 | Coroutines | out of scope for now |
+| 6 | Coroutines | not started |
+| 7 | Library surface — annotations, agent, results API | not started |
+| 8 | JFR output | not started |
 
-Stack: Kotlin/JVM, Gradle, no dependencies. Output to the console.
+**What this is for.** A general-purpose tool, released open source, for auditing the performance
+of applications with hot short operations. Not tied to any one system — the graph-flavoured
+operation names in the bench are a synthetic workload, nothing more.
+
+Stack: Kotlin/JVM, Gradle, no dependencies. Output to the console for now; see phase 8.
 
 ---
 
@@ -155,10 +161,50 @@ structural width limit" from "sawtooth spiking to 16, barrier costs". Both avera
 bench can currently only produce the first. Deciding whether we need the second, and building the
 temporal machinery if so, is part of this phase.
 
-## Phase 6 — coroutines · out of scope for now
+## Phase 6 — coroutines · not started
 
 `ThreadContextElement`, `updateThreadContext` / `restoreThreadContext`, and the cost of the hook
 at real dispatch frequency. Details in the design document.
 
-Note the interaction with phase 4: whatever inclusive attribution ends up storing per thread has
-to survive being mounted and unmounted from a carrier thread.
+Not optional for a general tool. Without the bridge the method does not merely lose data, it
+invents it: a coroutine that suspends without clearing its slot leaves its label on a thread that
+goes on to do something else, and the wrong operation gets billed.
+
+Note the interaction with phase 4: a single value survives mount and unmount trivially, but a
+per-thread *stack* has to be saved and restored wholesale. That may constrain the inclusive design,
+so it is worth settling the coroutine story before committing to a stack.
+
+## Phase 7 — library surface · not started
+
+What someone else has to touch to use this. Two ways of getting labels in, because operations do
+not always coincide with method boundaries:
+
+- **Annotations plus a bytecode agent.** `@Profiled("expand")` on a method, transformed at class
+  load. No runtime dependency at the call site, attachable to a running JVM, removable by dropping
+  a flag. The agent does not fight the JIT — it rewrites bytecode and C2 inlines the wrapper
+  afterwards, exactly as it does for the hand-written form.
+- **Explicit calls** for everything else: a loop body, half a method, a span across several calls.
+
+Also in this phase, and not yet designed:
+
+- Operations registered at runtime by name, rather than a fixed array of twenty. Touches the slot's
+  counter array, the sampler's counters, and id assignment.
+- Surviving thread pools that create and destroy threads for the life of a process. Registration
+  and release are already correct; sustained churn is a different stress than fixed workers.
+- Reading results through an API rather than `println`, while the application runs.
+- Whether the profiler can be left on permanently. At ~2 ns per hook it may well be cheap enough,
+  but that should be a decision with a measurement behind it.
+
+**Standing constraint:** it must not require the user to hand over thread creation. That already
+ruled out an otherwise attractive optimisation (a slot field on a `Thread` subclass would be
+roughly twice as fast as a `ThreadLocal` lookup) and it is not negotiable — `Dispatchers.Default`
+creates its own carrier threads and you cannot substitute them.
+
+## Phase 8 — JFR output · not started
+
+JFR as the transport, not as the mechanism.
+
+A custom JFR event per *operation* is hopeless — events cost tens of nanoseconds even without
+stack traces, and Datadog's attempt at scope events inflated recordings more than tenfold. But one
+aggregated event per second carrying the counters costs nothing and lands in a format people
+already have tooling for: JMC, flight recordings, existing pipelines.
