@@ -79,6 +79,21 @@ fun subtreeCounts(): Array<LongArray> {
     return Array(OP_COUNT) { visit(it) }
 }
 
+/**
+ * Expands root call counts into total calls per operation through the graph. Counters sit on
+ * root calls only; everything nested is derived here, exactly, with no counter in the hot path.
+ */
+fun expandCalls(rootCalls: LongArray, subtree: Array<LongArray>): LongArray {
+    val total = LongArray(OP_COUNT)
+    for (root in 0 until OP_COUNT) {
+        val n = rootCalls[root]
+        if (n == 0L) continue
+        val sub = subtree[root]
+        for (op in 0 until OP_COUNT) total[op] += n * sub[op]
+    }
+    return total
+}
+
 /** Total time of one call of an operation together with its children, per configuration. */
 fun inclusiveNanos(subtree: Array<LongArray>): DoubleArray = DoubleArray(OP_COUNT) { id ->
     var sum = 0.0
@@ -109,6 +124,19 @@ class Workload {
             i++
         }
         return s
+    }
+
+    /** The same thing with the profiler hook around it. The uninstrumented [exec] stays for the
+     *  observer-effect comparison: the two differ by the hook and by nothing else. */
+    fun execLabeled(id: Int, state: Long): Long = op(id) {
+        var s = burn(state, iters[id])
+        val ch = children[id]
+        var i = 0
+        while (i < ch.size) {
+            s = execLabeled(ch[i], s)
+            i++
+        }
+        s
     }
 
     private fun buildSchedule(): IntArray {

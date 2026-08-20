@@ -95,7 +95,7 @@ fun calibrate(trials: Int = 9): Calibration {
     val xs = CALIBRATION_POINTS
     val ys = DoubleArray(xs.size)
     for (i in xs.indices) {
-        val samples = DoubleArray(trials) { timeBurnPerCall(xs[i]) }
+        val samples = DoubleArray(trials) { timeBurnOnce(xs[i]) }
         samples.sort()
         ys[i] = samples[trials / 2]
     }
@@ -151,12 +151,17 @@ fun refineIters(targetNanos: Double, seed: Int, rounds: Int = 10): Fit {
 
 /** Median over several batches: nanoTime around the batch, not around the call. */
 fun measureBurn(iters: Int, trials: Int = 5): Double {
-    val a = DoubleArray(trials) { timeBurnPerCall(iters) }
+    val a = DoubleArray(trials) { timeBurnOnce(iters) }
     a.sort()
     return a[trials / 2]
 }
 
-private fun timeBurnPerCall(iters: Int): Double {
+/**
+ * One batch: nanoTime around it, not around the call, so the clock's own cost smears out.
+ * Public because callers measuring several operations need to drive the loop order themselves —
+ * see the interleaving in Worker.measureBatches.
+ */
+fun timeBurnOnce(iters: Int): Double {
     val reps = repsForIters(iters)
     var s = 1L
     val t0 = System.nanoTime()
