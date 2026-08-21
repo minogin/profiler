@@ -222,8 +222,18 @@ The report line, beside the achieved sampling rate:
 
 **Why it is an upper bound.** The non-CPU fraction is all the stalling there was, from every cause
 together. Even if all of it landed on one operation, no share can move by more than that fraction.
-At 96% the ranking is trustworthy; at 23% the report is describing where threads *sit* rather than
-where cycles *go*, and it must say so rather than let the reader assume otherwise.
+Worked: an operation at a 50% occupancy share, with threads 97% on CPU and *every* stall belonging
+to that operation, has a true CPU share of `(0.50 − 0.03) / 0.97` = 48.5% — so the reported figure
+is within 1.5 pp no matter how the stalling was distributed. At 23% on CPU the same arithmetic
+allows the operation to be almost entirely waiting. So at 96% the ranking is trustworthy; at 23%
+the report is describing where threads *sit* rather than where cycles *go*, and it must say so
+rather than let the reader assume otherwise.
+
+**"Blocking" here means waiting for another thread — not waiting for memory.** A cache miss to DRAM
+is ~100 ns during which the core is *occupied*: it is CPU time, it is real cost of the operation,
+and the sampler already attributes it correctly. Nothing in this phase should try to detect or
+subtract it. The same goes for an uncontended lock, which is a CAS and does not block. What this
+phase is bounding is time when the thread was **not on a CPU at all**.
 
 **It also retires the threads ≤ cores assumption** for free. The sampler reads slots, not cores, so
 200 runnable threads on 16 cores over-read CPU by 12× — and that shows up as a duty cycle far below
@@ -261,6 +271,14 @@ object would invalidate the owner's cache line on every tick, which is precisely
 the padding exists to prevent. Give `OpSlot` an immutable index assigned at construction and let the
 sampler keep its own parallel arrays. Reading `counts[id]` already touches a second cache line per
 slot per tick, so the sampler's own cost roughly doubles — irrelevant, it has a core.
+
+**What the sampler's read of `counts[id]` costs the owner, since it is the obvious worry.** The
+owning thread writes that counter on every call, so the sampler pulling the line into shared state
+forces one coherence round trip on the owner's next write. That is once per slot per tick against
+millions of increments in the same millisecond — of the order of one increment in a million pays
+for it. Expected to be unmeasurable, and it should be *measured* rather than assumed, in the
+manner of everything else here: `--labels` and `--sampler` are already separate switches, which is
+exactly the comparison this needs.
 
 **Limits, which belong in the output as much as the finding does.** The floor is one tick: a 50 µs
 lock stall can never span two ticks and is invisible. And *stuck* conflates blocked, descheduled,
