@@ -241,7 +241,11 @@ to compile against a suspending body; or accepting the limit and documenting it 
 thread half wants a different slot registry — one that does not copy on every thread and can evict
 without being asked.
 
-## 9. Detect when a "fine" operation is not fine, for free · open
+## 9. Detect when a "fine" operation is not fine, for free · promoted
+
+**Promoted to phase 3.5 in [plan.md](plan.md)**, reframed on the way: the point is not to detect bad
+operations but to *bound the error* on every share at once, since "could this block?" classifies
+everything as coarse and answers nothing. The detector below survives as one of three deliverables.
 
 **The problem this answers.** The fine tier rests on two assumptions, and neither is verified:
 
@@ -301,8 +305,12 @@ bias well enough to know what to correct — see the open question in findings.m
 
 ## Promoted to plan.md
 
-Phase 4 already carries these, and they came out of the trial's friction list, recorded in full in
-[trial.md](trial.md#6-the-friction--what-the-trial-says-about-the-tool):
+**Phase 3.5** is item 9 above, reframed from detecting bad operations to bounding the error on every
+share at once — the CPU duty cycle and the bound it implies, the long-instance detector, implied
+per-call duration, and the bench work that gives all three a known truth to be checked against.
+
+**Phase 4** already carries these, and they came out of the trial's friction list, recorded in full
+in [trial.md](trial.md#6-the-friction--what-the-trial-says-about-the-tool):
 
 - `Profiler.enter(id)` / `Profiler.exit()` and the span stack they imply, because `op(id) { }` is a
   block and almost nothing in foreign code is ours to wrap in a block.

@@ -14,7 +14,8 @@ all — is [case.md](case.md), and what we might do but have not committed to is
 | 2 | The fine tier — slots, hook, sampling thread | **done** |
 | 3 | Verification — sampler against the truth | **done** |
 | — | Trial — the fine tier on somebody else's code | **done** |
-| 4 | The coarse tier — contexts, spans, cross-tabulation | **next** |
+| 3.5 | What a share is worth — bounding the error, not classifying operations | **next** |
+| 4 | The coarse tier — contexts, spans, cross-tabulation | after 3.5 |
 | 5 | Crossing threads — propagation, and per-operation parallelism | not started |
 | 6 | Thread state and the whole-application parallelism coefficient | not started |
 | 7 | Library surface — annotations, agent, results API | not started |
@@ -189,7 +190,120 @@ varied 20–110 ms for byte-identical work, which nothing in the current output 
 per-instance spans with percentiles exist for. The sentence the trial wanted to write and could
 not: *of the 48 ms median plan, 40% is `FilterIntoJoinRule`*.
 
-## Phase 4 — the coarse tier · next
+## Phase 3.5 — what a share is worth · next
+
+The fine tier is marked done, and it reports shares of **occupancy** — how many threads were inside
+an operation — while presenting them as time. Three things stand between those two quantities and
+none of them has been checked: an operation may block, threads may outnumber cores, and an
+operation may not be the size its label claims.
+
+**The decision that shapes this phase: bound the error, do not classify the operations.** The
+tempting design is a rule for which operations are allowed to be fine. That rule cannot be written.
+Nothing is guaranteed non-blocking — any allocation can meet a GC pause, any access can page-fault,
+any thread can be descheduled between two instructions — so "could this block?" marks everything
+coarse and answers nothing. Worse, contention is a property of the *run* and not of the code: a
+`StampedLock` optimistic read is a 15 ns fine operation in a read-mostly phase and a parked thread
+in a write-heavy one, from identical source. What can be measured is *how much* of the occupancy
+was not CPU, and that single number bounds the error on every share at once, whatever caused it.
+
+This is the same discipline as the noise floor already in the report — that says how wrong chance
+could make a share; this says how wrong blocking could make it.
+
+### 1. The CPU duty cycle, and the bound it implies
+
+`ThreadMXBean.getThreadCpuTime(id)` per registered thread, sampled at a **low** rate — once a
+second, or every *n* ticks — never per tick. The ratio of summed CPU delta to summed wall delta
+across live threads is the duty cycle.
+
+The report line, beside the achieved sampling rate:
+
+> *threads were on CPU 96.4% of sampled wall time — at most 3.6 pp of any share is occupancy that
+> was not CPU*
+
+**Why it is an upper bound.** The non-CPU fraction is all the stalling there was, from every cause
+together. Even if all of it landed on one operation, no share can move by more than that fraction.
+At 96% the ranking is trustworthy; at 23% the report is describing where threads *sit* rather than
+where cycles *go*, and it must say so rather than let the reader assume otherwise.
+
+**It also retires the threads ≤ cores assumption** for free. The sampler reads slots, not cores, so
+200 runnable threads on 16 cores over-read CPU by 12× — and that shows up as a duty cycle far below
+100% without any special handling.
+
+**Needs:** the owning thread's id on the slot, recorded at slot creation, off the hot path. Store
+the id rather than a `Thread` reference so a dead thread is not pinned.
+
+**Platform caveat, to be measured and not assumed.** On Windows this comes from `GetThreadTimes`,
+which is updated on scheduler ticks — of the order of 15 ms — so it is useless at a 1 ms window and
+may be fine at a 1 s one. `isThreadCpuTimeSupported` and `isThreadCpuTimeEnabled` must both be
+checked, and where the resolution cannot support the window the report must **say the number is
+unavailable rather than print a bad one**.
+
+### 2. The long-instance detector
+
+The sampler already reads the slot's operation id. Have it read **that operation's call counter**
+in the same tick and keep the pair from the previous tick:
+
+| across two ticks | id | counter | meaning |
+|---|---|---|---|
+| same | same | increased | many short instances — genuinely fine |
+| same | same | **unchanged** | one instance spanning ≥ 1 tick |
+
+A 20 ns operation has a 1-in-50,000 chance of being caught by a single sample, so an instance
+surviving two consecutive ticks is not the operation its label describes. **Entry and exit are
+untouched** — the counter increment already exists and the sampler reads one extra word.
+
+Split the sampler's per-operation counter in two, *fresh* and *stuck*, so one pass yields both an
+occupancy share and a running share, and the report can say per operation: *340 instances lasted
+over a tick — this is not a fine operation, consider a coarse label.*
+
+**Where the previous tick's pair is kept matters.** Not on the `OpSlot`: the sampler writing to that
+object would invalidate the owner's cache line on every tick, which is precisely the false sharing
+the padding exists to prevent. Give `OpSlot` an immutable index assigned at construction and let the
+sampler keep its own parallel arrays. Reading `counts[id]` already touches a second cache line per
+slot per tick, so the sampler's own cost roughly doubles — irrelevant, it has a core.
+
+**Limits, which belong in the output as much as the finding does.** The floor is one tick: a 50 µs
+lock stall can never span two ticks and is invisible. And *stuck* conflates blocked, descheduled,
+and legitimately-long-but-running — separating those needs the thread's state, and only for slots
+the counter test already flagged, which is normally almost none.
+
+### 3. Implied per-call duration
+
+`share × elapsed / calls`, which is already derivable and was the most valuable column in the
+Calcite trial. It is the smell test the person who wrote the code can apply and the tool cannot: an
+operation known to be 20 ns showing 500 ns implied is stalling on something. It inherits the same
+bound as everything else, and the column heading should say occupancy rather than time.
+
+### What this phase deliberately does not do
+
+Classify operations as fine or coarse. Detect locks specifically. Attribute non-CPU time to a
+particular operation — it bounds the error globally and does not apportion it. Nor does it touch the
+coroutine or virtual-thread hazards, which are [ideas.md](ideas.md) item 8.
+
+**Relationship to phase 6.** Phase 6 samples each thread's *state* alongside its label, and its
+heuristic for telling executing from spinning from parked is exactly what would resolve the
+ambiguity in *stuck* above — and would let non-CPU time be apportioned to an operation rather than
+merely bounded. This phase is the cheap aggregate that can be had now, before there is anything
+dispatcher-shaped in the bench to develop that heuristic against. The two are the same question at
+two prices, and doing the cheap one first is what makes the expensive one checkable.
+
+### Bench work, and it is the real work
+
+The bench has never blocked and never oversubscribed — every thread runs the same schedule flat out
+on at most one core each. Nothing here can be verified against it as it stands. Needed:
+
+- an operation that contends on a real lock, with the contention rate a parameter, so the duty cycle
+  and the *stuck* counter have a known truth to be checked against;
+- a mode with threads well above core count;
+- the expected duty cycle computed from the configuration, in the manner of phase 1's two truths, so
+  the measurement is checked rather than admired.
+
+**Done when:** duty cycle reads ~100% on the existing non-blocking bench (the null test, and the one
+most likely to expose a broken implementation); an injected blocking operation moves it by the
+injected amount within measurement; threads at 2× cores are reported as such; and the detector fires
+on the injected blocker and stays silent otherwise.
+
+## Phase 4 — the coarse tier · after 3.5
 
 Contexts, spans, and the cross-tabulation. Same-thread to begin with — crossing threads is phase 5,
 and the two are worth separating so that propagation bugs cannot be confused with tier bugs.
