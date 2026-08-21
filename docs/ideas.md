@@ -241,7 +241,7 @@ to compile against a suspending body; or accepting the limit and documenting it 
 thread half wants a different slot registry — one that does not copy on every thread and can evict
 without being asked.
 
-## 10. Detect when a "fine" operation is not fine, for free · open
+## 9. Detect when a "fine" operation is not fine, for free · open
 
 **The problem this answers.** The fine tier rests on two assumptions, and neither is verified:
 
@@ -291,7 +291,7 @@ cheap and probably enough; or *adaptive promotion*, where a detected operation s
 contexts on subsequent entries, which needs a check at entry and therefore costs hot-path budget.
 Start with reporting; the diagnostic is most of the value.
 
-## 11. Correct the attribution bias using call counts · open
+## 10. Correct the attribution bias using call counts · open
 
 The sampler reads high on parents and low on short leaves. With call counts the correction is
 arithmetic rather than a model, and the counts are already collected. Blocked on understanding the

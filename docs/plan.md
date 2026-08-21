@@ -257,7 +257,7 @@ in exactly the case where it is all waiting. The one answer that was wanted, inv
 Either the sampler learns to distinguish a running thread from a parked one, or the column is
 renamed to what it actually measures and a separate mechanism supplies CPU. This is the same
 problem as the coroutine one in a different costume — the slot is attached to a thread, and the
-thing being measured is not a thread. See [ideas.md](ideas.md) items 8 and 10.
+thing being measured is not a thread. See [ideas.md](ideas.md) items 8 and 9.
 
 **Bench work:** some operations promoted to coarse, so there is something to cross-tabulate.
 
