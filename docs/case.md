@@ -75,6 +75,41 @@ unknown error bar, and the reader is given no way to notice.
 
 ---
 
+## The project this came from
+
+*Reported from a year of work on it, not re-measured here.* The tool exists because of an in-memory
+supply-chain traversal system — nanosecond operations repeated billions of times, heavily
+coroutine-based. Two failures on that project are the origin of the whole design.
+
+**IntelliJ IDEA's profiler was useless there, for two independent reasons.** The flame graph as a
+form, for everything in the section above. And coroutines: work is spread across dispatcher threads
+and every suspension cuts the trail, so the stack no longer corresponds to the logical task. Either
+one alone would have been survivable. Together they left no usable reading.
+
+**The only method that worked was switching logic off and re-measuring — and it is a bad method.**
+This is worth stating carefully because it is the incumbent that actually gets used, and because it
+is the honest competitor to any "share" a profiler prints:
+
+- It is the only technique that gives a real answer to *what happens if I do not do this*, which is
+  the question anyone actually has.
+- **But disabling logic changes the workload.** On the supply-chain traversal, switching a piece of
+  logic off *reduces the graph being traversed* — so the fast run is not the same run with one part
+  removed, it is a different, smaller problem. The comparison measures two workloads, not two
+  implementations, and the difference between them is not the thing you wanted to know.
+- It is also serial, manual and slow: one hypothesis per rebuild, and every result contaminated the
+  same way.
+
+**The Calcite trial hit exactly this and did not notice at the time.** Removing
+`EnumerableMergeJoinRule` gave 275× — but that rule shapes the search space, so the fast run
+explored a *different and much smaller* plan space. The measured 275× is real as a wall-clock fact
+and is not "the cost of the rule", for the same reason the supply-chain case is not. The finding
+survives; the interpretation needed narrowing, and does not fully escape this.
+
+So: the counterfactual is what people fall back on when profilers fail, and it has a structural
+flaw that no amount of care removes. That is an argument for a profiler that can attribute without
+removing anything — and a warning against building a naive "disable and re-run" feature and
+presenting its number as clean. See [ideas.md](ideas.md) item 1.
+
 ## JFR custom events — the labelled alternative
 
 *Reasoning and published cost figures, not our measurement. Item 2 in [ideas.md](ideas.md) is to

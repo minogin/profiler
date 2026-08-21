@@ -39,6 +39,20 @@ opUnless(id) { ... }      // could return null / skip when id is suppressed
 The third is cheap in code we own and useless in code we do not, which is a real limit worth
 stating rather than hiding.
 
+**The objection that nearly kills it, and must not be designed around quietly.** Disabling logic
+changes the workload. On the supply-chain traversal this idea comes from, switching a piece of
+logic off *reduces the graph being traversed*, so the fast run is a smaller problem rather than the
+same problem minus one part — the comparison measures two workloads, not two implementations. The
+Calcite trial has the same flaw: removing the merge join rule changed the plan search space, so the
+275× is a true wall-clock fact and is not "the cost of the rule". Recorded in [case.md](case.md),
+because this is also the flaw in the manual method everyone falls back on.
+
+So a "disable and re-run" feature that prints one number would be *industrialising a known-bad
+method*. If it is built, it has to carry evidence about whether the workload stayed the same —
+call counts of the other operations are the obvious check, and we already collect them: if
+suppressing X halves how often Y fires, the comparison is void and the tool should say so rather
+than print a speedup.
+
 **Open sub-questions.** Does suppression mean "skip the body" or "run it and don't count it"?
 How does it interact with nesting? Is the re-run automatic (two passes in one process, order
 swapped — see the position artifact in findings.md) or is it a flag the user sets by hand?
@@ -101,17 +115,91 @@ minimum. Beyond that: showing call counts beside shares already reframes "expens
 per call" or "called too often", which are questions rather than verdicts. Whether the report can
 do more than that without editorialising is genuinely unclear.
 
-## 6. Leave the profiler on permanently · open
+## 6. Leave the profiler on permanently · dropped
 
-At ~2 ns per hook it may be cheap enough to ship enabled. The Calcite trial is evidence in favour:
-on boundaries costing hundreds of microseconds the instrumentation was unmeasurable, and both A/B
-comparisons came out with the wrong sign.
+Dropped as a goal: this is a developer's tool, run in profiling sessions and perf harnesses on a
+machine you control, not an always-on agent inside a live system. Everything that followed from the
+always-on framing goes with it — windowing for a process that has been up for a week, cross-process
+aggregation, an attach agent, and the objection that the spinning sampler costs a core. A core is
+an accepted cost here, the same way nobody closes Spotify to run a profiler.
 
-**What is missing.** A story for long-running processes — the report is currently start-to-stop
-totals, which is the wrong shape for a server that has been up for a week. Windowing, resetting, or
-periodic snapshots. Also carried in findings.md under open questions.
+**What survives, for a different reason.** The ~2 ns hook is not justified by a production resource
+budget; it is justified by the **observer effect**. The target regime is operations of tens to
+hundreds of nanoseconds, and an instrument costing 100 ns would be measuring itself. That
+requirement is unchanged and is the reason the hook was worth the work.
 
-## 7. Correct the attribution bias using call counts · open
+**And a much smaller need survives too:** within a single session you want to reset and take more
+than one snapshot — *"clear it, I am about to run the thing"*. That is a small feature, not the
+windowing machinery, and item 7 needs it as well.
+
+## 7. A perf-regression harness — the profiler as a CI gate · open
+
+Run a labelled workload on every build, keep the per-operation shares and call counts, and fail or
+flag when one moves. Still a developer's tool by any reading — it runs where the tests run, not in
+a live system — so none of the always-on machinery applies.
+
+**Why it fits this design particularly well.** Call counts are *deterministic* in a way timings are
+not: if an operation fires 78,756 times on one build and 240,000 on the next, that is a real change
+in behaviour and no amount of machine noise produces it. Shares need a noise floor and a tolerance;
+counts need neither. A regression gate built on counts first and shares second would be unusually
+robust for the genre, and no stack profiler can offer it because none of them have counts.
+
+**What it needs that does not exist.** Machine-readable output — the report is `render()` to text.
+Run-to-run comparison, with the tolerance discipline from findings.md rather than a fixed
+percentage. And a session reset, so a harness can measure phases separately.
+
+**What it does not need**, and this is the point: no agent, no windowing, no always-on story, no
+cross-process aggregation.
+
+## 8. Suspected defect: the label follows the thread, not the task · open
+
+*Reasoning from the source, not yet reproduced. A test is the first thing to write.* Two related
+hazards, both about what happens when the unit of work stops being the unit the slot is attached
+to. Recorded here rather than in findings.md because nothing has been measured yet — the moment it
+is, the confirmed half moves to findings.md.
+
+**Coroutines.** `op(id) { }` is an inline function, and Kotlin permits suspension inside an inline
+lambda, so `op(id) { somethingSuspending() }` inside a `suspend fun` compiles with no warning. What
+then happens:
+
+```kotlin
+val slot = Profiler.slot()          // thread A's slot, captured here
+slot.setOpaque(id)
+try { return body() }               // suspends; resumes on thread B
+finally { slot.setOpaque(prev) }    // clears A's slot, not B's
+```
+
+- Thread A's slot stays set to `id` for the whole suspension, while A goes on to run unrelated
+  work — all of it billed to `id`.
+- Thread B, where the work actually resumes, was never labelled, so the real time lands on
+  whatever B's slot happened to hold.
+- The restore writes to the wrong slot.
+
+Wrong in both directions, silent, and the numbers look plausible. This matters more than an
+ordinary bug because [profiler.md](profiler.md) lists *"coroutines break attribution — work is
+spread across dispatcher threads and suspensions cut the trail"* as one of the three reasons the
+existing tools fail here. It is a founding motivation, and the implementation currently has the
+same defect it was built to fix.
+
+**Virtual threads.** `Profiler.slot()` is a `ThreadLocal`, so every virtual thread gets its own
+`OpSlot` appended to a `CopyOnWriteArrayList` — an O(n) array copy per thread created, quadratic
+over a run — and the sampler then walks the whole list every millisecond. `release()` is manual, so
+anything not released stays in the walk list forever. A target that creates virtual threads freely
+does not degrade this gradually; it makes the sampler's tick unbounded. The class doc records the
+assumption this was built on — *"threads are expected to register themselves up front, so the list
+is stable by the time the sampler starts"* — which is the bench's threading model, not a real
+target's.
+
+**Note that this is a property of the *target*, not of how the profiler is deployed.** It bites a
+developer profiling their own app on their own machine exactly as hard as anything else would.
+
+**Possible directions, none chosen.** A label carried on the coroutine context rather than the
+thread, with a `ThreadContextElement` restoring it on each resume; a `suspend`-aware `op`; refusing
+to compile against a suspending body; or accepting the limit and documenting it loudly. The virtual
+thread half wants a different slot registry — one that does not copy on every thread and can evict
+without being asked.
+
+## 9. Correct the attribution bias using call counts · open
 
 The sampler reads high on parents and low on short leaves. With call counts the correction is
 arithmetic rather than a model, and the counts are already collected. Blocked on understanding the

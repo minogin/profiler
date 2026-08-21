@@ -3,6 +3,26 @@
 The original idea, written up 18.08.2026 and revised as things were measured. Numbers that have
 since been established by experiment are marked as such; the rest is still reasoning.
 
+## What this is, and what it is not
+
+**A developer's tool.** It runs in profiling sessions and perf harnesses, on a machine the developer
+controls. It is not an always-on agent inside a live system, and nothing should be designed as if it
+were. A whole CPU core for the sampler is an accepted cost on that basis.
+
+**What it must do**, in the order that matters:
+
+1. **Profile nanosecond operations.** This is the regime nothing else reaches, and it is where the
+   ~2 ns hook earns its complexity — not to save resources, but because a 100 ns instrument would
+   be measuring itself.
+2. **Collect a parallelisation profile** — threads, virtual threads, and coroutines. This is a
+   product requirement, not a nice-to-have: coroutines breaking attribution is one of the two
+   reasons the incumbent failed on the project this came from. See [case.md](case.md).
+3. **Answer "where exactly should we look, and why".** Note that today the report answers *where* —
+   shares and call counts — and not *why*. That gap is deliberate to record rather than paper over.
+
+Both regimes are in scope: nanosecond operations, and the coarser microsecond-to-millisecond work
+the Calcite trial covered. We do not get to choose what a real target turns out to be.
+
 ## The problem
 
 A class of workload that ordinary profilers cannot answer questions about: a few dozen distinct
