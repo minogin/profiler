@@ -7,6 +7,7 @@
         <option name="modules">
           <set>
             <option value="$PROJECT_DIR$" />
+            <option value="$PROJECT_DIR$/trial" />
           </set>
         </option>
         <option name="myGradleHome" value="" />

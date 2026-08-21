@@ -4,15 +4,17 @@ What we are building, in order, and where each phase stands. Kept current — wh
 its section is rewritten to say what was actually built rather than what was intended.
 
 Findings, techniques and dead ends live in [findings.md](findings.md). The idea and the prior art
-live in [profiler.md](profiler.md).
+live in [profiler.md](profiler.md). The trial on Apache Calcite has its own record in
+[trial.md](trial.md). Where the existing tools fall short — the running case for building this at
+all — is [case.md](case.md), and what we might do but have not committed to is [ideas.md](ideas.md).
 
 | phase | subject | status |
 |---|---|---|
 | 1 | The bench — a workload whose true answer is known | **done** |
 | 2 | The fine tier — slots, hook, sampling thread | **done** |
 | 3 | Verification — sampler against the truth | **done** |
-| — | Trial — the fine tier on somebody else's code | **next** |
-| 4 | The coarse tier — contexts, spans, cross-tabulation | after the trial |
+| — | Trial — the fine tier on somebody else's code | **done** |
+| 4 | The coarse tier — contexts, spans, cross-tabulation | **next** |
 | 5 | Crossing threads — propagation, and per-operation parallelism | not started |
 | 6 | Thread state and the whole-application parallelism coefficient | not started |
 | 7 | Library surface — annotations, agent, results API | not started |
@@ -132,54 +134,62 @@ effect.
 
 **3. Unsynchronised slot reads do not smear the picture.** Follows from 1 holding.
 
-## Trial — the fine tier on somebody else's code · next
+## Trial — the fine tier on somebody else's code · done
 
-Everything so far is self-referential: we built a bench, built a tool, and proved the tool reads
-the bench. That proves the **instrument** works. It says nothing about whether the **tool** is
-useful, and the decisions about to be taken in phase 4 — the context API, where propagation hooks
-go, what the report says — are precisely what a real trial would inform. Doing it after would mean
-designing against a workload we invented.
+Pointed at **Apache Calcite 1.42.0** query planning. Full record with every number in
+[trial.md](trial.md); the harness is [`trial/`](../trial). What it settled:
 
-**The qualifying test for a candidate.** Not "is it CPU-bound" — necessary but weak. The question
-is:
+**The candidate qualified.** A four-table chain join with join associate enabled takes 16–20 s to
+plan, against 184 ms for three tables. JFR's flame graph is over 60% JDK collections and string
+building, its inclusive view is one recursive spine where a dozen frames all read 80–99%, and the
+frame carrying half the time — `ConverterRule.onMatch` at 49.14% — is not a rule at all but the
+method twenty distinct enumerable rules inherit. The identity the domain cares about was not the
+identity the stack had.
 
-> Does a conventional flame graph fail to answer the question, in the characteristic way?
+**The tool answered.** Labels on the rule *instance*, placed through Calcite's `RelOptListener`,
+split that 49.14% almost entirely onto one rule: `EnumerableMergeJoinRule`, 46.18%. Removing it
+takes planning from **17.8 s to 64.7 ms — 275× — for a plan 0.0026% worse by the planner's own
+cost model.** That is the finding, and it is actionable.
 
-That is: the profile is dominated by `HashMap.get`, `equals`, `visit()` — generic machinery,
-correctly identified as hot, telling you nothing about what the program was *doing*. When someone
-looks at that and says "yes, and?", domain labels are the answer. If async-profiler already names a
-culprit, no new tool is needed and the trial proves nothing.
+**The sampler was validated against something we did not write.** Our shares and JFR's inclusive
+shares agree within about a point on every rule in the slow configuration. Phase 3 proved the
+sampler against our own bench; this is the first independent check, and it holds.
 
-So the first step on any candidate is to profile it conventionally and check whether the flame
-graph disappoints.
+**Where they disagree, we learned something.** On a second configuration the two differ by 12 pp on
+one rule, eleven times its noise floor, in a single shared run. Part is JFR stack truncation at 64
+frames — measured, and raising the limit moved the number the predicted way. A label in a slot has
+no depth, so that class of error cannot reach it. The remainder is unexplained and is an open
+question. Separately: JFR delivered 6.3 ms and 13.7 ms when asked for 1 ms, where ours held 1.02 ms
+and said so.
 
-**Candidate: Apache Calcite query planning.** Pure CPU, entirely in memory, reproducible from a
-single complex query with no data at all — which is what killed an earlier attempt on DHIS2, where
-the pain needed a 700 GB database. Planning time growing badly with query complexity is a familiar
-complaint. And the hot path is rule matching and expression-tree traversal, so a flame graph shows
-`RelOptRuleCall` and `HashMap` rather than "matching rule *X* against subtree *Y*". Verify the
-current state before committing — this may have moved.
+**What it cost:** nothing measurable. The labels sit on boundaries costing hundreds of
+microseconds, so a 2 ns hook is parts per million. Both A/B comparisons came out with the wrong
+sign, which is this machine's way of saying "below the floor".
 
-Fallbacks if it does not qualify: static analysis (PMD, SpotBugs, Error Prone) — reproducible
-against any codebase, millions of tiny AST visits, flame graph wall-to-wall `visit()` and
-`accept()`. Then Lucene analysis and indexing, then Drools rule matching.
+**The friction, which is what phase 4 has to answer** — all nine items are in
+[trial.md](trial.md#6-the-friction--what-the-trial-says-about-the-tool). The four that change the
+design:
 
-**Two deliverables, and the second is the one that gets forgotten:**
+- **There is no enter/exit hook.** `op(id) { }` is a block, and almost nothing in third-party code
+  is ours to wrap in a block. The trial wrote its own fifteen-line helper against `Profiler.slot()`.
+  `Profiler.enter(id)` / `Profiler.exit()` and the stack they imply belong in the library, and the
+  coarse tier needs exactly the same thing.
+- **Non-lexical placement leaks silently and in the contaminating direction.** Calcite's "after"
+  notification is not in a `finally`; a rule that throws leaves the label set and every later sample
+  is billed to it. The trial added its own balance check. The library should provide one.
+- **The report needs a counterfactual warning.** A 46% share became a 275× speedup, because the
+  rule inflated everyone else's work as well as its own. Shares say where time went, not what
+  removing something would do, and nothing in the output says so.
+- **Call counts were the most valuable column.** They separate "1.5 ms per firing, 5,034 firings"
+  from "9 µs per firing, 245,190 firings" — opposite problems with opposite fixes, and no stack
+  profiler has counts at all.
 
-- **A finding** — something actionable about the target.
-- **The friction** — where labels were awkward to place, where the coarse/fine boundary was
-  unclear, where the output did not say what was needed. This is what feeds phase 4, and it is what
-  gets dropped when the finding goes well.
+**And the coarse tier's shape came out of it.** One plan is a coarse operation. Per-plan duration
+varied 20–110 ms for byte-identical work, which nothing in the current output explains and which
+per-instance spans with percentiles exist for. The sentence the trial wanted to write and could
+not: *of the 48 ms median plan, 40% is `FilterIntoJoinRule`*.
 
-**What exists to do it with.** `Profiler.register(name)`, `op(id) { }`, `Profiler.start()`,
-`Profiler.stop().render()`. `--demo` in this repo is a complete worked example using nothing but
-that surface. Registration is by name at runtime, up to 256 operations, and slots are released on
-thread exit so pools that recycle do not lose counts.
-
-**What does not exist yet:** no annotations, no agent, no JFR, no coarse tier. Labels go in by hand,
-which is itself part of what the trial is measuring.
-
-## Phase 4 — the coarse tier · after the trial
+## Phase 4 — the coarse tier · next
 
 Contexts, spans, and the cross-tabulation. Same-thread to begin with — crossing threads is phase 5,
 and the two are worth separating so that propagation bugs cannot be confused with tier bugs.

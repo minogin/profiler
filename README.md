@@ -137,10 +137,14 @@ src/main/kotlin/com/minogin/profiler/
   Bench.kt      worker threads and the stages they are driven through
   Sampler.kt    slots, the hook, the sampling thread
   Main.kt       orchestration, the two truths, the verdicts
+trial/          the fine tier pointed at Apache Calcite, and the harness that did it
 docs/
   profiler.md   the idea, and what was known about prior art
   plan.md       phases and where each one stands
   findings.md   what we learned, with the measurement behind every claim
+  trial.md      the trial on Apache Calcite: the finding, and where the tool got in the way
+  case.md       where existing tools fall short, and therefore what this one is for
+  ideas.md      things worth doing that are not yet decided
 ```
 
 `findings.md` is the interesting one if you have ever tried to measure something this small. It
@@ -179,4 +183,6 @@ and JFR as an output format.
 **Constraint carried throughout:** it must not require you to hand over your thread creation. That
 ruled out an otherwise attractive optimisation, and it is why the sampler is built the way it is.
 
-See `docs/plan.md` for where things stand and `docs/profiler.md` for the design and the prior art.
+See `docs/plan.md` for where things stand, `docs/trial.md` for the tool used in anger on somebody
+else's code, `docs/case.md` for the case against the existing tools built out of observed failures,
+and `docs/profiler.md` for the design and the prior art.

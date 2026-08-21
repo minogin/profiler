@@ -6,6 +6,9 @@ appended to as things are discovered. The sequence of work lives in [plan.md](pl
 The rule for this file: every claim carries the measurement that produced it. A finding without a
 number is a hunch, and hunches have been wrong here more than once.
 
+Findings that are specifically about *other* tools' limits are cross-posted to [case.md](case.md),
+which is the running argument for why this exists. Untested proposals live in [ideas.md](ideas.md).
+
 ---
 
 ## The JIT
@@ -81,6 +84,16 @@ trees; the difference includes "these compiled differently". Comparing `burn` ag
 1.7 ns; the differential inside a real operation gives ~0.85 ns, consistently, across four
 operations. The hook's memory operations are independent of the busy loop's dependency chain, so
 an out-of-order CPU runs them in the gaps. Both numbers are right; they answer different questions.
+
+**Interleaving is not enough; the order has to swap too.** Comparing a plain and an instrumented
+configuration round by round, always A then B, reported the instrumented one as **6.6% faster** —
+consistently, in all four rounds, so not drift. Anything that depends on *position* within the
+round rather than on elapsed time — a collection that always lands in the first slot, a clock that
+has just come up from idle — is charged entirely to whoever goes first. Swapping the order every
+round brought it to 1.021× with three rounds each way, which is the answer "below the floor".
+
+This is the fourth time a sequential comparison has aliased something onto the effect, and the
+first time round-robin alone did not fix it.
 
 **Whole-run throughput cannot resolve a sub-1% effect on this machine.** The same three-way
 comparison gave −13.84% and +11.27% on consecutive runs, with the signs of the two component
@@ -176,6 +189,67 @@ cannot see through it**, and adjacent tiny operations with compile-time-constant
 where it can. Worth knowing before someone labels three consecutive constant-size loops and
 believes the answer.
 
+## Against a stack profiler
+
+All from the Calcite trial — the numbers and the workload are in [trial.md](trial.md).
+
+**Two sampling mechanisms with nothing in common agree to about a percentage point.** Our shares
+against JFR's inclusive shares, same run, per rule: gaps of 1.0, 0.8, 1.1, 0.6, 0.1 and 0.2 pp.
+Phase 3 checked the sampler against a bench we wrote; this is the first check against code we did
+not, and it is the stronger of the two.
+
+**A shared base-class method does not merely hide the identity — it inverts the ranking.** Twenty
+Calcite rules inherit `ConverterRule.onMatch`, which calls the subclass's `convert` and then does
+the expensive part itself. So the subclass frame encloses the cheap half of the firing:
+`EnumerableMergeJoinRule.convert` is visible in 0.81% of samples against a label share of 46.18%,
+a factor of 57, while `JoinCommuteRule` — which overrides `onMatch` — reads 30.16% in the stacks
+against 30.21% in the labels. The same recording is accurate for one rule and wrong by 57× for
+another, and nothing in it says which is which, because the difference is a base class's internal
+structure. A reader with only the flame graph ranks the wrong rule first. Measured on a 29,655
+sample recording with truncation eliminated, so this is structural and not a sampling artifact.
+
+**A stack profiler has a depth limit and a label does not.** JFR truncates at 64 frames by default,
+and when it truncates it is the *root* end that is lost — so a method that was merely on the way in
+loses the sample entirely. Measured: 2.4% of stacks truncated, dominated by one subsystem, and
+raising the limit to 2048 moved that rule's share up by 3.7 pp. A label in a thread-local slot is
+one int; recursion depth cannot reach it.
+
+**A profiler that will not say what rate it achieved should not be believed about anything else.**
+JFR asked for 1 ms and delivered 6.3 ms in one run and 13.7 ms in another — a factor of 6 to 13,
+unreported. Over the same 40 s window that was 2,669 samples against our 39,360. Our sampler
+prints the achieved step beside the requested one, which was originally there to catch the parking
+problem and turns out to matter for a different reason: it is the only way a reader knows how much
+evidence is behind a share.
+
+**A share is not a counterfactual, and the gap can be two orders of magnitude.** An operation
+measured at 46% of planning time turned out to be worth a **275×** speedup when removed, because
+it was creating work for every other operation as well as doing its own. Nothing in the report says
+this, and a reader who treats shares as "what I would save" will be wrong in the safe direction
+sometimes and the unsafe direction other times. It needs to be said in the output.
+
+**Placing a label in code you do not own means finding the one hook it exposes.** For Calcite that
+was a listener notified before and after each rule firing — enough, because the rule is the unit
+anyone would act on. Everything else in the hot path was unreachable without forking. The honest
+scope of the fine tier on a third-party library is the domain concepts that library exposes a hook
+for, and no more.
+
+**A non-lexical label leaks in the contaminating direction.** The hook Calcite offers is two
+callbacks, and the "after" one is not inside a `finally` — so a body that throws leaves the label
+set and every later sample is billed to it. No error, no warning, a plausible wrong number. The
+trial checked the span stack was balanced after every one of 484 iterations rather than assuming
+it. Any enter/exit API needs that check available to its users.
+
+**The placement mechanism has a cost of its own.** Attaching *any* listener made Calcite allocate
+two event objects per rule firing whether the listener did anything or not. Measuring labels
+against no-labels would have charged our hook for somebody else's allocation; the comparison has
+to be three-way — nothing, mechanism-with-no-op, mechanism-with-label.
+
+**Where the hook cost lands relative to what it measures decides whether it matters at all.** On
+the bench, labels sit on 20 ns operations and the hook is 2% of them. On Calcite the same hook sits
+on boundaries costing hundreds of microseconds and is five parts per million — unmeasurable, and
+both A/B comparisons came out with the wrong sign. "Do not label anything comparable to the hook"
+has a happy converse: on coarse enough boundaries the instrument is free.
+
 ## The sampler
 
 **Parking cannot hold a millisecond step under load.** Measured at a 1 ms request with 8 workers
@@ -251,6 +325,13 @@ ground truth has to be *recorded* (per-phase timestamps) rather than computed, w
 departure from how every truth in this project has worked so far.
 
 **The fit tolerance should scale with achievable quantisation** rather than being a fixed 3%.
+
+**Our share and JFR's differ by 12 pp on one operation and the reason is not fully known.** Same
+JVM, same 40 s, eleven times the noise floor, and every other operation agrees within 2.5 pp. Stack
+truncation accounts for 3.7 pp of it, measured. A leaked label was ruled out by checking the span
+stack after every iteration. The remaining suspicion is sampling bias — C2 strips safepoint polls
+from counted loops and the subsystem in question is full of them — but that is a hunch with no
+number behind it, which by the rule of this file makes it an open question rather than a finding.
 
 **Can the profiler be left on permanently?** At ~2 ns per hook it may well be cheap enough that
 there is no reason to switch it off, which would be a much better story than a build flag. That
