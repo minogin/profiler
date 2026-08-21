@@ -228,6 +228,20 @@ usable; a 100 µs instance collects zero or one and is noise. So per-instance CP
 statistics are computed only above a sample threshold, and **the report has to say how many
 instances were excluded** — otherwise it quietly describes a biased subset.
 
+**Unsettled, and it has to be settled before the CPU column means anything: what is a sample worth
+when the thread is not running?** The sampler counts a slot as being inside its operation whether
+the thread is on a CPU, blocked on I/O, parked on a lock, or — for a virtual thread — unmounted
+entirely. The fine tier never had to care: operations of tens of nanoseconds do not block, so
+wall-clock and CPU coincide. Coarse operations block constantly, which is most of why anyone would
+label them. So the table above says "total CPU · sampled" and that is not yet true — as built it
+would be occupancy, and span minus occupancy would read as zero waiting where the truth is the
+opposite.
+
+Either the sampler learns to distinguish a running thread from a parked one, or the column is
+renamed to what it actually measures and a separate mechanism supplies CPU. This is the same
+problem as the coroutine one in a different costume — the slot is attached to a thread, and the
+thing being measured is not a thread. See [ideas.md](ideas.md) item 8.
+
 **Bench work:** some operations promoted to coarse, so there is something to cross-tabulate.
 
 ## Phase 5 — crossing threads · not started

@@ -153,10 +153,48 @@ cross-process aggregation.
 
 ## 8. Suspected defect: the label follows the thread, not the task · open
 
-*Reasoning from the source, not yet reproduced. A test is the first thing to write.* Two related
-hazards, both about what happens when the unit of work stops being the unit the slot is attached
-to. Recorded here rather than in findings.md because nothing has been measured yet — the moment it
-is, the confirmed half moves to findings.md.
+*Reasoning from the source, not yet reproduced. A test is the first thing to write.* Two hazards
+that look like one problem and are not — they hit different tiers, in opposite ways, and want
+different fixes. Recorded here rather than in findings.md because nothing has been measured yet.
+
+| | attribution | slot registry | tier affected |
+|---|---|---|---|
+| **Coroutines** | **broken** — the label follows the thread, the work follows the continuation | fine; a dispatcher pool is bounded | coarse only |
+| **Virtual threads** | **correct** — the JDK gives each virtual thread its own `ThreadLocal`s, so the slot follows the vthread across carrier switches | **explodes** | **fine, today** |
+
+The first version of this entry treated them as one thing and had the impact backwards.
+
+### The fine tier is safe from coroutines, and the reason is structural
+
+The defect needs a **suspension point between the label write and the restore**. Nothing else
+triggers it. If the body does not suspend, the label is set and restored on the same thread in the
+same continuation, and the attribution is correct with no assumption required.
+
+And a suspending body **is by definition not a fine-grained operation**: a suspension point costs a
+continuation allocation plus a dispatch, hundreds of nanoseconds at best, against the tens of
+nanoseconds the fine tier exists for. So "fine-grained" and "suspends inside the op" are mutually
+exclusive by construction. The fine tier's same-thread assumption is self-enforcing rather than
+merely convenient, which is worth knowing before anyone spends effort defending it.
+
+This is also what [plan.md](plan.md) already decided from the other end — phase 4 is same-thread and
+*"crossing threads is phase 5, and the two are worth separating so that propagation bugs cannot be
+confused with tier bugs."* The coroutine defect is squarely a phase 4/5 problem, not a fire in what
+is shipped.
+
+### But the API does not enforce the boundary, and cannot do it cheaply
+
+`op(id) { somethingSuspending() }` compiles with no warning, because Kotlin inlines the lambda into
+the calling function and it inherits the call site's suspend-ness. The clean compile-time fix is
+marking the lambda `noinline` — the lambda becomes a real function object of non-suspend type, so
+suspend calls inside it become illegal — but that costs an allocation per call, which is fatal for
+exactly the tier being protected.
+
+So the guard has to be **runtime and opt-in**: a checked mode that verifies at exit that the
+calling thread still owns the slot captured at entry. That is a second `ThreadLocal` lookup, which
+is the expensive half of the hook — acceptable in a debug run, not in the measured one. A real
+constraint on any fix, and it should be settled before phase 4 rather than during it.
+
+### What goes wrong, mechanically
 
 **Coroutines.** `op(id) { }` is an inline function, and Kotlin permits suspension inside an inline
 lambda, so `op(id) { somethingSuspending() }` inside a `suspend fun` compiles with no warning. What
@@ -190,8 +228,12 @@ assumption this was built on — *"threads are expected to register themselves u
 is stable by the time the sampler starts"* — which is the bench's threading model, not a real
 target's.
 
-**Note that this is a property of the *target*, not of how the profiler is deployed.** It bites a
-developer profiling their own app on their own machine exactly as hard as anything else would.
+Note that the virtual thread half needs **no suspension and no coroutine**. A target that runs
+perfectly ordinary 20 ns operations on a million short-lived virtual threads kills the registry on
+its own. That is why it is the half that touches shipped code.
+
+**Both are properties of the *target*, not of how the profiler is deployed.** They bite a developer
+profiling their own app on their own machine exactly as hard as anything else would.
 
 **Possible directions, none chosen.** A label carried on the coroutine context rather than the
 thread, with a `ThreadContextElement` restoring it on each resume; a `suspend`-aware `op`; refusing
