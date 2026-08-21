@@ -241,7 +241,57 @@ to compile against a suspending body; or accepting the limit and documenting it 
 thread half wants a different slot registry — one that does not copy on every thread and can evict
 without being asked.
 
-## 9. Correct the attribution bias using call counts · open
+## 10. Detect when a "fine" operation is not fine, for free · open
+
+**The problem this answers.** The fine tier rests on two assumptions, and neither is verified:
+
+1. **Operations do not block.** Argued from "a 20 ns operation has no time to block". But a fine
+   operation can park on a **contended lock** — nanoseconds uncontended, microseconds or worse
+   contended — and it can stall on a GC pause, a page fault, or a plain OS deschedule. When it does,
+   occupancy inflates and the report says *"this operation is expensive"* where the truth is *"this
+   operation is waiting for another thread"*. Opposite diagnoses, opposite fixes. For parallel
+   in-memory graph traversal — the workload this tool exists for — that is not hypothetical.
+2. **Threads ≤ cores.** The sampler reads slots, not cores, so with 200 runnable threads on 16
+   cores every slot is counted every tick and occupancy over-reads CPU by 12×. The bench used 8 and
+   16 threads on 16 cores and never oversubscribed, so this has never been exercised.
+
+So the honest status is not that "fine operations do not block" is *wrong* — it is that it is a
+**design intent asserted by the person placing the label, and never checked**. Which is exactly the
+kind of thing this project keeps insisting on measuring instead of assuming.
+
+**The detector, and it costs nothing on the hot path.** The sampler already reads the slot's
+operation id. Have it read the **call counter for that id** in the same tick, and keep both:
+
+| consecutive ticks | id | counter | meaning |
+|---|---|---|---|
+| same | same | **increased** | many short instances — genuinely fine |
+| same | same | **unchanged** | *one* instance spanning ≥ 1 ms — 50,000× longer than a 20 ns operation should be |
+
+That is the whole test. A single 20 ns instance has a 1-in-50,000 chance of being caught by one
+sample, so an instance that survives two consecutive ticks is not a fine operation, whatever it was
+labelled. The counter increment already exists on the hot path; the sampler reads one extra word.
+Entry and exit are untouched, which is the constraint that matters.
+
+**What it cannot tell you alone.** An unchanged counter means "stuck in one instance", which
+conflates blocked, descheduled, and legitimately-long-but-running. Separating those needs the
+thread's state — but only for slots the counter test already flagged, which is normally almost
+none. That wants a (weak) thread reference on the slot, off the hot path.
+
+**What comes out.** Two counters per operation instead of one — samples where the instance was
+fresh, and samples where it was stuck — which yields both an occupancy share and a running share
+from the same pass. That is `span − CPU` for the fine tier, obtained without spans. And it is a
+direct answer to the third requirement in [profiler.md](profiler.md): not just *where* the time
+went, but *whether the operation was working or waiting*, which is the "why" a user needs before
+they can act.
+
+**On automatic promotion to the coarse tier.** Retroactive promotion is not possible — the coarse
+tier allocates a context object at entry and those entries have already happened. Two weaker forms
+are: *report it* ("operation X had N instances lasting ≥ 1 ms; consider a coarse label"), which is
+cheap and probably enough; or *adaptive promotion*, where a detected operation starts allocating
+contexts on subsequent entries, which needs a check at entry and therefore costs hot-path budget.
+Start with reporting; the diagnostic is most of the value.
+
+## 11. Correct the attribution bias using call counts · open
 
 The sampler reads high on parents and low on short leaves. With call counts the correction is
 arithmetic rather than a model, and the counts are already collected. Blocked on understanding the

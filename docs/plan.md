@@ -230,17 +230,34 @@ instances were excluded** — otherwise it quietly describes a biased subset.
 
 **Unsettled, and it has to be settled before the CPU column means anything: what is a sample worth
 when the thread is not running?** The sampler counts a slot as being inside its operation whether
-the thread is on a CPU, blocked on I/O, parked on a lock, or — for a virtual thread — unmounted
-entirely. The fine tier never had to care: operations of tens of nanoseconds do not block, so
-wall-clock and CPU coincide. Coarse operations block constantly, which is most of why anyone would
-label them. So the table above says "total CPU · sampled" and that is not yet true — as built it
-would be occupancy, and span minus occupancy would read as zero waiting where the truth is the
-opposite.
+the thread is on a CPU, blocked on I/O, parked on a lock, descheduled by the OS, or — for a virtual
+thread — unmounted entirely. What it measures is **occupancy**: how many threads are inside this
+operation. Not CPU.
+
+Occupancy is a real measurement, not a broken one. Waiting is slow, and a report that ignored
+waiting would be answering the wrong question. Two different questions are in play and both are
+legitimate:
+
+- *Why does this take 200 ms?* — waiting counts in full.
+- *Why is the machine saturated, and why does more parallelism not help?* — waiting costs nothing.
+
+**What must not happen is mixing them, and the reason is additivity.** CPU time adds up across
+threads: ten thousand threads burning 1 ms each is ten seconds of core time, a real quantity you
+can act on. Wall-clock waiting does not add up: ten thousand threads waiting 200 ms each is 200 ms,
+because they wait simultaneously. Summed occupancy is therefore not a quantity at all — it is
+neither latency nor CPU. Sample ten thousand threads parked in one operation at a 1 ms step and
+after 200 ms you have two million samples, which reads as 2,000 seconds of a 200 ms wait that used
+no CPU.
+
+The design above is right about where waiting belongs: **span** measures it exactly, and
+**span − CPU** *is* the waiting, quantified. The defect is only that the CPU column as built would
+be occupancy, so `span − CPU` would come out near zero and the report would say "no waiting here"
+in exactly the case where it is all waiting. The one answer that was wanted, inverted.
 
 Either the sampler learns to distinguish a running thread from a parked one, or the column is
 renamed to what it actually measures and a separate mechanism supplies CPU. This is the same
 problem as the coroutine one in a different costume — the slot is attached to a thread, and the
-thing being measured is not a thread. See [ideas.md](ideas.md) item 8.
+thing being measured is not a thread. See [ideas.md](ideas.md) items 8 and 10.
 
 **Bench work:** some operations promoted to coarse, so there is something to cross-tabulate.
 
