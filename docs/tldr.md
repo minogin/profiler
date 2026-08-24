@@ -27,6 +27,10 @@ val probe = Profiler.register("hashProbe")   // once, at startup
 op(probe) { table.find(key) }                // at the call site
 ```
 
+When the boundary is not a block — a listener, a before/after callback — there is
+`Profiler.enter(id)` / `exit()` instead, plus `expectBalanced()`, because that form has no `finally`
+and a label left open bills everything after it to the wrong operation.
+
 That writes one integer into a thread-local slot. A separate thread wakes up every millisecond,
 reads every thread's slot, and counts what it finds. Afterwards, the count per label is the share of
 time. Two numbers matter: **1.7 ns** — what the label costs — and **1.001 ms** — the sampling

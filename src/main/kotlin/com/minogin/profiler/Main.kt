@@ -531,16 +531,33 @@ private fun runApiDemo(threads: Int, seconds: Int) {
     // which is the correct behaviour and would leave nothing to demonstrate.
     Profiler.start(stepMillis = 1.0, strict = false)
 
+    // A fourth operation placed the other way, for code that cannot be wrapped in a block. One
+    // worker leaks it on purpose, every thousandth pass, to show what the balance check is for.
+    val flush = Profiler.register("flushBatch")
+
     val deadline = System.nanoTime() + seconds * 1_000_000_000L
     val workers = List(threads) { n ->
         Thread {
             var s = (n + 1).toLong()
+            var pass = 0L
             try {
                 while (System.nanoTime() < deadline) {
                     // 3. Wrap the work. Nesting is fine; the innermost label wins.
                     s = op(parse) { burn(s, work[0]) }
                     s = op(validate) { burn(s, work[1]) }
                     s = op(index) { burn(s, work[2]) }
+
+                    // 3b. The non-lexical form, for a boundary that is not a block — a listener, a
+                    // before/after callback, a span across several methods. It has no `finally`,
+                    // which is the whole risk: thread 0 here "throws" every thousandth pass and
+                    // never calls exit, exactly as a Calcite rule that throws would.
+                    Profiler.enter(flush)
+                    s = burn(s, work[1])
+                    val leak = n == 0 && (++pass % 1000L) == 0L
+                    if (!leak) Profiler.exit()
+
+                    // 3c. And the check, at a point this thread is known to be quiescent.
+                    Profiler.expectBalanced()
                 }
             } finally {
                 Sink.consume(s)
@@ -554,15 +571,21 @@ private fun runApiDemo(threads: Int, seconds: Int) {
     // 5. Stop and read.
     println(Profiler.stop().render())
 
-    val ratio = work[1].toDouble() / work.sum()
+    // flushBatch burns the same amount as validateRecord, so by construction the two do equal
+    // shares of the busy-loop work. They do not read equal, and the difference is the point.
+    val total = work.sum() + work[1]
+    val ratio = work[1].toDouble() / total
     println(
         String.format(
             Locale.ROOT,
-            "%nby construction validateRecord does %.1f%% of the busy-loop work — that is the number",
+            "%nby construction validateRecord and flushBatch each do %.1f%% of the busy-loop work.",
             ratio * 100
         )
     )
-    println("to compare the share above against; the rest is dispatch outside any operation")
+    println("validateRecord should land there. flushBatch reads high, and that is the injected leak:")
+    println("one worker enters it and never exits every thousandth pass, so everything that thread did")
+    println("afterwards was billed to flushBatch until the next check. The balance check counts it; the")
+    println("share does not, which is why a leaked label looks like a finding rather than like an error.")
 }
 
 /**

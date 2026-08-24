@@ -298,10 +298,9 @@ private fun load(
         val t0 = System.nanoTime()
         Sink.keep(runner.planOnce())
         times += System.nanoTime() - t0
-        if (labels && Span.depth() != 0) {
-            leaked++
-            Span.reset()
-        }
+        // The library's check now, not the trial's own. A plan boundary is the point at which this
+        // thread cannot legitimately be inside a rule, which is exactly what expectBalanced wants.
+        if (labels && !Profiler.expectBalanced()) leaked++
     }
     val elapsed = System.nanoTime() - started
     if (labels) println(if (leaked == 0) "span stack balanced after every plan" else "WARNING: label leaked after $leaked of ${times.size} plans")

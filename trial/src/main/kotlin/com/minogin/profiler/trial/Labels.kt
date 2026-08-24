@@ -1,8 +1,6 @@
 package com.minogin.profiler.trial
 
 import com.minogin.profiler.Profiler
-import com.minogin.profiler.getOpaque
-import com.minogin.profiler.setOpaque
 import org.apache.calcite.plan.RelOptListener
 import org.apache.calcite.plan.RelOptNode
 import org.apache.calcite.plan.RelOptPlanner
@@ -19,32 +17,12 @@ import org.apache.calcite.tools.Program
  * Calcite does offer is a listener that is notified immediately before and immediately after
  * `rule.onMatch(call)` runs, which is the same boundary expressed as two callbacks.
  *
- * So the trial needs an enter/exit form of the hook, and the library does not have one. This is
- * the first friction finding, and the helper below is what it costs: fifteen lines that belong in
- * the profiler rather than here, written against `Profiler.slot()` and the opaque accessors, which
- * are public but were never presented as the way to place a label.
+ * That was the trial's first friction finding, and it cost fifteen lines of helper here — a span
+ * stack written against `Profiler.slot()` and the opaque accessors, which are public but were never
+ * presented as the way to place a label. **Those fifteen lines are now `Profiler.enter` /
+ * `Profiler.exit` and this file no longer has them**, which is the point of phase 3.75: the second
+ * trial should not have to rediscover the same thing.
  */
-object Span {
-    private val stack = ArrayDeque<Int>()
-
-    /** Enters operation [id], remembering what the thread was inside before. */
-    fun enter(id: Int) {
-        val slot = Profiler.slot()
-        stack.addLast(slot.getOpaque())
-        slot.setOpaque(id)
-        slot.count(id)
-    }
-
-    /** Leaves the innermost operation, restoring the previous one. */
-    fun exit() {
-        val slot = Profiler.slot()
-        slot.setOpaque(if (stack.isEmpty()) -1 else stack.removeLast())
-    }
-
-    fun depth(): Int = stack.size
-
-    fun reset() = stack.clear()
-}
 
 /**
  * Labels every rule firing with the identity of the *rule instance*.
@@ -84,7 +62,7 @@ class RuleLabeller(rules: List<RelOptRule>) : RelOptListener {
     private val unregistered = Profiler.register("rule:<other>")
 
     override fun ruleAttempted(event: RelOptListener.RuleAttemptedEvent) {
-        if (event.isBefore) Span.enter(ids[event.ruleCall.rule] ?: unregistered) else Span.exit()
+        if (event.isBefore) Profiler.enter(ids[event.ruleCall.rule] ?: unregistered) else Profiler.exit()
     }
 
     override fun relEquivalenceFound(event: RelOptListener.RelEquivalenceEvent) {}

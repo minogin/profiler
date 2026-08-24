@@ -288,6 +288,12 @@ time interleaving was not enough on its own.
 This is the deliverable that gets dropped when the finding goes well, so it goes first among the
 things to carry into phase 4.
 
+> **Since acted on, in phase 3.75.** Items 1 and 2 are built — `Profiler.enter` / `exit` /
+> `expectBalanced`, and the report counts leaks two ways. The fifteen-line `Span` helper below no
+> longer exists: `RuleLabeller` calls the library, and the plan-boundary check is one line. Items 6
+> and 7 (fold empty operations; the counterfactual warning) are in the report. Items 3, 4 and 5
+> remain as recorded — they are properties of what Calcite exposes, not of our API.
+
 **1. There is no enter/exit hook, and lexical placement is the exception in somebody else's code.**
 The documented surface is `op(id) { }`, a block. Nothing in Calcite is ours to wrap in a block.
 What Calcite offers is two callbacks, before and after. The trial had to write a fifteen-line

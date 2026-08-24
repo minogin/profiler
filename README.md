@@ -104,6 +104,28 @@ println(Profiler.stop().render())
 there is a working example to copy. Up to 256 operations, registered by name at runtime. Call
 `Profiler.release()` when a thread exits, or dead threads keep reading as idle ones.
 
+**When the boundary is not a block** — a listener, a before/after callback, a span across several
+methods — there is an explicit form. Reach for it second, because it has no `finally` and so it can
+leak:
+
+```kotlin
+Profiler.enter(rule); … ; Profiler.exit()        // nests with op { } in either order
+
+Profiler.expectBalanced()                        // at a point the thread should be quiescent
+```
+
+A leaked label bills every later sample on that thread to the leaked operation — silently, and the
+number still looks plausible. `expectBalanced()` is how that surfaces where it happened rather than
+as a finding at the end; the report counts what it found either way.
+
+**For an operation under ~50 ns**, do not label it individually — the hook is a visible fraction of
+it, the sampler reads it low, and the compiler can move work across the boundaries of adjacent short
+labels. Label the loop and say how many units it covers:
+
+```kotlin
+op(probe, times = keys.size) { for (k in keys) table.find(k) }
+```
+
 **One trap worth knowing.** A label is only a boundary if the compiler cannot see through it. Three
 adjacent tiny operations whose work has compile-time-constant bounds get unrolled and interleaved,
 and the shares come out wrong — we measured 0.46% where 8.7% was correct. Opaque slot writes stop

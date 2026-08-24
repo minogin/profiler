@@ -36,6 +36,9 @@ const val NO_OP_INDEX = MAX_OPERATIONS
  */
 const val MAX_SLOTS = 1024
 
+/** How deeply hand-placed `enter` labels may nest on one thread before the stack gives up. */
+const val MAX_SPAN_DEPTH = 64
+
 /**
  * One thread's slot: the id of the operation that thread is currently inside.
  *
@@ -128,6 +131,33 @@ class OpSlot(
     fun count(id: Int) {
         counts[id + COUNT_PAD]++
     }
+
+    /** For a label placed around [n] units of work rather than one. See `op(id, times)`. */
+    fun count(id: Int, n: Int) {
+        counts[id + COUNT_PAD] += n
+    }
+
+    /**
+     * The stack of operations this thread has entered without leaving, for the non-lexical form.
+     *
+     * Only `enter`/`exit` touch it — `op(id) { }` keeps its predecessor in a local and restores it
+     * in a `finally`, which the compiler writes and nothing can leak past. So depth here is exactly
+     * the number of labels placed by hand and not yet closed, which is what makes it a balance
+     * check rather than a general call-depth counter.
+     *
+     * A plain array with a single writer, and read from the sampling thread only when the session
+     * ends. Sixty-four is far past any sane nesting of hand-placed labels; past that the label is
+     * still set correctly and only the restoring is given up, which is recorded rather than thrown.
+     */
+    @JvmField
+    val stack = IntArray(MAX_SPAN_DEPTH)
+
+    @JvmField
+    var depth: Int = 0
+
+    /** Hand-placed labels that overflowed the stack, so exit could not restore what came before. */
+    @JvmField
+    var overflows: Long = 0
 
     fun countOf(id: Int): Long = counts[id + COUNT_PAD]
 
@@ -227,6 +257,61 @@ object Profiler {
     fun slot(): OpSlot = local.get()
 
     /**
+     * Enters operation [id] until a matching [exit], for a boundary that is not a block.
+     *
+     * **`op(id) { }` is the form to reach for first.** It is inline, its `finally` is written by the
+     * compiler, and it cannot leak. This exists because almost nothing in third-party code is ours
+     * to wrap in a block: the boundary Calcite offers is two callbacks, one before the rule fires
+     * and one after, and the trial had to write its own fifteen lines against [slot] to use it.
+     * The two forms nest in either order.
+     *
+     * What it costs, and it is not the hook: **there is no `finally` here, so a body that throws
+     * leaves the label set** and every later sample on this thread is billed to it. No error, no
+     * warning, a plausible wrong number — the contaminating direction. Calcite's "after"
+     * notification is not inside a `finally`, so this is not a hypothetical. See [expectBalanced].
+     */
+    fun enter(id: Int) {
+        val s = local.get()
+        if (s.depth < MAX_SPAN_DEPTH) s.stack[s.depth++] = s.getOpaque() else s.overflows++
+        s.setOpaque(id)
+        s.count(id)
+    }
+
+    /** Leaves the innermost hand-placed operation, restoring what the thread was inside before. */
+    fun exit() {
+        val s = local.get()
+        s.setOpaque(if (s.depth > 0) s.stack[--s.depth] else NO_OP)
+    }
+
+    /** How many hand-placed labels this thread has entered and not left. */
+    fun depth(): Int = local.get().depth
+
+    /**
+     * Asserts that this thread has closed every label it opened, and reports whether it had.
+     *
+     * The check the trial performed after every one of its 484 iterations rather than assuming the
+     * library's users would think of it. Call it wherever the caller knows the thread should be
+     * quiescent — between requests, between iterations, at the end of a task — and a leak surfaces
+     * there instead of quietly contaminating everything that follows.
+     *
+     * Resets the stack, so one leak is one report rather than every subsequent check failing too.
+     */
+    fun expectBalanced(): Boolean {
+        val s = local.get()
+        if (s.depth == 0) return true
+        imbalances.incrementAndGet()
+        s.depth = 0
+        s.setOpaque(NO_OP)
+        return false
+    }
+
+    /** Labels left open at a point the caller said should be quiescent. See [expectBalanced]. */
+    private val imbalances = AtomicInteger(0)
+
+    /** Threads still inside a hand-placed label right now, which at the end of a session is a leak. */
+    fun openSpans(): Int = allSlots.count { it.depth > 0 }
+
+    /**
      * Drops the calling thread's slot. A thread that has finished must not stay in the walk list:
      * its slot reads empty forever, inflating the sampler's denominator and — worse for occupancy
      * work — counting a dead thread as an idle one. A registry that only ever grows is also a
@@ -284,8 +369,12 @@ object Profiler {
         val stats = (0 until registeredCount()).map { id ->
             OperationStat(id, nameOf(id), s.counters[id], s.sessionCalls(id), s.stuckHits[id], s.stuckInstances[id])
         }
+        // A label still open when the session ends is a leak by definition: nothing can close it
+        // now. Counted here rather than left to the user to notice, because the symptom — one
+        // operation quietly accumulating everybody else's samples — looks exactly like a finding.
         return Report(
-            stats, s.counters[NO_OP_INDEX], s.ticks, s.span, duration, s.maxSlots, s.duty(), s.failure
+            stats, s.counters[NO_OP_INDEX], s.ticks, s.span, duration, s.maxSlots, s.duty(), s.failure,
+            imbalances = imbalances.get(), openAtEnd = openSpans(),
         )
     }
 }
@@ -378,6 +467,10 @@ class Report(
      * what led to the verdict.
      */
     val failure: String? = null,
+    /** Times a thread was found holding a label open where the caller said it should not be. */
+    val imbalances: Int = 0,
+    /** Threads still inside a hand-placed label when the session ended. */
+    val openAtEnd: Int = 0,
 ) {
     /** False when a fatal finding stopped the session. See the severity ladder in plan.md. */
     val ok: Boolean get() = failure == null
@@ -604,7 +697,12 @@ class Report(
             )
         )
         appendLine("-".repeat(96))
-        for (op in operations.sortedByDescending { it.hits }) {
+        // Operations the sampler never caught are folded away rather than printed as a screen of
+        // zeroes — Calcite's report carried twenty-five rules at 0.000%. Folded, not dropped: the
+        // count says how many there were, and a *called* operation with no samples is a real
+        // finding, since it means the label is on something too small to see.
+        val (seen, unseen) = operations.partition { it.hits > 0 }
+        for (op in seen.sortedByDescending { it.hits }) {
             appendLine(
                 String.format(
                     Locale.ROOT, "%-28s %8.3f%% %,14d %9d %6.2f%% %11s %6.2f%%",
@@ -614,6 +712,16 @@ class Report(
             )
         }
         appendLine("-".repeat(96))
+        if (unseen.isNotEmpty()) {
+            val called = unseen.filter { it.calls > 0 }
+            appendLine(
+                "${unseen.size} operations were never sampled and are folded away" +
+                        (if (called.isEmpty()) " (none of them ran at all)"
+                        else "; ${called.size} of them did run: " +
+                                called.sortedByDescending { it.calls }.take(4).joinToString { it.name } +
+                                (if (called.size > 4) ", …" else ""))
+            )
+        }
         appendLine("share is of labelled samples and is occupancy, not CPU — the duty cycle above bounds the gap")
         appendLine("noise is 1/sqrt(hits), the error chance alone gives")
         appendLine(
@@ -648,6 +756,27 @@ class Report(
         if (Profiler.untrackedSlots() > 0) {
             appendLine("    (${Profiler.untrackedSlots()} threads arrived past the $MAX_SLOTS-slot ceiling and are not checked)")
         }
+        // A leaked label does not look like an error. It looks like a finding: one operation
+        // quietly accumulating everybody else's samples, with a plausible number beside it.
+        if (imbalances > 0 || openAtEnd > 0) {
+            appendLine("-".repeat(96))
+            if (imbalances > 0) appendLine(
+                "! $imbalances labels were still open at a point the caller said should be quiescent — " +
+                        "everything after each leak was billed to the leaked operation"
+            )
+            if (openAtEnd > 0) appendLine(
+                "! $openAtEnd threads were still inside a hand-placed label when sampling stopped, which " +
+                        "nothing can close now"
+            )
+            appendLine("  a label placed with enter/exit has no finally: a body that throws leaves it set")
+        }
+        appendLine("-".repeat(96))
+        // Said in the output rather than in a document, because the one time it mattered it was
+        // worth a factor of 275 and nothing on the screen hinted at it.
+        appendLine("A share is where time went. It is not what removing the operation would save:")
+        appendLine("in the one trial run against real code, an operation holding 46% of the time was worth")
+        appendLine("275x when removed, because it was creating work for everything else as well as doing")
+        appendLine("its own. The two numbers are different questions and the gap can be orders of magnitude.")
     }
 
     companion object {
@@ -715,6 +844,30 @@ inline fun <T> op(id: Int, body: () -> T): T {
     // That inflates busy operations by calls x counterCost — the one distortion we can subtract
     // exactly, since the counter measures precisely the quantity the correction needs.
     slot.count(id)
+    try {
+        return body()
+    } finally {
+        slot.setOpaque(prev)
+    }
+}
+
+/**
+ * The same, for a block that performs [times] units of the operation rather than one.
+ *
+ * Below about 50 nanoseconds an operation should not carry a label of its own: the hook is a
+ * visible fraction of it, the sampler reads it low, and C2 can move work across the boundaries of
+ * adjacent short labels without leaving a trace. The remedy is to label the loop instead — and then
+ * the report speaks in loop-executions, which is not the unit anybody thinks in. This says how many
+ * units the block contains, so the counts and the implied duration per call come back in the
+ * caller's terms.
+ *
+ * `op(probe, times = keys.size) { for (k in keys) table.find(k) }` reports the probe, not the loop.
+ */
+inline fun <T> op(id: Int, times: Int, body: () -> T): T {
+    val slot = Profiler.slot()
+    val prev = slot.getOpaque()
+    slot.setOpaque(id)
+    slot.count(id, times)
     try {
         return body()
     } finally {

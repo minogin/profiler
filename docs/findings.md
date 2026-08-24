@@ -708,6 +708,26 @@ tolerance was a guessed 12% and let a real 11% defect pass three times. Measured
 The same mistake was nearly repeated by picking a 0.5 pp gate for phase 3 by analogy; the gate is
 now the ranking of the operations that carry the time, which is what the answer is actually for.
 
+## Placement
+
+**A leaked label does not look like an error. It looks like a finding.** Measured on purpose: one
+worker of four enters an operation and never exits it on every thousandth pass, so everything that
+thread does afterwards is billed to that operation until the next check. By construction that
+operation and the one beside it do exactly the same amount of work — 40.7% each. The clean one read
+**40.4%**; the leaking one read **43.8%**.
+
+3.4 percentage points, on a line that carries a plausible share, a plausible call count and a
+plausible implied duration. Nothing in the numbers says which one is wrong. That is why the balance
+check is a count in the report rather than advice in a document, and why the non-lexical form is
+documented second: `op(id) { }` has a `finally` written by the compiler and cannot do this.
+
+**Folding empty operations is not just tidiness — it separates two different things.** Calcite's
+report carried twenty-five rules at 0.000%. Folded away with a count, the report also names the ones
+that *ran* and were still never sampled: on a 25 s run, `rule:EnumerableLimitRule` at 48,564 calls
+and zero hits. An operation nobody called is noise; an operation called fifty thousand times that
+the sampler never once caught is a statement about its size — under a nanosecond per call by the
+rule of three — and belongs in front of the reader.
+
 ## Open questions
 
 **The detector's thresholds are provisional.** Naming an operation takes three conditions together:
