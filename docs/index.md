@@ -4,8 +4,9 @@ Each one has a job, and nothing is written in two places. Start with [tldr.md](t
 five minutes, or with [profiler.md](profiler.md) if you want the design.
 
 **Where we are right now:** phases 1, 2, 3, 3.5 and 3.75 are done, and so is the first trial, on
-Apache Calcite. Next is **trial 2 — Lucene first**, and [plan.md](plan.md#trial-2--foreign-code-concurrent-this-time--next)
-carries the criteria, the reasoning and the five steps the first trial taught us.
+Apache Calcite. Next are the **trials on foreign code, Lucene first**, and [plan.md](plan.md#trials-2--foreign-code-concurrent-this-time--next)
+carries the candidate list — Lucene, Netty, a compiler, and two deliberate negative controls — with
+the criteria and the five steps the first trial taught us about running one.
 
 | document | what belongs in it | read it when |
 |---|---|---|

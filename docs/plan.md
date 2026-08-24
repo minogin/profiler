@@ -18,8 +18,8 @@ words, is [tldr.md](tldr.md).
 | — | Trial — the fine tier on somebody else's code | **done** |
 | 3.5 | What a share is worth — bounding the error, not classifying operations | **done** |
 | 3.75 | Placement — enter/exit, the balance check, report polish | **done** |
-| — | Trial 2 — foreign code, concurrent: Lucene first | **next** |
-| 4 | The coarse tier — contexts, spans, cross-tabulation | after trial 2 |
+| — | Trials 2+ — foreign code, concurrent: Lucene, Netty, a compiler, two negative controls | **next** |
+| 4 | The coarse tier — contexts, spans, cross-tabulation | after the trials |
 | 5 | Crossing threads — propagation, and per-operation parallelism | not started |
 | 6 | Thread state and the whole-application parallelism coefficient | not started |
 | 7 | Library surface — annotations, agent, results API | not started |
@@ -579,7 +579,7 @@ workload with forty labels of which fifteen ever fire. **All three hold.**
 - The counterfactual warning closes every report.
 - `op(id, times = n)` reports in the caller's units for a label placed around a loop.
 
-## Trial 2 — foreign code, concurrent this time · next
+## Trials 2+ — foreign code, concurrent this time · next
 
 One real workload is one data point, and every design decision since has been extrapolated from it.
 The second trial matters more than any feature on this list.
@@ -600,9 +600,24 @@ rather than forking. The counts column should also earn its keep, since clause e
 differ by orders of magnitude between clause types. Cost: an index has to be built to search, which
 is a few dozen lines of generated documents.
 
-**Then others, and the list is deliberately open.** Netty's pipeline is the same identity problem on
-event-loop threads — N handlers behind one `channelRead` — and would test a genuinely different
-concurrency shape. Beyond that, anything that meets the four criteria.
+**Then the rest of the list, in this order and for these reasons.** Not one trial — several, because
+one data point produced a friction list we then designed against for a week, and two produced a
+better one.
+
+| candidate | why it is on the list | what it tests that the others do not |
+|---|---|---|
+| **Lucene** search | clauses and scorers share `Scorer` / `DocIdSetIterator` frames; concurrent across segments; built to be extended | placement by *wrapping* rather than by callback, and the first concurrent foreign workload |
+| **Netty** pipeline | N handlers behind one `channelRead`; event-loop threads | a different concurrency shape entirely — few threads, many tasks, and time that is mostly *not* CPU |
+| **javac or the Kotlin compiler** | many passes through the same visitor frames; the identity question is "which pass", which no stack answers | depth — compilers recurse hard, and JFR truncates at 64 frames where a slot has no depth at all |
+| **JGraphT** or any graph library | closest to the shape this project came from: node expansion, edge scan, tens of nanoseconds | whether the tool says anything useful when methods *are* the operations |
+| **Jackson** | hot, short, and its identity maps cleanly onto methods | the same, at the smallest operation size we have ever tried |
+
+**The last two are negative controls and that is why they are worth doing.** A stack profiler
+already answers "which method" well; if our labels merely reproduce what a flame graph says, the
+tool should be seen to reproduce it rather than to invent a difference. [case.md](case.md) keeps an
+honest section on where the other tools are better, and it is currently built from one workload.
+A trial that ends in "async-profiler would have told you this in ten seconds" is a real result and
+belongs there.
 
 Each trial gets its own module beside [`trial/`](../trial), so nothing it depends on can reach the
 profiler, which still takes no dependencies at all.
@@ -634,7 +649,7 @@ verdicts; the floor check, which under `strict` stops a session within a second;
 operations; and `op(id, times = n)`. Lucene is concurrent, which none of the phase 3.5 work has
 ever met on foreign code.
 
-## Phase 4 — the coarse tier · after trial 2
+## Phase 4 — the coarse tier · after the trials
 
 Contexts, spans, and the cross-tabulation. Same-thread to begin with — crossing threads is phase 5,
 and the two are worth separating so that propagation bugs cannot be confused with tier bugs.
