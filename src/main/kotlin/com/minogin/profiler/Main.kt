@@ -113,18 +113,35 @@ fun main(args: Array<String>) {
     // and measure nothing. `--strict` turns it on, which is how the stopping itself gets tested.
     val strict = opt["strict"] != null
 
+    // --lock=<hold micros>,<interval millis>. The one operation here that genuinely blocks, and
+    // the only way anything in phase 3.5 can be checked against a known amount of waiting.
+    val contended = opt["lock"]?.split(",")?.let { p ->
+        ContendedLock(
+            holdNanos = (p[0].trim().toDouble() * 1_000).toLong(),
+            intervalNanos = (p.getOrElse(1) { "25" }.trim().toDouble() * 1_000_000).toLong(),
+        )
+    }
+
     require(activeThreads in 1..threads) { "--active=$activeThreads is outside 1..$threads" }
 
     // The sampler needs a core of its own. Spinning it is the only way to hold a 1 ms step under
     // load, and a spinning thread never yields — so with the sampler on, the workers can never
     // have every core. A genuinely saturated machine is only measurable with --sampler=off, and
     // that measurement is therefore always uninstrumented. Not a problem, but a real limit.
-    val maxThreads = if (sampling) cores - 1 else cores
+    //
+    // --oversubscribe lifts it, and that is a mode rather than an escape hatch: with more runnable
+    // threads than cores the sampler reads slots, not cores, so occupancy over-reads CPU by exactly
+    // the oversubscription factor. It is the one configuration whose duty cycle can be predicted
+    // from the configuration alone — roughly cores/threads — which makes it a truth to check
+    // against rather than a hazard to avoid.
+    val oversubscribe = opt["oversubscribe"] != null
+    val maxThreads = if (oversubscribe) 1024 else if (sampling) cores - 1 else cores
     for (n in sweep ?: listOf(threads)) {
         require(n in 1..maxThreads) {
             "thread count $n is outside 1..$maxThreads " +
-                    (if (sampling) "(the sampler needs one of the $cores cores; --sampler=off lifts this)"
-                    else "($cores cores)")
+                    (if (sampling) "(the sampler needs one of the $cores cores; --sampler=off lifts this, " +
+                            "--oversubscribe allows more threads than cores on purpose)"
+                    else "($cores cores; --oversubscribe allows more on purpose)")
         }
     }
 
@@ -147,12 +164,27 @@ fun main(args: Array<String>) {
     if (sampling && !labels) println("  (sampler with no labels: every sample lands on 'no operation' by design)")
     println("JVM: ${System.getProperty("java.vm.name")} ${System.getProperty("java.version")}, cores: $cores")
     if (activeThreads < threads) println("STARVATION MODE: ${threads - activeThreads} threads sit idle")
+    if (oversubscribe) println("OVERSUBSCRIBED: $threads threads on $cores cores")
+    contended?.let {
+        println(
+            String.format(
+                Locale.ROOT,
+                "CONTENDED LOCK: hold %.0f us every %.1f ms per thread — lock utilisation %.2f at %d threads%s",
+                it.holdNanos / 1e3, it.intervalNanos / 1e6, it.utilisation(activeThreads), activeThreads,
+                if (it.utilisation(activeThreads) >= 1.0) "  (over 1: the queue will run away, which is a mode too)" else ""
+            )
+        )
+    }
     println("=".repeat(96))
 
     // --- Provisional calibration ----------------------------------------------------
     // The cost of a busy-loop iteration is not a constant: it is taken at runtime, and only
     // after a warm-up.
     registerOperations()
+    // After the catalogue, so it takes the id straight after the bench's twenty and none of the
+    // truth machinery — which is indexed by operation id up to OP_COUNT — has to know about it.
+    // Its truth is not the configured one anyway: it is whatever the workers measured.
+    val lockOpId = if (contended != null) Profiler.register("lockedUpdate") else -1
     warmUpBurn(500)
     val provisional = calibrate()
     println("\n--- Busy-loop calibration (provisional, before the workload warm-up) ---")
@@ -182,6 +214,11 @@ fun main(args: Array<String>) {
         )
     )
     workload.applyCalibration(cal)
+    // The critical section is filled with the same busy loop as everything else, so its length
+    // rides on the same calibration. It is not fitted at its own working point the way the
+    // catalogue is — a millisecond-scale hold does not need to be accurate to a nanosecond, and
+    // the workers time what it actually came to anyway.
+    contended?.holdIters = cal.itersFor(contended.holdNanos.toDouble())
 
     // The very first check — did the JIT optimise the busy loop away? If the cost per iteration
     // is physically impossible, everything else is already garbage and not worth computing.
@@ -263,7 +300,7 @@ fun main(args: Array<String>) {
     } else if (sweep != null) {
         runSweep(sweep, labels, workload, seconds, warmedUp)
     } else {
-        val bench = Bench(threads, activeThreads, labels, workload)
+        val bench = Bench(threads, activeThreads, labels, workload, contended, lockOpId)
         bench.start()
         println("\n--- Run of $seconds s ---")
         // The sampler covers the measured run only, never the warm-up.
@@ -1111,7 +1148,7 @@ private fun printSampler(
     println(String.format(Locale.ROOT, "  covered %.2f%% of the run", sampler.span.toDouble() / runNanos * 100))
 
     val labelled = samples - sampler.counters[NO_OP_INDEX]
-    val stuck = (0 until OP_COUNT).sumOf { sampler.stuckHits[it] }
+    val stuck = (0 until Profiler.registeredCount()).sumOf { sampler.stuckHits[it] }
     val stuckShare = if (labelled == 0L) 0.0 else stuck.toDouble() / labelled
     printDuty(
         sampler.duty(), bench, runNanos,
@@ -1119,15 +1156,25 @@ private fun printSampler(
     )
 
     val duty = sampler.duty()
+    // The lower of two estimates of what the machine did to everything: the non-CPU fraction, and
+    // what a typical operation experienced. See Report.machineFloor — a blocking operation raises
+    // the first and cannot move the second.
+    val rates = (0 until Profiler.registeredCount())
+        .filter { sampler.counters[it] >= Report.MEDIAN_MIN_HITS }
+        .map { sampler.stuckHits[it].toDouble() / sampler.counters[it] }
+        .sorted()
+    val typical = if (rates.isEmpty()) Double.MAX_VALUE else rates[rates.size / 2]
+    val machineFloor = minOf(if (duty.available) 1 - duty.duty else Double.MAX_VALUE, typical)
+        .let { if (it == Double.MAX_VALUE) stuckShare else it }
     printDetector(
-        sampler, achieved, stuckShare,
-        machineFloor = if (duty.available) 1 - duty.duty else stuckShare
+        sampler, achieved, stuckShare, machineFloor,
+        lock = bench.contended, lockOpId = lockOpIdOf(bench)
     )
 
     println(String.format(Locale.ROOT, "\n  %-14s %14s %9s", "operation", "hits", "of total"))
-    for (id in (0 until OP_COUNT).sortedByDescending { sampler.counters[it] } + listOf(NO_OP_INDEX)) {
+    for (id in (0 until Profiler.registeredCount()).sortedByDescending { sampler.counters[it] } + listOf(NO_OP_INDEX)) {
         val hits = sampler.counters[id]
-        val name = if (id == NO_OP_INDEX) "(no operation)" else OPS[id].name
+        val name = if (id == NO_OP_INDEX) "(no operation)" else Profiler.nameOf(id)
         println(
             String.format(
                 Locale.ROOT, "  %-14s %,14d %8.3f%%",
@@ -1154,7 +1201,28 @@ private fun printSampler(
  * bench whose true answer is known: `hits × step / calls` should reproduce the duration the
  * operation was built to have, times the load factor the machine is imposing.
  */
-private fun printDetector(sampler: Sampler, stepNanos: Double, stuckShare: Double, machineFloor: Double) {
+/**
+ * The lock operation's id, which is always the one straight after the catalogue: the bench
+ * registers its twenty in order and this immediately after them.
+ */
+private fun lockOpIdOf(bench: Bench): Int = if (bench.contended != null) OP_COUNT else -1
+
+/**
+ * What an operation was built to cost. For the catalogue that is its configured self duration; for
+ * the contended lock it is the critical section alone, so the ratio column shows the waiting as
+ * the amount by which the operation exceeds what it was asked to be.
+ */
+private fun configuredNanos(id: Int, lock: ContendedLock?): Double =
+    if (id < OP_COUNT) OPS[id].selfNanos else lock?.holdNanos?.toDouble() ?: Double.NaN
+
+private fun printDetector(
+    sampler: Sampler,
+    stepNanos: Double,
+    stuckShare: Double,
+    machineFloor: Double,
+    lock: ContendedLock?,
+    lockOpId: Int,
+) {
     println("\n--- Long executions: is a fine operation actually fine? ---")
     println(
         String.format(
@@ -1165,19 +1233,24 @@ private fun printDetector(sampler: Sampler, stepNanos: Double, stuckShare: Doubl
         )
     )
     println(String.format(Locale.ROOT, "  %-14s %12s %12s %10s %9s %8s", "operation", "configured", "implied/call", "ratio", "over 1 tick", "long runs"))
+    // Past OP_COUNT sits the contended lock, which is registered separately precisely so that the
+    // truth machinery — indexed by operation id — never has to know about an operation whose
+    // duration is not its configured one.
+    val ids = 0 until Profiler.registeredCount()
     var worst = -1
-    for (id in (0 until OP_COUNT).sortedByDescending { sampler.counters[it] }) {
+    for (id in ids.sortedByDescending { sampler.counters[it] }) {
         val hits = sampler.counters[id]
         if (hits == 0L) continue
         val calls = sampler.sessionCalls(id)
         val implied = if (calls == 0L) Double.NaN else hits * stepNanos / calls
         val share = sampler.stuckHits[id].toDouble() / hits
         if (worst < 0 || share > sampler.stuckHits[worst].toDouble() / sampler.counters[worst]) worst = id
+        val configured = configuredNanos(id, lock)
         println(
             String.format(
                 Locale.ROOT, "  %-14s %12s %12s %9.2fx %10.2f%% %8d",
-                OPS[id].name, duration(OPS[id].selfNanos), duration(implied),
-                implied / OPS[id].selfNanos, share * 100, sampler.stuckInstances[id]
+                Profiler.nameOf(id), duration(configured), duration(implied),
+                implied / configured, share * 100, sampler.stuckInstances[id]
             )
         )
     }
@@ -1185,7 +1258,7 @@ private fun printDetector(sampler: Sampler, stepNanos: Double, stuckShare: Doubl
     println(
         String.format(
             Locale.ROOT, "  worst is %s at %.2f%%, %.2fx the machine floor on %,d long executions",
-            OPS[worst.coerceAtLeast(0)].name, worstShare * 100,
+            Profiler.nameOf(worst.coerceAtLeast(0)), worstShare * 100,
             if (machineFloor > 0) worstShare / machineFloor else 0.0,
             if (worst < 0) 0 else sampler.stuckInstances[worst]
         )
@@ -1193,12 +1266,27 @@ private fun printDetector(sampler: Sampler, stepNanos: Double, stuckShare: Doubl
     // The same rule the library's report applies, not a second one written by hand here — the
     // first version of this line tested the ratio alone and duly accused `serialize` of blocking
     // on the strength of one long execution in two thousand samples.
-    val flagged = (0 until OP_COUNT).filter {
+    val flagged = ids.filter {
         isSuspect(sampler.counters[it], sampler.stuckHits[it], sampler.stuckInstances[it], machineFloor)
     }
+    val names = flagged.joinToString { Profiler.nameOf(it) }
     println(
-        if (flagged.isEmpty()) "  nothing is flagged, which is the right answer: this bench has nothing that could block"
-        else "  FLAGGED: ${flagged.joinToString { OPS[it].name }} — and this bench has nothing that could block"
+        when {
+            lock == null && flagged.isEmpty() ->
+                "  nothing is flagged, which is the right answer: this bench has nothing that could block"
+
+            lock == null ->
+                "  FLAGGED: $names — and without --lock this bench has nothing that could block"
+
+            flagged == listOf(lockOpId) ->
+                "  FLAGGED: lockedUpdate, and nothing else — which is the right answer, since it is the " +
+                        "only thing here that waits"
+
+            flagged.isEmpty() ->
+                "  NOTHING FLAGGED, but lockedUpdate blocks by construction — the detector missed it"
+
+            else -> "  FLAGGED: $names — expected lockedUpdate alone"
+        }
     )
     println("  (the floor is one tick: a stall shorter than ${String.format(Locale.ROOT, "%.2f", stepNanos / 1e6)} ms cannot be seen at all)")
 }
@@ -1240,13 +1328,24 @@ private fun printDuty(
     // Denominator over every registered thread, since that is the set the duty cycle walks; an
     // inactive worker is parked on the barrier and brings wall time with no CPU under it.
     val wall = runNanos.toDouble() * bench.threads
-    val expected = (s.wallNanos - s.offCpuNanos) / wall
+    val expected = (s.wallNanos - s.totalOffCpuNanos) / wall
     val diffPp = abs(d.duty - expected) * 100
     println(
         String.format(
             Locale.ROOT,
             "  the workers' own account: %,d preemptions over %.3f ms, worst %.3f ms, %.2f%% of their wall time",
             s.events, s.offCpuNanos / 1e6, s.worstNanos / 1e6, s.offCpuNanos * 100.0 / s.wallNanos
+        )
+    )
+    // Two causes, kept apart on purpose: one is the machine misbehaving, the other is the workload
+    // doing exactly what it was configured to do. The duty cycle cannot tell them apart — it is an
+    // aggregate and says so — but the bench can, and that is how the aggregate gets checked.
+    if (s.lockAcquisitions > 0) println(
+        String.format(
+            Locale.ROOT,
+            "  and waiting for the contended lock: %,d acquisitions, %.3f s waited, worst %.1f ms, %.2f%% of their wall time",
+            s.lockAcquisitions, s.lockWaitNanos / 1e9, s.maxLockWaitNanos / 1e6,
+            s.lockWaitNanos * 100.0 / s.wallNanos
         )
     )
     println(
@@ -1265,6 +1364,14 @@ private fun printDuty(
         )
     )
     println("  (the workers see only preemptions longer than 0.5 ms, so their figure is a lower bound)")
+    if (bench.threads > Runtime.getRuntime().availableProcessors()) println(
+        String.format(
+            Locale.ROOT,
+            "  oversubscribed: %d threads on %d cores, so occupancy over-reads CPU by about %.1fx and the duty cycle says so",
+            bench.threads, Runtime.getRuntime().availableProcessors(),
+            bench.threads.toDouble() / Runtime.getRuntime().availableProcessors()
+        )
+    )
     // A third view of the same thing, and the cheapest of the three: a thread preempted for longer
     // than a tick is still holding its label, so the detector sees it as an execution that outlived
     // a tick. It cannot see the shorter preemptions at all — its floor is a whole tick against the

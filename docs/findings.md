@@ -550,6 +550,91 @@ The implied-duration column catches exactly that case — 144.84 ms per call is 
 two columns are complementary rather than redundant: implied duration finds long parents, the
 detector finds long leaves. Worth knowing that neither alone is sufficient.
 
+### Against injected blocking
+
+The bench now has one operation that genuinely waits: `lockedUpdate` takes a `ReentrantLock`, holds
+it for a configured time, and every other worker that wants it in the meantime is parked. The label
+sits *outside* the acquisition, so a parked thread is still inside the operation as far as its slot
+is concerned — which is the whole point.
+
+The duty cycle was checked against the workers' own timing of their waits, over a range of injected
+blocking spanning two orders of magnitude:
+
+| configuration | blocked, by the workers' own clock | duty cycle | it should have read | gap |
+|---|---|---|---|---|
+| no lock, 8 threads | — | 98.29% | 99.26% | 0.96 pp |
+| hold 2 ms every 25 ms | 0.41% | 98.29% | 99.26% | 0.96 pp |
+| hold 100 µs every 2 ms | 12.47% | 81.96% | 83.11% | 1.15 pp |
+| hold 2 ms every 10 ms | 34.48% | 64.57% | 65.37% | 0.80 pp |
+| hold 200 µs every 1 ms | 64.04% | 34.25% | 34.54% | 0.28 pp |
+| 32 threads on 16 cores | 62.21% (preemption, not the lock) | 37.39% | 37.71% | 0.33 pp |
+
+**The duty cycle tracks injected blocking from 0.4% to 64% and never misses by more than 1.15 pp.**
+It does not care what caused the thread to be off the CPU — a lock, the scheduler, or thirty-two
+threads on sixteen cores all read the same way, which is exactly what a bound on *all* stalling is
+supposed to do.
+
+**A queue's waiting time cannot be predicted from its configuration.** The first attempt configured
+a lock utilisation of 0.64 — eight threads, 2 ms held every 25 ms — and queueing theory says a mean
+wait of about 1.4 ms. Measured: **113 µs**, twelve times less. The cadence restarts after each
+acquisition, so a thread delayed by the lock arrives later next time and the threads self-organise
+out of each other's way. Negative feedback, not a Poisson queue.
+
+*Consequence:* the configuration sets the regime and nothing more. What the waiting *costs* is
+timed by the thread doing the waiting, exactly, for the same reason the preemption detector exists.
+
+### The detector against blocking, and its floor made visible
+
+With a mean wait of 2.95 ms — three ticks — the detector reads 56.04% of occupancy in executions
+that outlived a tick, against 64.04% of wall time genuinely blocked: it sees **88%** of it.
+
+With a mean wait of 342 µs — a third of a tick — it reads 4.46% against 12.47% genuinely blocked:
+it sees **36%**.
+
+That is the documented floor, measured rather than argued: *a stall shorter than one tick cannot be
+seen*, and one comparable to a tick is seen only through the tail of its distribution. What survives
+is enough to *name* the operation — `lockedUpdate` was flagged in both cases, at 20× and 200× the
+machine floor — but not to *quantify* the blocking, which is what the duty cycle is for. The two
+instruments are complementary and neither is sufficient: one attributes without quantifying, the
+other quantifies without attributing.
+
+The implied duration column carries the same story in a form a reader can act on: an operation
+configured to hold a lock for 100 µs reads **598.6 µs per call**. Six times what it was built to be,
+and the difference is waiting.
+
+### A baseline must not contain the effect it is used to detect
+
+Three attempts at the floor an operation is judged against, each broken by a workload the previous
+one had not met. This is the recurring trap of this phase and it is worth stating as a rule.
+
+1. **The run-wide rate of long executions.** Assumes long executions are the exception. Against
+   Calcite's planner that rate is 53.52%, because most of those labels genuinely are coarse
+   operations, so three times it is unreachable and nothing can ever be named.
+2. **The non-CPU fraction from the duty cycle.** Right for preemption and GC, which are what the
+   machine does to everything — but a thread blocked on a lock is also off the CPU, so a blocking
+   operation raises this floor and hides behind it. Measured: `lockedUpdate` with **88.61%** of its
+   occupancy in executions over a tick, against a floor of **35.43%** that its own blocking had
+   created. Not named.
+3. **The lower of that and the median across operations.** Preemption and GC raise every
+   operation's rate together, so the median sees them; blocking is concentrated in one operation,
+   so the median cannot be moved by it. The machine is blamed only for what both estimates agree on.
+
+Checked against every data set now available, and it is the only one of the three that holds on all
+of them:
+
+| run | machine floor | worst operation | verdict |
+|---|---|---|---|
+| bench, quiet | 3.49% | edgeScan 3.81% | silent |
+| bench, 15 threads | 30.50% | checkpoint 36.78% | silent |
+| bench, 32 threads on 16 cores | 60% | compact 63.88% | silent |
+| bench, lock held 2 ms every 10 ms | 0.81% | **lockedUpdate 92.03%** | named, alone |
+| bench, lock held 100 µs every 2 ms | 0.87% | **lockedUpdate 17.32%** | named, alone |
+| Calcite planner | 3.53% | **EnumerableMergeJoinRule 83.7%** | six rules named |
+
+Being conservative about blaming the machine means being liberal about naming operations. What stops
+that turning noise into an accusation is not the floor but the two guards beside it: a minimum share
+and a minimum number of long executions.
+
 ## Statistics
 
 **Percentage points cannot separate noise from bias.** Divergence falls as `1/√N` whether the

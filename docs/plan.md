@@ -463,20 +463,37 @@ two prices, and doing the cheap one first is what makes the expensive one checka
 The bench has never blocked and never oversubscribed — every thread runs the same schedule flat out
 on at most one core each. Nothing here can be verified against it as it stands. Needed:
 
-- an operation that contends on a real lock, with the contention rate a parameter, so the duty cycle
-  and the *stuck* counter have a known truth to be checked against;
-- a mode with threads well above core count;
+- ~~an operation that contends on a real lock, with the contention rate a parameter~~ — **done.**
+  `--lock=<hold µs>,<interval ms>` gives `lockedUpdate`, which takes a real `ReentrantLock` and parks
+  everyone else. It sits outside the operation catalogue and outside the two truths, so none of
+  phase 1's machinery had to learn about an operation whose duration is not its configured one.
+  The label goes *outside* the acquisition, so a parked thread is still inside the operation — which
+  is the property being tested.
+- ~~a mode with threads well above core count~~ — **done**, `--oversubscribe`. At 32 threads on 16
+  cores the duty cycle reads 37.39% against the workers' own 37.71%.
 - ~~the expected duty cycle computed from the configuration~~ — **done, and it had to be done
   differently.** The configuration cannot predict the duty cycle, because the operating system
   deschedules threads that have nothing to wait for. The second truth is instead the workers' own
   account of their preemptions, from the gaps in the clock readings the run loop already makes:
   `Worker.stallNanos`, no new bench machinery and nothing added to the hot loop.
 
-**Done when:** ~~duty cycle reads ~100% on the existing non-blocking bench~~ → the OS accounting and
-the workers' own account of the same quantity agree, which they do to 0.54 pp at 8 threads and
-0.36 pp in starvation mode; an injected blocking operation moves it by the injected amount within
-measurement; threads at 2× cores are reported as such; and the detector fires on the injected
-blocker and stays silent otherwise.
+**Done when** — all four hold, and the numbers are in
+[findings.md](findings.md#against-injected-blocking):
+
+- ~~duty cycle reads ~100% on the existing non-blocking bench~~ → the OS accounting and the workers'
+  own account of the same quantity agree. **0.28–1.15 pp across six configurations.**
+- an injected blocking operation moves it by the injected amount. **Tracked from 0.4% to 64% of
+  wall time blocked, never off by more than 1.15 pp.**
+- threads at 2× cores are reported as such. **37.39% at 32 threads on 16 cores, and the report says
+  it is describing where threads sit rather than where cycles go.**
+- the detector fires on the injected blocker and stays silent otherwise. **`lockedUpdate` named
+  alone, at 20× and 200× the machine floor; nothing named in any non-blocking configuration.**
+
+What is *not* settled is the thresholds, which remain provisional — and one limit is now measured
+rather than asserted: with a mean wait of 342 µs, a third of a tick, the detector sees 36% of the
+blocking that is really there. It still names the operation, because the tail of the distribution
+crosses a tick often enough, but it cannot quantify it. Quantifying is the duty cycle's job. Neither
+instrument is sufficient alone, which is the argument for having both.
 
 ## Phase 4 — the coarse tier · after 3.5
 

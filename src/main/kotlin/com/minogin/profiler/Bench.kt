@@ -28,6 +28,34 @@ private const val CLOCK_CHUNK = 256
 private const val STALL_GAP_NANOS = 500_000L
 
 /**
+ * The one thing in this bench that genuinely blocks.
+ *
+ * Everything else spins on arithmetic and never waits for anything, which is what made the whole
+ * workload useless for checking a measurement of stalling. Here a worker takes a real lock, holds
+ * it for a configured time, and every other worker that wants it in the meantime is parked by the
+ * operating system — off the CPU, and still inside the operation as far as the sampler is
+ * concerned. That gap is precisely what phase 3.5 exists to measure.
+ *
+ * The contention rate is a parameter rather than an accident. With `threads` workers each taking
+ * the lock every [intervalNanos] and holding it for [holdNanos], the lock's utilisation is
+ * `threads × hold / interval`, so the configuration says how hard they will collide — under 1 and
+ * the queue stays short, over 1 and it runs away.
+ *
+ * What the waiting *costs* is not computed from that, though. It is timed by the thread doing the
+ * waiting, exactly, for the same reason the preemption detector exists: a queue's behaviour under a
+ * real scheduler is not something to predict from a formula and then believe.
+ */
+class ContendedLock(val holdNanos: Long, val intervalNanos: Long) {
+    val lock = java.util.concurrent.locks.ReentrantLock()
+
+    /** Iterations of the busy loop that fill the critical section. Set at calibration. */
+    @Volatile
+    var holdIters: Int = 0
+
+    fun utilisation(threads: Int): Double = threads * holdNanos.toDouble() / intervalNanos
+}
+
+/**
  * A worker thread. Inactive threads exist and take part in the barriers but do no work —
  * that is the artificial starvation mode (3 busy out of 16).
  */
@@ -37,6 +65,8 @@ class Worker(
     private val labeled: Boolean,
     private val w: Workload,
     private val barrier: CyclicBarrier,
+    private val contended: ContendedLock? = null,
+    private val lockOpId: Int = -1,
 ) : Thread("bench-$id") {
 
     @Volatile var stage: Int = 0
@@ -65,6 +95,16 @@ class Worker(
     var maxStallNanos: Long = 0; private set
     var runWallNanos: Long = 0; private set
 
+    /**
+     * The worker's own account of the contended lock: how long it waited, how long it held, and
+     * how often. Timed by the thread that did the waiting, so this is the truth the duty cycle and
+     * the long-instance detector are checked against.
+     */
+    var lockWaitNanos: Long = 0; private set
+    var lockHeldNanos: Long = 0; private set
+    var lockAcquisitions: Long = 0; private set
+    var maxLockWaitNanos: Long = 0; private set
+
     /** Hook analysis: the hook timed alone, and leaf operations timed with and without it. */
     var hookDirect: Double = Double.NaN
         private set
@@ -86,6 +126,10 @@ class Worker(
         stalls = 0
         maxStallNanos = 0
         runWallNanos = 0
+        lockWaitNanos = 0
+        lockHeldNanos = 0
+        lockAcquisitions = 0
+        maxLockWaitNanos = 0
     }
 
     override fun run() {
@@ -130,6 +174,12 @@ class Worker(
         var stalled = 0L
         var events = 0L
         var worst = 0L
+        // The lock is taken on a wall-clock cadence rather than every n-th call, so the contention
+        // rate is what the configuration says and not a function of how fast this machine happens
+        // to be running today. Staggered by thread id so all eight do not arrive together on the
+        // first attempt, which would make the first interval unrepresentative of the rest.
+        var nextLock = if (contended == null) Long.MAX_VALUE
+        else started + contended.intervalNanos * (id + 1) / 8
         while (true) {
             var k = 0
             while (k < CLOCK_CHUNK) {
@@ -139,13 +189,22 @@ class Worker(
                 counts[op]++
                 k++
             }
-            val now = System.nanoTime()
+            var now = System.nanoTime()
             val gap = now - last
             if (gap < shortest) shortest = gap
             if (gap > STALL_GAP_NANOS) {
                 stalled += gap
                 events++
                 if (gap > worst) worst = gap
+            }
+            if (now >= nextLock) {
+                s = takeLock(s)
+                now = System.nanoTime()
+                nextLock = now + contended!!.intervalNanos
+                // The lock does not count towards the stall detector: it is the one wait in this
+                // bench that is *supposed* to happen, and mixing it into the preemption figure
+                // would destroy the very comparison it exists to make possible. The clock reading
+                // restarts from here for the same reason.
             }
             last = now
             if (now >= d) break
@@ -159,6 +218,36 @@ class Worker(
         state = s
         idx = i
         Sink.consume(s)
+    }
+
+    /**
+     * One trip through the contended lock, labelled.
+     *
+     * The label goes *outside* the acquisition, deliberately. A thread parked waiting for the lock
+     * is still inside `lockedUpdate` as far as its slot is concerned, so the sampler counts it —
+     * which is the whole point. That occupancy is not CPU, and the duty cycle should see exactly
+     * this much of it; the wait also lasts milliseconds, so the long-instance detector should see
+     * these executions and no others.
+     *
+     * Putting the label inside the lock instead would hide the wait completely and the operation
+     * would look like an ordinary well-behaved 2 ms of work. That is worth knowing in its own
+     * right: where the label sits decides whether waiting is visible at all.
+     */
+    private fun takeLock(state: Long): Long = op(lockOpId) {
+        val c = contended!!
+        val t0 = System.nanoTime()
+        c.lock.lock()
+        val acquired = System.nanoTime()
+        val waited = acquired - t0
+        lockWaitNanos += waited
+        lockAcquisitions++
+        if (waited > maxLockWaitNanos) maxLockWaitNanos = waited
+        try {
+            burn(state, c.holdIters)
+        } finally {
+            c.lock.unlock()
+            lockHeldNanos += System.nanoTime() - acquired
+        }
     }
 
     /**
@@ -303,13 +392,40 @@ class Worker(
 /**
  * What the working threads saw of their own scheduling during a run. Summed over active workers:
  * [wallNanos] is thread-time, so it is roughly the run duration times the number of them.
+ *
+ * [offCpuNanos] is preemption only — time the scheduler took the core away with nothing to wait
+ * for. Time spent waiting for the contended lock is [lockWaitNanos] and is deliberately kept
+ * apart: one is the machine misbehaving and the other is the workload behaving exactly as
+ * configured, and the whole point of the exercise is to see whether the instrument can tell them
+ * apart.
  */
-class Stalls(val wallNanos: Long, val offCpuNanos: Long, val events: Long, val worstNanos: Long)
+class Stalls(
+    val wallNanos: Long,
+    val offCpuNanos: Long,
+    val events: Long,
+    val worstNanos: Long,
+    val lockWaitNanos: Long = 0,
+    val lockHeldNanos: Long = 0,
+    val lockAcquisitions: Long = 0,
+    val maxLockWaitNanos: Long = 0,
+) {
+    /** Everything that kept a thread off the CPU, from either cause. */
+    val totalOffCpuNanos: Long get() = offCpuNanos + lockWaitNanos
+}
 
 /** The bench: a thread pool and the barrier the main thread drives them through stages with. */
-class Bench(val threads: Int, val activeThreads: Int, val labeled: Boolean, val workload: Workload) {
+class Bench(
+    val threads: Int,
+    val activeThreads: Int,
+    val labeled: Boolean,
+    val workload: Workload,
+    val contended: ContendedLock? = null,
+    lockOpId: Int = -1,
+) {
     private val barrier = CyclicBarrier(threads + 1)
-    val workers = List(threads) { Worker(it, it < activeThreads, labeled, workload, barrier) }
+    val workers = List(threads) {
+        Worker(it, it < activeThreads, labeled, workload, barrier, contended, lockOpId)
+    }
 
     fun start() = workers.forEach { it.isDaemon = true; it.start() }
 
@@ -359,6 +475,10 @@ class Bench(val threads: Int, val activeThreads: Int, val labeled: Boolean, val 
             offCpuNanos = active.sumOf { it.stallNanos },
             events = active.sumOf { it.stalls },
             worstNanos = active.maxOfOrNull { it.maxStallNanos } ?: 0L,
+            lockWaitNanos = active.sumOf { it.lockWaitNanos },
+            lockHeldNanos = active.sumOf { it.lockHeldNanos },
+            lockAcquisitions = active.sumOf { it.lockAcquisitions },
+            maxLockWaitNanos = active.maxOfOrNull { it.maxLockWaitNanos } ?: 0L,
         )
     }
 

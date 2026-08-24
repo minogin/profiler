@@ -441,22 +441,53 @@ class Report(
      * How much of an operation's long-running time the *machine* can account for, and therefore the
      * floor an operation has to clear before it has anything to answer for.
      *
-     * It is the non-CPU fraction from the duty cycle. A thread preempted by the scheduler or frozen
-     * by a GC pause is still holding its label, so it appears here as an execution that outlived a
-     * tick, and neither is anything to do with the operation. Both are already measured, in
-     * aggregate, by the duty cycle — so the quantity that bounds the error on the shares is the
-     * same quantity that bounds the false positives here.
+     * **The lesson this phase kept relearning: a baseline must not contain the effect it is used to
+     * detect.** Three attempts, each broken by a workload the previous one had not met.
      *
-     * **The obvious alternative is wrong and Calcite proved it.** Judging each operation against
-     * the *run-wide* rate assumes long executions are the exception. Against Calcite's planner that
-     * rate was 53.52%, because most of those labels genuinely are coarse operations — so three
-     * times it was unreachable and not one operation could ever be named. A baseline built from the
-     * operations under test cannot detect a defect that most of them share.
+     * 1. *The run-wide rate of long executions.* Assumes long executions are the exception. Against
+     *    Calcite's planner that rate is 53.52%, because most of those labels genuinely are coarse,
+     *    so three times it was unreachable and nothing could ever be named.
+     * 2. *The non-CPU fraction from the duty cycle.* Correct for preemption and GC, which are what
+     *    the machine does to everything — but a thread blocked on a lock is also off the CPU, so a
+     *    blocking operation raises this floor and hides itself behind it. Measured: an operation
+     *    with 88.61% of its occupancy in executions over a tick, against a floor of 35.43% that it
+     *    had itself created. Not named.
+     * 3. *The lower of that and what a typical operation experienced* — [typicalStuckShare]. The
+     *    machine can only be blamed for what both estimates agree on, and the median across
+     *    operations cannot be moved by the one operation that blocks.
      *
-     * Falls back to the run-wide rate where the platform gives no duty cycle at all, which is worth
-     * having but is the weaker test, for the reason above.
+     * Being conservative about blaming the machine means being liberal about naming operations,
+     * which is why [SUSPECT_MIN_SHARE] and [SUSPECT_MIN_INSTANCES] exist: they are what stops a
+     * near-zero floor turning noise into an accusation.
      */
-    val machineFloor: Double get() = if (duty.available) 1 - duty.duty else stuckBaseline
+    val machineFloor: Double
+        get() {
+            val fromDuty = if (duty.available) 1 - duty.duty else Double.MAX_VALUE
+            val typical = typicalStuckShare()
+            val fromOperations = if (typical.isNaN()) Double.MAX_VALUE else typical
+            val floor = minOf(fromDuty, fromOperations)
+            return if (floor == Double.MAX_VALUE) stuckBaseline else floor
+        }
+
+    /**
+     * What a *typical* operation's rate of long executions was — the median over operations with
+     * enough hits to have a meaningful rate.
+     *
+     * The second estimate of the same quantity as the duty cycle, and it fails where the duty cycle
+     * fails, in the opposite direction. Preemption and GC are charged to whatever was executing, in
+     * proportion to its occupancy, so they raise *every* operation's rate together and the median
+     * sees them. Blocking is concentrated in the operation doing the blocking, so the median does
+     * not see it — which is exactly what a floor must not see.
+     *
+     * The median rather than the mean, because the mean is the run-wide rate that Calcite already
+     * disproved: one operation holding most of the occupancy drags it up until nothing can clear it.
+     */
+    fun typicalStuckShare(): Double {
+        val rates = operations.filter { it.hits >= MEDIAN_MIN_HITS }.map { it.stuckShare }.sorted()
+        if (rates.isEmpty()) return Double.NaN
+        return if (rates.size % 2 == 1) rates[rates.size / 2]
+        else (rates[rates.size / 2 - 1] + rates[rates.size / 2]) / 2
+    }
 
     /**
      * Operations whose executions span a tick far more often than the run as a whole — the ones
@@ -588,6 +619,9 @@ class Report(
 
         /** The short-operation bias, so the check cannot accuse an operation of the sampler's own error. */
         const val FLOOR_BIAS_ALLOWANCE = 1.2
+
+        /** Hits below which an operation's rate of long executions is too noisy to enter the median. */
+        const val MEDIAN_MIN_HITS = 100L
     }
 }
 
