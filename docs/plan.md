@@ -16,8 +16,8 @@ words, is [tldr.md](tldr.md).
 | 2 | The fine tier — slots, hook, sampling thread | **done** |
 | 3 | Verification — sampler against the truth | **done** |
 | — | Trial — the fine tier on somebody else's code | **done** |
-| 3.5 | What a share is worth — bounding the error, not classifying operations | **in progress** — measuring done, thresholds next |
-| 4 | The coarse tier — contexts, spans, cross-tabulation | after 3.5 |
+| 3.5 | What a share is worth — bounding the error, not classifying operations | **done** |
+| 4 | The coarse tier — contexts, spans, cross-tabulation | **next** |
 | 5 | Crossing threads — propagation, and per-operation parallelism | not started |
 | 6 | Thread state and the whole-application parallelism coefficient | not started |
 | 7 | Library surface — annotations, agent, results API | not started |
@@ -192,12 +192,19 @@ varied 20–110 ms for byte-identical work, which nothing in the current output 
 per-instance spans with percentiles exist for. The sentence the trial wanted to write and could
 not: *of the 48 ms median plan, 40% is `FilterIntoJoinRule`*.
 
-## Phase 3.5 — what a share is worth · in progress
+## Phase 3.5 — what a share is worth · done
 
 The fine tier is marked done, and it reports shares of **occupancy** — how many threads were inside
 an operation — while presenting them as time. Three things stand between those two quantities and
 none of them has been checked: an operation may block, threads may outnumber cores, and an
 operation may not be the size its label claims.
+
+**All three are now measured.** Every share carries a bound on how far occupancy can be from CPU;
+an operation that cannot have been measured correctly stops the run within a second and says why;
+one that is merely in the wrong tier gets told which kind of wrong it is. What is left open is the
+value of the thresholds, which are provisional and gathered in one place — and the fact that
+deciding *which* operation was waiting, rather than bounding how much waiting there was, needs the
+thread's state sampled beside its label. That is phase 6.
 
 **The decision that shapes this phase: bound the error, do not classify the operations.** The
 tempting design is a rule for which operations are allowed to be fine. That rule cannot be written.
@@ -433,8 +440,20 @@ real code is fire on operations whose measurement is perfectly honest.
    because most of those labels genuinely are coarse. Nothing could ever be named. **The floor now
    comes from the duty cycle** — what the machine did to everything — which separates all three
    data sets we have. Full numbers in [findings.md](findings.md#the-detector-against-calcite).
-3. Add the contended bench operation, which gives a known blocking rate to measure against.
-4. Then decide what the tool *does* about a flagged operation.
+3. ~~Add the contended bench operation~~ — **done**, `--lock`. The duty cycle tracked injected
+   blocking from 0.4% to 64% of wall time and never missed the workers' own timing by more than
+   1.15 pp; the detector named `lockedUpdate` alone; and the floor had to be rebuilt a third time,
+   because a blocking operation is itself off the CPU and so was hiding behind the duty cycle.
+4. ~~Then decide what the tool *does* about a flagged operation~~ — **done, and the answer is
+   nothing fatal.** Calcite's rule labels are all flagged by this signal and their shares are
+   correct; a run stopped over them would have destroyed the 275× finding. What the tool does
+   instead is say *which kind* of long it is, where it can: the run's whole off-CPU budget bounds
+   how much of an operation's long-running time could have been waiting, and on Calcite's slowest
+   rule that leaves **at least 91% certainly on a core** — working, not waiting, share honest,
+   label it coarse. Where the budget is big enough to explain the operation away, the verdict is
+   *cannot say which* and it carries the size of the budget, which is the part a reader can act on:
+   3.2% on Calcite against 35.2% on the contended bench. Resolving that properly needs the thread's
+   state beside the label, which is phase 6.
 
 **Step 4 is deliberately last.** The Calcite labels sit on operations of hundreds of microseconds:
 they are not fine operations by any definition here, and yet the shares they produced agreed with
@@ -495,7 +514,7 @@ blocking that is really there. It still names the operation, because the tail of
 crosses a tick often enough, but it cannot quantify it. Quantifying is the duty cycle's job. Neither
 instrument is sufficient alone, which is the argument for having both.
 
-## Phase 4 — the coarse tier · after 3.5
+## Phase 4 — the coarse tier · next
 
 Contexts, spans, and the cross-tabulation. Same-thread to begin with — crossing threads is phase 5,
 and the two are worth separating so that propagation bugs cannot be confused with tier bugs.

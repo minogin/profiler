@@ -635,6 +635,59 @@ Being conservative about blaming the machine means being liberal about naming op
 that turning noise into an accusation is not the floor but the two guards beside it: a minimum share
 and a minimum number of long executions.
 
+### Working or waiting — telling the two apart without attributing anything
+
+An execution that outlived a tick was either waiting for something or working for a millisecond,
+and the two want opposite responses: the first means the share is occupancy and not CPU, the second
+means the share is honest and the operation merely belongs in the coarse tier. The signal itself
+cannot tell them apart. Two numbers already in the report can, one way round.
+
+**The whole run had only so much stalling in it.** Off-CPU occupancy is `(1 − duty) × samples`, from
+every cause together. An operation whose long executions occupy more samples than that must have
+been *running* for the difference — whatever the rest of the run was doing, and without attributing
+a single sample to anybody. Measured, on Calcite's slowest rule: 76.2% of its occupancy in
+executions over a tick, against a run that was 96.8% on CPU, gives **at least 91% of that time
+certainly on a core**. It is a coarse operation, not a stalling one, and its share is honest — which
+is what the trial's agreement with JFR independently said.
+
+**The inverse does not follow, and the report must not pretend it does.** The same budget is charged
+in full against every operation separately, so a small operation always comes out ambiguous however
+innocent it is: three of Calcite's six named rules cannot be resolved this way, in a workload with
+no locks in it at all. So the second verdict is *cannot say which*, and it carries the size of the
+budget, which is the part a reader can act on:
+
+| run | off-CPU, whole run | what the reader learns |
+|---|---|---|
+| Calcite planner | **3.2%** of occupancy | nothing here can be mostly waiting |
+| bench, lock held 2 ms every 10 ms | **35.2%** of occupancy | something here is |
+
+Deciding *which* operation needs the thread's state sampled beside its label, and that is phase 6.
+This is the cheap half of that question, and it is worth having because it settles the common case:
+an operation is flagged, the run is 97% on CPU, and the answer is "your label is coarse, not
+broken".
+
+**The bound was checked against a known truth.** The bench times both halves of what `lockedUpdate`
+does — holding the lock and waiting for it — so the claim can be tested rather than trusted. It
+holds, and it is loose in the safe direction: at least 14.6% running against a real 26.4%.
+
+### What the tool does about a long-running operation: nothing fatal
+
+Decided from the evidence rather than in advance, which was the point of doing it last.
+
+Calcite's rule labels are all flagged by this signal. Their shares agreed with an independent stack
+profiler to about a percentage point and produced the 275× finding — the one result this project
+has to its name. **A run stopped over them would have destroyed it.** So a long execution is a
+warning, never fatal, and what varies is the advice:
+
+- *certainly working:* the share is honest; label it coarse to get per-execution statistics.
+- *cannot say:* read the share as occupancy, and here is how much off-CPU time the run had in total.
+
+That is the opposite of the verdict for an operation below the floor, which is fatal, and the
+asymmetry is the whole design: **too small is a property of the code, too long is a property of the
+run.** A 20 ns label is 20 ns on every machine and every rerun, so there is no run in which it is
+fine. A label that outlives a tick may be perfectly measured, and on the only real workload this
+project has ever pointed at, it was.
+
 ## Statistics
 
 **Percentage points cannot separate noise from bias.** Divergence falls as `1/√N` whether the
@@ -656,6 +709,13 @@ The same mistake was nearly repeated by picking a 0.5 pp gate for phase 3 by ana
 now the ranking of the operations that carry the time, which is what the answer is actually for.
 
 ## Open questions
+
+**The detector's thresholds are provisional.** Naming an operation takes three conditions together:
+a rate of long executions three times the machine floor, a floor of 2% under the rate itself, and at
+least 20 long executions behind it. The floor's *source* is settled by measurement — three
+candidates were tried and only the third survives every data set — but those three numbers are
+judgements. They separate all six configurations we have correctly, which is evidence but not
+calibration.
 
 **The attribution bias is only partly explained.** Parents read high and short leaves read low,
 consistently and reproducibly — `frontierStep` +6.2%, `tinyStep` −15.5%. The mechanism is that a

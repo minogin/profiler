@@ -1148,28 +1148,31 @@ private fun printSampler(
     println(String.format(Locale.ROOT, "  covered %.2f%% of the run", sampler.span.toDouble() / runNanos * 100))
 
     val labelled = samples - sampler.counters[NO_OP_INDEX]
-    val stuck = (0 until Profiler.registeredCount()).sumOf { sampler.stuckHits[it] }
-    val stuckShare = if (labelled == 0L) 0.0 else stuck.toDouble() / labelled
+    // The same object a library user gets from Profiler.stop(), built here from the sampler the
+    // bench drove itself. Everything below then goes through the library's own arithmetic rather
+    // than a second copy of it written for the bench — which is how the two came to disagree once
+    // already.
+    val report = Report(
+        operations = (0 until Profiler.registeredCount()).map { id ->
+            OperationStat(
+                id, Profiler.nameOf(id), sampler.counters[id], sampler.sessionCalls(id),
+                sampler.stuckHits[id], sampler.stuckInstances[id]
+            )
+        },
+        idleHits = sampler.counters[NO_OP_INDEX],
+        ticks = sampler.ticks,
+        samplingSpanNanos = sampler.span,
+        durationNanos = runNanos,
+        threads = slots,
+        duty = sampler.duty(),
+        failure = sampler.failure,
+    )
     printDuty(
         sampler.duty(), bench, runNanos,
-        if (samples == 0L) Double.NaN else labelled.toDouble() / samples, stuckShare
+        if (samples == 0L) Double.NaN else labelled.toDouble() / samples, report.stuckBaseline
     )
 
-    val duty = sampler.duty()
-    // The lower of two estimates of what the machine did to everything: the non-CPU fraction, and
-    // what a typical operation experienced. See Report.machineFloor — a blocking operation raises
-    // the first and cannot move the second.
-    val rates = (0 until Profiler.registeredCount())
-        .filter { sampler.counters[it] >= Report.MEDIAN_MIN_HITS }
-        .map { sampler.stuckHits[it].toDouble() / sampler.counters[it] }
-        .sorted()
-    val typical = if (rates.isEmpty()) Double.MAX_VALUE else rates[rates.size / 2]
-    val machineFloor = minOf(if (duty.available) 1 - duty.duty else Double.MAX_VALUE, typical)
-        .let { if (it == Double.MAX_VALUE) stuckShare else it }
-    printDetector(
-        sampler, achieved, stuckShare, machineFloor,
-        lock = bench.contended, lockOpId = lockOpIdOf(bench)
-    )
+    printDetector(report, achieved, bench.contended, lockOpIdOf(bench), bench.stalls())
 
     println(String.format(Locale.ROOT, "\n  %-14s %14s %9s", "operation", "hits", "of total"))
     for (id in (0 until Profiler.registeredCount()).sortedByDescending { sampler.counters[it] } + listOf(NO_OP_INDEX)) {
@@ -1216,60 +1219,52 @@ private fun configuredNanos(id: Int, lock: ContendedLock?): Double =
     if (id < OP_COUNT) OPS[id].selfNanos else lock?.holdNanos?.toDouble() ?: Double.NaN
 
 private fun printDetector(
-    sampler: Sampler,
+    report: Report,
     stepNanos: Double,
-    stuckShare: Double,
-    machineFloor: Double,
     lock: ContendedLock?,
     lockOpId: Int,
+    stalls: Stalls,
 ) {
+    val machineFloor = report.machineFloor
     println("\n--- Long executions: is a fine operation actually fine? ---")
     println(
         String.format(
             Locale.ROOT,
             "  run-wide: %.2f%% of labelled occupancy sat inside executions that outlived a tick, " +
                     "of which the machine accounts for up to %.2f%%",
-            stuckShare * 100, machineFloor * 100
+            report.stuckBaseline * 100, machineFloor * 100
         )
     )
     println(String.format(Locale.ROOT, "  %-14s %12s %12s %10s %9s %8s", "operation", "configured", "implied/call", "ratio", "over 1 tick", "long runs"))
     // Past OP_COUNT sits the contended lock, which is registered separately precisely so that the
     // truth machinery — indexed by operation id — never has to know about an operation whose
     // duration is not its configured one.
-    val ids = 0 until Profiler.registeredCount()
-    var worst = -1
-    for (id in ids.sortedByDescending { sampler.counters[it] }) {
-        val hits = sampler.counters[id]
-        if (hits == 0L) continue
-        val calls = sampler.sessionCalls(id)
-        val implied = if (calls == 0L) Double.NaN else hits * stepNanos / calls
-        val share = sampler.stuckHits[id].toDouble() / hits
-        if (worst < 0 || share > sampler.stuckHits[worst].toDouble() / sampler.counters[worst]) worst = id
-        val configured = configuredNanos(id, lock)
+    var worst: OperationStat? = null
+    for (op in report.operations.sortedByDescending { it.hits }) {
+        if (op.hits == 0L) continue
+        if (worst == null || op.stuckShare > worst.stuckShare) worst = op
+        val configured = configuredNanos(op.id, lock)
+        val implied = report.impliedNanosOf(op)
         println(
             String.format(
                 Locale.ROOT, "  %-14s %12s %12s %9.2fx %10.2f%% %8d",
-                Profiler.nameOf(id), duration(configured), duration(implied),
-                implied / configured, share * 100, sampler.stuckInstances[id]
+                op.name, duration(configured), duration(implied),
+                implied / configured, op.stuckShare * 100, op.stuckInstances
             )
         )
     }
-    val worstShare = if (worst < 0) 0.0 else sampler.stuckHits[worst].toDouble() / sampler.counters[worst]
     println(
         String.format(
             Locale.ROOT, "  worst is %s at %.2f%%, %.2fx the machine floor on %,d long executions",
-            Profiler.nameOf(worst.coerceAtLeast(0)), worstShare * 100,
-            if (machineFloor > 0) worstShare / machineFloor else 0.0,
-            if (worst < 0) 0 else sampler.stuckInstances[worst]
+            worst?.name ?: "-", (worst?.stuckShare ?: 0.0) * 100,
+            if (machineFloor > 0) (worst?.stuckShare ?: 0.0) / machineFloor else 0.0,
+            worst?.stuckInstances ?: 0
         )
     )
-    // The same rule the library's report applies, not a second one written by hand here — the
-    // first version of this line tested the ratio alone and duly accused `serialize` of blocking
-    // on the strength of one long execution in two thousand samples.
-    val flagged = ids.filter {
-        isSuspect(sampler.counters[it], sampler.stuckHits[it], sampler.stuckInstances[it], machineFloor)
-    }
-    val names = flagged.joinToString { Profiler.nameOf(it) }
+    // The library's own rule, applied to the library's own report object rather than to a second
+    // copy of the arithmetic written for the bench — which is how the two came to disagree once.
+    val flagged = report.suspect()
+    val names = flagged.joinToString { it.name }
     println(
         when {
             lock == null && flagged.isEmpty() ->
@@ -1278,7 +1273,7 @@ private fun printDetector(
             lock == null ->
                 "  FLAGGED: $names — and without --lock this bench has nothing that could block"
 
-            flagged == listOf(lockOpId) ->
+            flagged.map { it.id } == listOf(lockOpId) ->
                 "  FLAGGED: lockedUpdate, and nothing else — which is the right answer, since it is the " +
                         "only thing here that waits"
 
@@ -1289,6 +1284,27 @@ private fun printDetector(
         }
     )
     println("  (the floor is one tick: a stall shorter than ${String.format(Locale.ROOT, "%.2f", stepNanos / 1e6)} ms cannot be seen at all)")
+
+    // Working or waiting? The bound is arithmetic on the duty cycle and this operation's long-run
+    // occupancy — see Report.runningFloorOf — and here it can be checked, because the workers timed
+    // both halves of what lockedUpdate did.
+    for (op in flagged) {
+        println("  ${op.name}: ${report.verdictFor(op)}")
+        if (op.id != lockOpId) continue
+        val busy = stalls.lockWaitNanos + stalls.lockHeldNanos
+        if (busy == 0L) continue
+        val truth = stalls.lockHeldNanos.toDouble() / busy
+        val floor = report.runningFloorOf(op)
+        println(
+            String.format(
+                Locale.ROOT,
+                "    the workers timed it: %.1f%% of that operation was holding the lock and %.1f%% waiting, " +
+                        "against a bound of at least %.1f%% running — %s",
+                truth * 100, (1 - truth) * 100, floor * 100,
+                if (floor <= truth + 1e-9) "the bound holds" else "THE BOUND IS VIOLATED, which cannot happen"
+            )
+        )
+    }
 }
 
 /**

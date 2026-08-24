@@ -7,6 +7,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.LockSupport
+import kotlin.math.min
 import kotlin.math.sqrt
 
 /** Slot value meaning "this thread is not inside any instrumented operation right now". */
@@ -393,6 +394,34 @@ class Report(
     /** What one sample is worth in thread-time: the step the sampler actually achieved. */
     val stepNanos: Double get() = if (ticks > 1) samplingSpanNanos.toDouble() / (ticks - 1) else Double.NaN
 
+    /** Occupancy that was not CPU, in samples. The whole run's supply of stalling. */
+    val offCpuSamples: Double
+        get() = if (duty.available) (1 - duty.duty) * (labelledHits + idleHits) else Double.NaN
+
+    /**
+     * How much of an operation's long-running time was certainly spent *running*, as a fraction.
+     *
+     * The question this answers is the one the long-execution signal cannot answer on its own, and
+     * it decides what the reader should do about it. An execution that outlived a tick was either
+     * waiting for something or working for a millisecond, and those want opposite responses: the
+     * first means the share is occupancy and not CPU, the second means the share is honest and the
+     * operation merely belongs in the coarse tier.
+     *
+     * The answer is arithmetic on two numbers already in the report. The whole run had only
+     * [offCpuSamples] of stalling in it, from every cause together, so an operation whose long
+     * executions occupy more than that must have been *running* for the difference — whatever the
+     * rest of the run was doing, and without attributing a single sample to anybody.
+     *
+     * A lower bound and deliberately a loose one: it charges the operation with every stall in the
+     * run, including stalls that happened somewhere else entirely. When it still comes out high, it
+     * is certain.
+     */
+    fun runningFloorOf(op: OperationStat): Double {
+        val offCpu = offCpuSamples
+        if (offCpu.isNaN() || op.stuckHits == 0L) return Double.NaN
+        return 1 - min(1.0, offCpu / op.stuckHits)
+    }
+
     /**
      * The most an execution can plausibly have cost, from the sampling alone.
      *
@@ -503,6 +532,44 @@ class Report(
         .filter { isSuspect(it.hits, it.stuckHits, it.stuckInstances, machineFloor) }
         .sortedByDescending { it.stuckShare }
 
+    /**
+     * What to do about an operation whose executions outlive a tick — which is not one answer, and
+     * the trial is why.
+     *
+     * Calcite's rule labels are all flagged by this signal, and their shares were *correct*: they
+     * agreed with an independent stack profiler to about a percentage point and produced the one
+     * finding this project has to its name. Stopping a run over them would have destroyed it. So a
+     * long execution is never fatal. What differs is the advice, and [runningFloorOf] decides
+     * which advice applies.
+     */
+    fun verdictFor(op: OperationStat): String {
+        val running = runningFloorOf(op)
+        return when {
+            running.isNaN() ->
+                "long, and with no duty cycle there is no way to say whether it was working or waiting"
+
+            running >= RUNNING_CERTAIN -> String.format(
+                Locale.ROOT,
+                "at least %.0f%% of that was on CPU, so it is working and not waiting: the share is honest, and " +
+                        "the operation wants a coarse label for its per-execution statistics",
+                running * 100
+            )
+
+            // Not "it is waiting" — that is a claim this test cannot make. The whole run's
+            // off-CPU time is a single budget and it is charged in full against every operation
+            // separately, so a small operation will always come out ambiguous however innocent it
+            // is. What the reader can act on is the size of that budget: at 4% nothing here can be
+            // mostly waiting, at 35% something is. Deciding *which* operation needs the thread's
+            // state sampled beside its label, which is phase 6.
+            else -> String.format(
+                Locale.ROOT,
+                "cannot say which: the run's whole off-CPU time is %.1f%% of occupancy, and that is enough to " +
+                        "account for all of it. Read this share as occupancy rather than as time on a core",
+                (1 - duty.duty) * 100
+            )
+        }
+    }
+
     fun render(): String = buildString {
         val achieved = if (ticks > 1) samplingSpanNanos.toDouble() / (ticks - 1) / 1e6 else Double.NaN
         if (failure != null) {
@@ -571,9 +638,7 @@ class Report(
                     duration(impliedNanosOf(op))
                 )
             )
-        }
-        if (suspect().isNotEmpty()) {
-            appendLine("    an execution outliving a tick is not a fine operation — it blocked, or it belongs in the coarse tier")
+            appendLine("    " + verdictFor(op))
         }
         // The other end of the same question. Fatal under strict, so under strict this list is at
         // most one long and the session has already stopped; without it, every offender is named.
@@ -622,6 +687,16 @@ class Report(
 
         /** Hits below which an operation's rate of long executions is too noisy to enter the median. */
         const val MEDIAN_MIN_HITS = 100L
+
+        /**
+         * How much of an operation's long-running time must be *certainly* on CPU before the report
+         * says it is working rather than waiting.
+         *
+         * A judgement, and a cautious one, because the bound behind it is already conservative — it
+         * charges the operation with every stall in the whole run. Calcite's slowest rule clears it
+         * at 91%; the bench's lock operation, which does nothing but wait, comes nowhere near.
+         */
+        const val RUNNING_CERTAIN = 0.5
     }
 }
 
