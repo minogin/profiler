@@ -139,6 +139,8 @@ src/main/kotlin/com/minogin/profiler/
   Main.kt       orchestration, the two truths, the verdicts
 trial/          the fine tier pointed at Apache Calcite, and the harness that did it
 docs/
+  index.md      what each document is for — start here
+  tldr.md       the whole project in plain words, for a five-minute read
   profiler.md   the idea, and what was known about prior art
   plan.md       phases and where each one stands
   findings.md   what we learned, with the measurement behind every claim

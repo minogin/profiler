@@ -63,6 +63,18 @@ private const val OBSERVER_ROUNDS = 3
  */
 private const val OBSERVER_TOLERANCE = 0.10
 
+/**
+ * How far the two readings of the duty cycle — the OS accounting and the workers' own account of
+ * their preemptions — may differ, in percentage points.
+ *
+ * From measurement, six configurations tabulated in findings.md: worst 0.76 pp at 4 working
+ * threads (90.63% against 91.39%), 0.17 and 0.36 pp in starvation mode, and 0.06 pp on a
+ * standalone probe. The OS reads the lower of the two every time, which is the expected direction —
+ * the workers cannot see a preemption shorter than half a millisecond, so their figure is a lower
+ * bound on stalling and an upper bound on the duty cycle.
+ */
+private const val DUTY_TOLERANCE_PP = 1.5
+
 /** How long each sweep entry re-warms before its measured run. Everything is already compiled. */
 private const val SWEEP_REWARM_NANOS = 2_000_000_000L
 
@@ -94,6 +106,12 @@ fun main(args: Array<String>) {
     val wait = WaitStrategy.valueOf((opt["wait"] ?: "spin").uppercase())
     val jitter = if (opt["jitter"] == "off") 0.0 else 0.25
     val verify = opt["verify"] != null
+
+    // Off by default here, and that is not a double standard. Four of this bench's twenty
+    // operations sit below the 50 ns floor *on purpose* — a bench exists to work the instrument at
+    // the point where it fails, so under strict rules it would stop within a second of every run
+    // and measure nothing. `--strict` turns it on, which is how the stopping itself gets tested.
+    val strict = opt["strict"] != null
 
     require(activeThreads in 1..threads) { "--active=$activeThreads is outside 1..$threads" }
 
@@ -249,7 +267,7 @@ fun main(args: Array<String>) {
         bench.start()
         println("\n--- Run of $seconds s ---")
         // The sampler covers the measured run only, never the warm-up.
-        val sampler = if (sampling) Sampler((stepMillis * 1_000_000).toLong(), wait, jitter) else null
+        val sampler = if (sampling) Sampler((stepMillis * 1_000_000).toLong(), wait, jitter, strict = strict) else null
         val outcome = measureOnce(bench, seconds, sampler)
         printDetail(bench, outcome, sampler, stepMillis)
         // A, B and C side by side is the point of the whole exercise, so it belongs in the
@@ -469,8 +487,12 @@ private fun runApiDemo(threads: Int, seconds: Int) {
     // the boundaries its labels claimed.
     val work = intArrayOf(40, 120, 15)
 
-    // 2. Start sampling.
-    Profiler.start(stepMillis = 1.0)
+    // 2. Start sampling. Strict off, deliberately: indexRecord is fifteen busy-loop iterations,
+    // about 12 ns, which is below the floor — and this demo is the very place that hazard was
+    // found, since it was here that C2 shuffled work across three adjacent short labels and the
+    // shortest one lost 95% of itself. With strict on, the profiler would refuse to report it,
+    // which is the correct behaviour and would leave nothing to demonstrate.
+    Profiler.start(stepMillis = 1.0, strict = false)
 
     val deadline = System.nanoTime() + seconds * 1_000_000_000L
     val workers = List(threads) { n ->
@@ -662,7 +684,7 @@ private fun runVerify(threads: Int, workload: Workload, wait: WaitStrategy, jitt
         val bench = Bench(threads, threads, true, workload)
         bench.start()
         bench.run(SWEEP_REWARM_NANOS)
-        val sampler = Sampler((cell.stepMillis * 1_000_000).toLong(), wait, jitter)
+        val sampler = Sampler((cell.stepMillis * 1_000_000).toLong(), wait, jitter, strict = false)
         val outcome = measureOnce(bench, cell.seconds, sampler)
         bench.stop()
         val c = compare(cell, outcome, sampler)
@@ -860,7 +882,7 @@ private fun observerEffect(
             val (_, labels, sampling) = configs[i]
             val bench = benches.getValue(labels)
             bench.resetCounters()
-            val sampler = if (sampling) Sampler(1_000_000, wait, jitter).also { it.start() } else null
+            val sampler = if (sampling) Sampler(1_000_000, wait, jitter, strict = false).also { it.start() } else null
             val nanos = bench.run(OBSERVER_SECONDS * 1_000_000_000L)
             sampler?.shutdown()
             rounds[i][round] = bench.totalRootCalls() / (nanos / 1e9)
@@ -933,7 +955,7 @@ private fun printDetail(bench: Bench, o: Outcome, sampler: Sampler?, stepMillis:
         )
     }
 
-    if (sampler != null) printSampler(sampler, stepMillis, o.runNanos, bench.threads)
+    if (sampler != null) printSampler(sampler, stepMillis, o.runNanos, bench)
 
     val subtree = subtreeCounts()
     val inclA = inclusiveNanos(subtree)
@@ -1042,13 +1064,26 @@ private fun printVerdict(o: Outcome, warmedUp: Boolean): Boolean {
  * produced one sample per slot, and what the raw hit counts look like. Nothing here is compared
  * against the truth table — that is phase 3.
  */
-private fun printSampler(sampler: Sampler, stepMillis: Double, runNanos: Long, workerThreads: Int) {
+private fun printSampler(
+    sampler: Sampler,
+    stepMillis: Double,
+    runNanos: Long,
+    bench: Bench,
+) {
     val slots = Profiler.slots().size
     val samples = sampler.totalSamples()
     val expected = sampler.ticks * slots
     val achieved = if (sampler.ticks > 1) sampler.span.toDouble() / (sampler.ticks - 1) else Double.NaN
 
     println("\n--- Sampler ---")
+    // Without this the run merely looks as though the sampler died. Four of this bench's twenty
+    // operations are below the floor by design, so under --strict this is the expected outcome and
+    // the covered-percentage line below shows how quickly it was caught.
+    sampler.failure?.let {
+        println("  PROFILING STOPPED — this label could not have produced a correct number:")
+        println("  $it")
+        println("  (expected under --strict: this bench deliberately labels operations below the floor)")
+    }
     println(String.format(Locale.ROOT, "  requested step: %.3f ms", stepMillis))
     println(
         String.format(
@@ -1070,10 +1105,24 @@ private fun printSampler(sampler: Sampler, stepMillis: Double, runNanos: Long, w
     // denominator. This is how that gets noticed rather than eyeballed.
     println(
         "  one slot per live worker: " +
-                if (slots == workerThreads) "yes"
-                else "NO — $slots slots against $workerThreads worker threads (stale slots in the registry)"
+                if (slots == bench.threads) "yes"
+                else "NO — $slots slots against ${bench.threads} worker threads (stale slots in the registry)"
     )
     println(String.format(Locale.ROOT, "  covered %.2f%% of the run", sampler.span.toDouble() / runNanos * 100))
+
+    val labelled = samples - sampler.counters[NO_OP_INDEX]
+    val stuck = (0 until OP_COUNT).sumOf { sampler.stuckHits[it] }
+    val stuckShare = if (labelled == 0L) 0.0 else stuck.toDouble() / labelled
+    printDuty(
+        sampler.duty(), bench, runNanos,
+        if (samples == 0L) Double.NaN else labelled.toDouble() / samples, stuckShare
+    )
+
+    val duty = sampler.duty()
+    printDetector(
+        sampler, achieved, stuckShare,
+        machineFloor = if (duty.available) 1 - duty.duty else stuckShare
+    )
 
     println(String.format(Locale.ROOT, "\n  %-14s %14s %9s", "operation", "hits", "of total"))
     for (id in (0 until OP_COUNT).sortedByDescending { sampler.counters[it] } + listOf(NO_OP_INDEX)) {
@@ -1086,6 +1135,149 @@ private fun printSampler(sampler: Sampler, stepMillis: Double, runNanos: Long, w
             )
         )
     }
+}
+
+/**
+ * The long-instance detector against a bench that cannot block.
+ *
+ * The test is two words per slot per tick: same operation as last tick, and that thread's entry
+ * counter for it unmoved, means nobody entered in between — so this is one execution still running
+ * a whole tick later. For a 20 ns operation that is fifty thousand times its claimed size.
+ *
+ * Here nothing should stand out, because nothing in this workload waits for anything. What is left
+ * is the floor: the operating system preempting a runnable thread for tens of milliseconds, which
+ * lands on whichever operation was executing at the time and in proportion to its occupancy. So
+ * every operation should sit near the run-wide rate, and an operation well above it would be a
+ * defect in the detector rather than a discovery about the bench.
+ *
+ * The implied duration column is checked against the configuration, which is the point of having a
+ * bench whose true answer is known: `hits × step / calls` should reproduce the duration the
+ * operation was built to have, times the load factor the machine is imposing.
+ */
+private fun printDetector(sampler: Sampler, stepNanos: Double, stuckShare: Double, machineFloor: Double) {
+    println("\n--- Long executions: is a fine operation actually fine? ---")
+    println(
+        String.format(
+            Locale.ROOT,
+            "  run-wide: %.2f%% of labelled occupancy sat inside executions that outlived a tick, " +
+                    "of which the machine accounts for up to %.2f%%",
+            stuckShare * 100, machineFloor * 100
+        )
+    )
+    println(String.format(Locale.ROOT, "  %-14s %12s %12s %10s %9s %8s", "operation", "configured", "implied/call", "ratio", "over 1 tick", "long runs"))
+    var worst = -1
+    for (id in (0 until OP_COUNT).sortedByDescending { sampler.counters[it] }) {
+        val hits = sampler.counters[id]
+        if (hits == 0L) continue
+        val calls = sampler.sessionCalls(id)
+        val implied = if (calls == 0L) Double.NaN else hits * stepNanos / calls
+        val share = sampler.stuckHits[id].toDouble() / hits
+        if (worst < 0 || share > sampler.stuckHits[worst].toDouble() / sampler.counters[worst]) worst = id
+        println(
+            String.format(
+                Locale.ROOT, "  %-14s %12s %12s %9.2fx %10.2f%% %8d",
+                OPS[id].name, duration(OPS[id].selfNanos), duration(implied),
+                implied / OPS[id].selfNanos, share * 100, sampler.stuckInstances[id]
+            )
+        )
+    }
+    val worstShare = if (worst < 0) 0.0 else sampler.stuckHits[worst].toDouble() / sampler.counters[worst]
+    println(
+        String.format(
+            Locale.ROOT, "  worst is %s at %.2f%%, %.2fx the machine floor on %,d long executions",
+            OPS[worst.coerceAtLeast(0)].name, worstShare * 100,
+            if (machineFloor > 0) worstShare / machineFloor else 0.0,
+            if (worst < 0) 0 else sampler.stuckInstances[worst]
+        )
+    )
+    // The same rule the library's report applies, not a second one written by hand here — the
+    // first version of this line tested the ratio alone and duly accused `serialize` of blocking
+    // on the strength of one long execution in two thousand samples.
+    val flagged = (0 until OP_COUNT).filter {
+        isSuspect(sampler.counters[it], sampler.stuckHits[it], sampler.stuckInstances[it], machineFloor)
+    }
+    println(
+        if (flagged.isEmpty()) "  nothing is flagged, which is the right answer: this bench has nothing that could block"
+        else "  FLAGGED: ${flagged.joinToString { OPS[it].name }} — and this bench has nothing that could block"
+    )
+    println("  (the floor is one tick: a stall shorter than ${String.format(Locale.ROOT, "%.2f", stepNanos / 1e6)} ms cannot be seen at all)")
+}
+
+/**
+ * The duty cycle, and the bench's own check on it.
+ *
+ * The measurement is checked rather than admired, in the manner of phase 1's two truths — but the
+ * second truth here cannot come from the configuration. The first attempt had it do so: every
+ * worker registers a slot whether it works or not, an inactive one sits parked on the barrier
+ * using no CPU, so the expectation was exactly active/registered, and 100% in the ordinary case
+ * because nothing in this bench ever blocks.
+ *
+ * It read 78%. The reason is not the duty cycle: **the operating system does not give a thread a
+ * core merely because one is free**. On this machine, 8 workers and a spinning sampler on 16
+ * logical cores lose of the order of 14% of their wall time to the scheduler, in preemptions of
+ * milliseconds. "Never blocks" is a property of the code; being on a CPU is not.
+ *
+ * So the second truth is the workers' own account of the same quantity, taken from the gaps in the
+ * clock readings the run loop already makes — see [Worker.stallNanos]. It is measured by the
+ * victim, owes nothing to the OS accounting it is checking, and the two agreeing is a much
+ * stronger statement than either matching a number we assumed.
+ *
+ * Starvation mode still contributes its known component: an inactive worker is parked for the
+ * whole run and contributes wall time and no CPU, so the expectation scales by active/registered.
+ */
+private fun printDuty(
+    d: DutyReport,
+    bench: Bench,
+    runNanos: Long,
+    labelledFraction: Double,
+    stuckShare: Double,
+) {
+    println("\n--- CPU duty cycle: how much of the occupancy was CPU ---")
+    for (l in d.lines(labelledFraction)) println("  $l")
+    if (!d.available) return
+
+    val s = bench.stalls()
+    // Denominator over every registered thread, since that is the set the duty cycle walks; an
+    // inactive worker is parked on the barrier and brings wall time with no CPU under it.
+    val wall = runNanos.toDouble() * bench.threads
+    val expected = (s.wallNanos - s.offCpuNanos) / wall
+    val diffPp = abs(d.duty - expected) * 100
+    println(
+        String.format(
+            Locale.ROOT,
+            "  the workers' own account: %,d preemptions over %.3f ms, worst %.3f ms, %.2f%% of their wall time",
+            s.events, s.offCpuNanos / 1e6, s.worstNanos / 1e6, s.offCpuNanos * 100.0 / s.wallNanos
+        )
+    )
+    println(
+        String.format(
+            Locale.ROOT, "  so the duty cycle should read %.2f%%%s",
+            expected * 100,
+            if (bench.activeThreads < bench.threads)
+                " (${bench.activeThreads} of ${bench.threads} threads work; the rest are parked)" else ""
+        )
+    )
+    println(
+        String.format(
+            Locale.ROOT, "  %s — the two differ by %.2f pp, tolerance %.2f pp",
+            if (diffPp <= DUTY_TOLERANCE_PP) "the two independent readings agree" else "THEY DO NOT AGREE",
+            diffPp, DUTY_TOLERANCE_PP
+        )
+    )
+    println("  (the workers see only preemptions longer than 0.5 ms, so their figure is a lower bound)")
+    // A third view of the same thing, and the cheapest of the three: a thread preempted for longer
+    // than a tick is still holding its label, so the detector sees it as an execution that outlived
+    // a tick. It cannot see the shorter preemptions at all — its floor is a whole tick against the
+    // workers' half-millisecond — so it should read the lowest of the three, and the three should
+    // be the same order. Anything else means one of them is measuring something other than the
+    // scheduler.
+    println(
+        String.format(
+            Locale.ROOT,
+            "  and a third view: %.2f%% of occupancy sat inside executions that outlived a tick (floor 1 tick, so the lowest of the three)",
+            stuckShare * 100
+        )
+    )
 }
 
 /**

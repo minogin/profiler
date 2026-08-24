@@ -52,6 +52,13 @@ smallest step the fit can take is now 2.4 ns, so it cannot do better than ~6%. A
 tolerance is arithmetically unsatisfiable at that clock. *Open:* the tolerance should be derived
 from the achievable quantisation rather than fixed.
 
+**And it is not rare: the fit aborted 6 runs out of 12** in one afternoon on a machine whose clock
+was healthy throughout (0.81–0.87 ns per iteration). A different operation each time — `tinyStep`
+5.4%, `traverse` 9.2%, `checkpoint` 4.8%, `scoreNode` 11.9%, `rankBatch` 3.3% — and the fitted
+iteration counts for the *parent* operations swung wildly between runs, `traverse` taking 25
+iterations in one run and 66 in another. The guard is doing its job, but half the runs of the bench
+are currently being spent on it.
+
 ## Measurement technique
 
 **Measuring things sequentially that you intend to compare aliases drift onto the comparison.**
@@ -94,6 +101,25 @@ round brought it to 1.021× with three rounds each way, which is the answer "bel
 
 This is the fourth time a sequential comparison has aliased something onto the effect, and the
 first time round-robin alone did not fix it.
+
+**A rate needs its numerator and its denominator to count the same window, and one of ours did
+not.** Implied duration is `hits × step / calls`. The hits come from the sampling session; the call
+counts came from the registry, which totals the life of the *process* — including threads that died
+before sampling began, whose counts are folded into the retired totals and stay there. The bench's
+JIT warm-up is exactly that: a separate set of workers that exits before the measured run.
+
+It inflated every call count by around a third and so deflated every implied duration by the same
+factor, uniformly, which is the worst way for an error to behave — it looked like a plausible
+systematic bias and was published as one. What exposed it was a bound that could not be true: the
+floor check accused a 20 ns operation of being under **7.9 ns**, and 7.9 was an *upper* bound.
+An upper bound below the truth is arithmetically impossible, so the only possible fault was in what
+the two sides were counting.
+
+*Fix:* the sampler snapshots the call counts before its first tick and reports the difference. The
+same operation now reads 25.6 ns, which is above 20 ns as an upper bound must be.
+
+*Consequence:* the check that caught it was a bound rather than an estimate. An estimate that came
+out 60% low would have been believed.
 
 **Whole-run throughput cannot resolve a sub-1% effect on this machine.** The same three-way
 comparison gave −13.84% and +11.27% on consecutive runs, with the signs of the two component
@@ -170,6 +196,48 @@ label is set, so the cost lands on the operation rather than its caller.
 **Do not label anything comparable to the hook.** At 1.7 ns per hook, labelling a 1 ns operation
 means the instrument costs more than the thing it measures. The practical floor is a few tens of
 nanoseconds; below that, label the enclosing loop and divide.
+
+**Measured, the floor is between 45 and 70 ns, and it is accuracy rather than cost that sets it.**
+Each leaf's sampled share against the configured truth, one 20 s run at 8 threads, sorted by
+duration. Parents are left out because they carry the opposite bias — they read *high*, absorbing
+their children's hook entry cost — and the question here is about size, not about nesting:
+
+| leaf | built to be | error | its noise floor |
+|---|---|---|---|
+| tinyStep | 20 ns | **−8.44%** | 1.46% |
+| nodeLookup | 20 ns | **−5.83%** | 1.67% |
+| hashProbe | 25 ns | **−9.10%** | 1.70% |
+| edgeScan | 45 ns | **−4.45%** | 1.42% |
+| degreeCheck | 70 ns | −0.39% | 0.97% |
+| markVisited | 110 ns | +2.08% | 0.88% |
+| pushFrontier | 170 ns | −0.32% | 0.72% |
+| popFrontier | 260 ns | +0.22% | 0.58% |
+| filterNode | 400 ns | −1.27% | 0.87% |
+| scoreNode | 620 ns | +1.11% | 0.83% |
+| compact | 950 ns | +0.53% | 1.60% |
+| rehash | 1.4 µs | +1.63% | 1.31% |
+| serialize | 2 µs | +2.37% | 1.79% |
+
+Everything from 70 ns upward is within ±2.4% and most of it is inside its own noise floor. The four
+leaves at 45 ns and below read 4.5–9.1% *low* against noise floors of 1.4–1.7%, so three to six
+times noise, all in the same direction. The break is between 45 and 70 ns, which is where the floor
+of 50 ns comes from.
+
+**The hook's cost is not what sets it.** At 20 ns the hook is 8.5% of the operation and is
+correctable in principle, since the call count measures exactly the quantity a correction needs.
+What is not correctable is the bias above, and beneath that sits the hazard that C2 will shuffle
+work across the boundaries of adjacent short labels altogether — the demo lost 95% of one 12 ns
+operation that way, with nothing in the numbers to show for it.
+
+The 20 ns operations in the bench are there precisely because they sit below the floor: a bench
+should work the instrument at the point where it fails.
+
+*Correction:* this conclusion was first drawn from a different measurement — implied duration
+against configured duration — which was wrong twice over. It divided by call counts that included
+the warm-up (see below), and even fixed it cannot resolve a bias this size, because it compares
+each operation against the *median* load factor while the bench already tolerates 6% of legitimate
+per-operation scatter around that median. The share comparison above uses no call counts and no
+median, and is the measurement that belongs here.
 
 **Opaque labels do not fence the work between them, and the JIT will move it.** The API demo
 originally wrote its three operations with literal trip counts — `burn(s, 40)`, `burn(s, 120)`,
@@ -280,6 +348,207 @@ real application might (GC cycles, timer-driven work).
 read empty forever. In starvation mode that put the idle share at 90% where 80% was correct. Slots
 are released on thread exit, and the sampler output now checks slot count against live worker
 count.
+
+## The duty cycle
+
+How much of the sampled occupancy was CPU — phase 3.5's bound on every share at once.
+
+**A thread that never blocks is off the CPU 14–18% of the time on this machine.** This was
+supposed to be the null test: the bench allocates nothing, waits for nothing and blocks on
+nothing, so the duty cycle had to read ~100% and anything else was a broken implementation. It
+read **78%**, and the implementation is right. Eight workers and a spinning sampler on 16 logical
+cores lose that much wall time to the scheduler, in preemptions of milliseconds — worst single
+preemption 31.6 ms in an 8-worker run and 75.0 ms in a 4-worker one, against a 15.6 ms quantum.
+
+*Consequence:* "never blocks" is a property of the code and being on a CPU is not, so the ground
+truth for the null test cannot come from the configuration. It has to be measured.
+
+**Two mechanisms with nothing in common agree to half a percentage point.** The second reading is
+the workers' own: the run loop already reads `nanoTime` once per 256 root calls to check its
+deadline, and a gap between two of those readings longer than 0.5 ms is the thread having been
+taken off the CPU rather than being slow. It is measured by the victim and owes nothing to the
+operating system's accounting.
+
+| configuration | `getThreadCpuTime` | the threads' own gaps | gap |
+|---|---|---|---|
+| 8 spinning threads + spinner (standalone probe) | 86.19% | 86.13% | 0.06 pp |
+| bench, 8 workers | 83.91% | 84.45% | 0.54 pp |
+| bench, 8 workers | 81.55% | 82.08% | 0.53 pp |
+| bench, 4 workers | 90.63% | 91.39% | 0.76 pp |
+| bench, starvation 3 of 15 | 19.67% | 19.84% | 0.17 pp |
+| bench, starvation 3 of 15 | 18.83% | 19.19% | 0.36 pp |
+
+The OS reads lower every time, which is the expected direction: the workers cannot see a
+preemption shorter than half a millisecond, so their figure is a lower bound on stalling. The
+tolerance is set at 1.5 pp from these six, a little over double the worst of them.
+
+**`getThreadCpuTime` on Windows is usable at a one-second window, and the resolution is 15.625 ms
+measured rather than assumed.** The plan carried this as a caveat to be checked: on Windows the
+value comes from `GetThreadTimes`, updated on scheduler ticks. Probed by spinning and watching for
+the counter to move, the smallest step is 15.625 ms — 1.6% of the window, and the quantisation
+telescopes, since each window's delta is the difference of two readings of one cumulative counter
+and a rounding error at a boundary enters one window positive and the next negative. A single
+window can even read **100.29%**, which is that error made visible. The aggregate does not.
+
+**The descheduling is load-dependent, and the numbers are large.** One spinning thread on 16 cores
+reads 98.81%; eight read 95.57%; eight plus a spinning sampler read 90.08%; the bench with its
+sampler and main thread reads 81–84%. In starvation mode, where only 3 of 15 threads work, the
+working threads lose 0.8–4%. So the machine's willingness to keep a runnable thread on a core
+falls away long before the cores run out — which is the honest form of the "threads ≤ cores"
+assumption this phase set out to retire.
+
+**Reading every thread's CPU time costs up to 214.7 µs and does not disturb the sampler.** It runs
+on the sampling thread once a second. Achieved step stayed 1.001 ms with zero resyncs; the worst
+step observed was 1.445 ms against a 1.25 ms jitter ceiling, so the walk lands inside a single tick
+and delays it by a fraction of a step, roughly one tick in a thousand.
+
+**The bound is pessimistic when threads sit outside any operation.** The duty cycle covers every
+registered thread while the shares cover labelled samples only, so a parked thread lowers the duty
+cycle without appearing in the shares at all. Starvation mode is the extreme: 18.83% duty and a
+formally unbounded error, while the three working threads were on CPU 96% of the time and their
+shares are fine. The report says so rather than pretending otherwise. Tightening it needs the duty
+cycle per thread, paired with that thread's labelling — see [ideas.md](ideas.md).
+
+## The long-instance detector
+
+Whether an operation labelled as fine actually is. The test is two words per slot per tick: the
+same operation as last tick *and* an unmoved entry counter means nobody entered in between, so this
+is one execution still running a tick later — four orders of magnitude past what a 20 ns label
+claims. Nothing is added to entry or exit; the counter already exists for the calls column.
+
+**Implied duration reproduces the configuration across a hundredfold range.** `hits × step / calls`
+against what each operation was built to be, on a quiet machine at 8 threads:
+
+| operation | configured | implied | ratio |
+|---|---|---|---|
+| tinyStep | 20 ns | 20.4 ns | 1.02× |
+| hashProbe | 25 ns | 25.3 ns | 1.01× |
+| markVisited | 110 ns | 124.9 ns | 1.14× |
+| popFrontier | 260 ns | 289.7 ns | 1.11× |
+| rehash | 1.4 µs | 1.6 µs | 1.13× |
+| serialize | 2.0 µs | 2.3 µs | 1.14× |
+
+The load factor that run was 1.189, so the ratios should sit there and mostly do. Where they fall
+short it is the *known* attribution bias and not a new defect: `tinyStep` at 1.02× against a 1.19×
+load is −14%, and phase 3 measured that same operation at −15.5%. Two different routes to the same
+number, which is the useful kind of agreement.
+
+In the API demo the reproduction is exact: `validateRecord` runs 120 busy-loop iterations at
+0.83 ns each and the implied duration is 102.0 ns.
+
+**The detector's floor is the operating system, and it lands on every operation equally.** That is
+the property the whole design depends on, and it holds. At 15 threads on 16 cores:
+
+| | reading |
+|---|---|
+| duty cycle: occupancy that was not CPU | 18.04% |
+| the workers' own preemption gaps (floor 0.5 ms) | 17.11% |
+| executions that outlived a tick (floor 1 ms) | 15.52% |
+
+Three mechanisms with nothing in common, and in the predicted order — the detector reads lowest
+because its floor is a whole tick, so it cannot see the shorter preemptions the other two catch.
+
+Per operation, that 15.52% is spread almost uniformly: **13.27% to 17.90% across all twenty**, worst
+only **1.15× the run-wide rate**, over a hundredfold range of operation durations. Preemption is
+charged to whatever was executing, in proportion to its occupancy, so it raises everything
+together — which is exactly why an operation has to be judged against the run-wide rate and not
+against zero. On a quiet machine the same bench gives a run-wide rate of 0.04% and a worst
+operation of 0.18%.
+
+Nothing was flagged in either regime, which is the right answer: this bench has nothing that can
+block.
+
+**A ratio against a small baseline is not evidence, and the first version of the check said so the
+hard way.** On the quiet run the run-wide rate is 0.04%, so `serialize` — with *one* long execution
+in two thousand samples — came out at 3.85× the baseline and was duly accused of blocking. A rule
+that only compares against the baseline will therefore accuse something in almost every quiet run.
+It takes three conditions together: a rate well above the run-wide one, a floor on the rate itself,
+and enough long executions behind it that a single GC pause or preemption cannot be the whole
+story. The thresholds are provisional and are written in one place.
+
+### The detector against Calcite
+
+Four-table chain join with join associate, labels on the rule instance, 2 minutes of planning: 18
+plans at 6.78 s each, 118,887 samples on one thread at 1.026 ms, span stack balanced after every
+plan. Shares reproduce the original trial — `EnumerableMergeJoinRule` 46.67% against 46.18%,
+`JoinCommuteRule` 29.14% against 30.21% — so nothing in this work has disturbed the sampler.
+
+**The negative control is clean and the positive control is unmistakable.** Ordered by implied
+duration per firing, in one run, in code we did not write:
+
+| operation | implied per call | occupancy in executions over a tick |
+|---|---|---|
+| rule:EnumerableLimitRule | 105.7 ns | **0.00%** |
+| rule:JoinPushExpressionsRule | 1.9 µs | **0.00%** |
+| rule:ProjectMergeRule | 3.4 µs | **0.00%** |
+| rule:EnumerableJoinRule | 6.6 µs | 1.32% |
+| rule:JoinCommuteRule | 142.6 µs | 38.83% |
+| rule:FilterIntoJoinRule | 784.5 µs | 59.38% |
+| rule:EnumerableMergeJoinRule | 228.4 µs | **74.82%** |
+| phase:optimise | 144.84 ms | 5.71% |
+
+Nothing had to be assumed about these rules for the test to mean something: the sub-10 µs ones are
+silent and the sub-millisecond ones are loud, across four orders of magnitude, on a signal whose
+floor is one tick.
+
+`EnumerableMergeJoinRule` is the shape the coarse tier exists for: a **mean** of 228 µs per firing
+while three quarters of its time sits in firings that outlived a millisecond. A mean over a
+distribution that skewed is not a description of anything.
+
+**GC was not the false-positive source it was expected to be.** 119 young pauses, 3.359 s in total,
+mean 28.2 ms — **2.6% of wall time**, against the duty cycle's 3.01% of occupancy that was not CPU
+in the same run. Two independent instruments, one from `-Xlog:gc` and one from `getThreadCpuTime`,
+landing half a percentage point apart, and the remainder is ordinary preemption. So a
+heavily-allocating real workload does not drown the detector, and the pauses it does cause are
+accounted for by the duty cycle.
+
+**But the decision rule failed, and this is the finding that matters.** Not one operation was
+flagged — in a workload where nearly every label is coarse. The rule compared each operation
+against the *run-wide* rate of long executions, and that rate was **53.52%**, so three times it is
+unreachable and nothing can ever be named.
+
+The assumption underneath was that long executions are the exception and the run-wide rate is
+therefore a floor of noise. On real code the exception can be the majority: here it is more than
+half of all occupancy, because more than half of the labels genuinely are coarse operations.
+*A baseline built from the operations under test cannot detect a defect that most of them share.*
+
+**The floor should come from the duty cycle instead**, which measures what the *machine* did to
+everything rather than what the operations did to themselves. Checked against all three data sets
+we now have:
+
+| run | occupancy that was not CPU | worst operation's long-execution rate | wanted |
+|---|---|---|---|
+| bench, quiet | 1.03% | 0.18% | silent |
+| bench, 15 threads | 18.04% | 17.90% | silent |
+| Calcite | 3.01% | 74.82% | **named** |
+
+One number separates all three, and it is a number that was measured for a different purpose. The
+machine's contribution to stalling is bounded by the duty cycle; anything an operation shows above
+that is its own.
+
+**Changed, and re-run.** Against the same Calcite configuration, with a 3.78% machine floor:
+
+```
+! rule:EnumerableMergeJoinRule: 2,488 executions lasted over a tick (87.9% of its occupancy, 527.3 us per call)
+! rule:FilterIntoJoinRule:        950 executions lasted over a tick (80.1%, 1.79 ms per call)
+! rule:JoinCommuteRule:         2,775 executions lasted over a tick (63.4%, 304.9 us per call)
+! rule:ProjectRemoveRule:          48 executions lasted over a tick (50.8%, 1.05 ms per call)
+! rule:JoinAssociateRule:          58 executions lasted over a tick (17.3%, 17.2 us per call)
+```
+
+Five named out of forty-odd labels, and they are the five the original trial spent a day
+identifying by hand. The bench stays silent in both regimes with the same rule — at 15 threads its
+floor is 17.5% and its worst operation 6.35%, or 0.36× the floor.
+
+**A parent whose children are labelled is nearly invisible to this test.** `phase:optimise` runs
+144.84 ms per call and reads **5.71%**, well under the floor. The reason is mechanical: a sample
+only counts as stuck if the *previous* sample found the same slot holding the same operation, and
+while a rule is firing the slot holds the rule, not the phase. Two consecutive samples rarely both
+catch the parent directly.
+
+The implied-duration column catches exactly that case — 144.84 ms per call is unmistakable — so the
+two columns are complementary rather than redundant: implied duration finds long parents, the
+detector finds long leaves. Worth knowing that neither alone is sufficient.
 
 ## Statistics
 

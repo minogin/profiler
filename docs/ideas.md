@@ -295,7 +295,33 @@ cheap and probably enough; or *adaptive promotion*, where a detected operation s
 contexts on subsequent entries, which needs a check at entry and therefore costs hot-path budget.
 Start with reporting; the diagnostic is most of the value.
 
-## 10. Correct the attribution bias using call counts · open
+## 10. The duty cycle per thread, so the bound is not vacuous when threads idle · open
+
+Phase 3.5 measures the duty cycle over every registered thread, and the shares it bounds are over
+labelled samples only. A thread parked outside any operation therefore lowers the bound without
+appearing in the thing being bounded. Starvation mode is the extreme case and it is now measured:
+18.83% duty and a formally unbounded error on every share, while the three working threads were on
+CPU 96% of the time and their shares were fine. Any real application with an idle pool thread hits
+a milder version of this, and a report that cries wolf at a 30%-utilised thread pool will be
+ignored when it is right.
+
+The fix needs both halves per thread rather than in aggregate: thread *i*'s stall fraction from
+`getThreadCpuTime`, which the duty walk already computes and throws away, and thread *i*'s labelled
+fraction, which is the share of the window's ticks where its slot held an operation. The stall that
+could possibly be inside labelled work is then `Σ min(stall_i, labelled_i)`, which in starvation
+mode is the three working threads' 0.8% and not the twelve parked ones' 100%.
+
+The labelled fraction per window needs a per-slot counter written by the sampler, which needs the
+immutable slot index that the long-instance detector wants anyway — so the two are naturally done
+together, and doing them together is probably right.
+
+**Also parked here:** the duty walk currently runs on the sampling thread, where its dearest
+observed walk is 214.7 µs once a second — enough to push one tick in a thousand out by a fifth of a
+step, with no resync. A thread of its own that parks for a second would cost no core and no
+punctuality; it would cost the guarantee that both cover exactly the same span. Not obviously worth
+it, but worth remembering that the sampler's punctuality was expensive to get.
+
+## 11. Correct the attribution bias using call counts · open
 
 The sampler reads high on parents and low on short leaves. With call counts the correction is
 arithmetic rather than a model, and the counts are already collected. Blocked on understanding the

@@ -7,6 +7,8 @@ Findings, techniques and dead ends live in [findings.md](findings.md). The idea 
 live in [profiler.md](profiler.md). The trial on Apache Calcite has its own record in
 [trial.md](trial.md). Where the existing tools fall short — the running case for building this at
 all — is [case.md](case.md), and what we might do but have not committed to is [ideas.md](ideas.md).
+What each document is for is [index.md](index.md); the short version of the whole thing, in plain
+words, is [tldr.md](tldr.md).
 
 | phase | subject | status |
 |---|---|---|
@@ -14,7 +16,7 @@ all — is [case.md](case.md), and what we might do but have not committed to is
 | 2 | The fine tier — slots, hook, sampling thread | **done** |
 | 3 | Verification — sampler against the truth | **done** |
 | — | Trial — the fine tier on somebody else's code | **done** |
-| 3.5 | What a share is worth — bounding the error, not classifying operations | **next** |
+| 3.5 | What a share is worth — bounding the error, not classifying operations | **in progress** — measuring done, thresholds next |
 | 4 | The coarse tier — contexts, spans, cross-tabulation | after 3.5 |
 | 5 | Crossing threads — propagation, and per-operation parallelism | not started |
 | 6 | Thread state and the whole-application parallelism coefficient | not started |
@@ -190,7 +192,7 @@ varied 20–110 ms for byte-identical work, which nothing in the current output 
 per-instance spans with percentiles exist for. The sentence the trial wanted to write and could
 not: *of the 48 ms median plan, 40% is `FilterIntoJoinRule`*.
 
-## Phase 3.5 — what a share is worth · next
+## Phase 3.5 — what a share is worth · in progress
 
 The fine tier is marked done, and it reports shares of **occupancy** — how many threads were inside
 an operation — while presenting them as time. Three things stand between those two quantities and
@@ -209,11 +211,29 @@ was not CPU, and that single number bounds the error on every share at once, wha
 This is the same discipline as the noise floor already in the report — that says how wrong chance
 could make a share; this says how wrong blocking could make it.
 
-### 1. The CPU duty cycle, and the bound it implies
+### 1. The CPU duty cycle, and the bound it implies · **done**
 
 `ThreadMXBean.getThreadCpuTime(id)` per registered thread, sampled at a **low** rate — once a
 second, or every *n* ticks — never per tick. The ratio of summed CPU delta to summed wall delta
 across live threads is the duty cycle.
+
+**Built.** [`Duty.kt`](../src/main/kotlin/com/minogin/profiler/Duty.kt): `ThreadCpuClock` checks
+support, enables the clock, and *measures* its resolution; `DutyCycle` rides the sampler's tick loop
+at a one-second window; `DutyReport` renders the line and the bound. It is in both reports — the
+bench's and the library's `Report.render()`, which is where it matters, since it is the thing that
+tells a user of the tool what their shares are worth.
+
+**And what it found, which was not what this section expected.** The null test — the ordinary bench,
+which allocates nothing and blocks on nothing — read **78%**, not ~100%. The implementation is
+right: on this machine eight workers and a spinning sampler on 16 logical cores lose 14–18% of
+their wall time to the scheduler, in preemptions of milliseconds. *Never blocks is a property of
+the code; being on a CPU is not.* The full numbers are in [findings.md](findings.md#the-duty-cycle).
+
+So the ground truth for the null test could not come from the configuration, and it now comes from
+a second measurement: the workers' own account of their preemptions, taken from gaps in the clock
+readings the run loop already makes to check its deadline. Two mechanisms with nothing in common,
+agreeing to 0.06–0.54 pp across five configurations. That is a far stronger check than matching a
+number we had assumed, and it is phase 1's two-truths discipline arriving where it was needed.
 
 The report line, beside the achieved sampling rate:
 
@@ -237,18 +257,31 @@ phase is bounding is time when the thread was **not on a CPU at all**.
 
 **It also retires the threads ≤ cores assumption** for free. The sampler reads slots, not cores, so
 200 runnable threads on 16 cores over-read CPU by 12× — and that shows up as a duty cycle far below
-100% without any special handling.
+100% without any special handling. It retired rather more than that: on this machine the scheduler
+stops keeping runnable threads on cores long before the cores run out, at nine busy threads of
+sixteen.
 
 **Needs:** the owning thread's id on the slot, recorded at slot creation, off the hot path. Store
-the id rather than a `Thread` reference so a dead thread is not pinned.
+the id rather than a `Thread` reference so a dead thread is not pinned. Done — `OpSlot.threadId`.
 
-**Platform caveat, to be measured and not assumed.** On Windows this comes from `GetThreadTimes`,
-which is updated on scheduler ticks — of the order of 15 ms — so it is useless at a 1 ms window and
-may be fine at a 1 s one. `isThreadCpuTimeSupported` and `isThreadCpuTimeEnabled` must both be
-checked, and where the resolution cannot support the window the report must **say the number is
-unavailable rather than print a bad one**.
+**Platform caveat, measured and not assumed.** On Windows this comes from `GetThreadTimes`, updated
+on scheduler ticks. Probed by spinning and watching the counter move, the step is **15.625 ms** —
+1.6% of a one-second window, and the quantisation telescopes across windows, so the aggregate is
+sound while a single window can read 100.29%. `isThreadCpuTimeSupported` and
+`isThreadCpuTimeEnabled` are both checked and the clock enabled if it is off; where the resolution
+cannot support the window the report says the number is unavailable rather than printing a bad one.
 
-### 2. The long-instance detector
+**What it costs.** Up to 214.7 µs per walk, once a second, on the sampling thread. The achieved
+step stayed 1.001 ms with zero resyncs.
+
+**The one weakness, and it is now measured.** The duty cycle covers every registered thread while
+the shares cover labelled samples only, so a thread parked outside any operation lowers the bound
+without appearing in what is being bounded. In starvation mode that is stark: 18.83% duty and a
+formally unbounded error, while the three working threads were on CPU 96% of the time. The report
+says so; tightening it needs the duty cycle per thread paired with that thread's labelling, which
+wants the same slot index the long-instance detector wants — [ideas.md](ideas.md) item 10.
+
+### 2. The long-instance detector · **built, thresholds not yet settled**
 
 The sampler already reads the slot's operation id. Have it read **that operation's call counter**
 in the same tick and keep the pair from the previous tick:
@@ -285,12 +318,132 @@ lock stall can never span two ticks and is invisible. And *stuck* conflates bloc
 and legitimately-long-but-running — separating those needs the thread's state, and only for slots
 the counter test already flagged, which is normally almost none.
 
-### 3. Implied per-call duration
+**What it came to.** `OpSlot` carries an immutable index, recycled when a thread dies; the sampler
+keeps `prevOp`/`prevCount`/`prevStuck` arrays of its own and reads the counter opaquely, so the
+owner's hot path is untouched. Verified in both regimes: on a quiet machine the run-wide rate of
+executions outliving a tick is 0.04% and nothing is flagged; at 15 threads on 16 cores it is 15.52%
+and *still* nothing is flagged, because preemption raises every operation together — 13.27% to
+17.90% across all twenty, worst 1.15× the run-wide rate. That uniformity is what makes "excess over
+the run-wide rate" a valid test, and it is now measured rather than argued.
 
-`share × elapsed / calls`, which is already derivable and was the most valuable column in the
-Calcite trial. It is the smell test the person who wrote the code can apply and the tool cannot: an
+It is also a third independent view of the stalling the duty cycle bounds: 18.04% non-CPU, 17.11%
+by the workers' own gaps, 15.52% by the detector, in the predicted order since the detector's floor
+is a whole tick. Full numbers in [findings.md](findings.md#the-long-instance-detector).
+
+**What is not settled: the thresholds.** Naming an operation takes three conditions together — a
+rate well above the run-wide one, a floor under the rate itself, and enough long executions that
+one GC pause cannot be the whole story. All three are provisional, in one place
+(`Report.SUSPECT_*`), and the experiments that settle them are below. The third condition was not
+in the original design and was added the first time this ran: on a quiet machine the run-wide rate
+is 0.04%, so a single long execution made `serialize` 3.85× the baseline and the check accused it.
+
+### 3. Implied per-call duration · **built**
+
+`hits × step / calls`, which is already derivable and was the most valuable column in the Calcite
+trial. It is the smell test the person who wrote the code can apply and the tool cannot: an
 operation known to be 20 ns showing 500 ns implied is stalling on something. It inherits the same
-bound as everything else, and the column heading should say occupancy rather than time.
+bound as everything else, and the column heading says occupancy rather than time.
+
+Verified against the bench, whose true answer is known, over a hundredfold range of durations: it
+reproduces each operation's configured duration times the load factor, and where it falls short it
+reproduces the *known* attribution bias rather than a new one — `tinyStep` at −14% against phase 3's
+−15.5% for the same operation. In the API demo it is exact: 120 busy-loop iterations at 0.83 ns
+read back as 102.0 ns.
+
+### What the tool does about it — the severity ladder
+
+Three severities, and one question decides which a finding gets: **can the condition be attributed
+to the code, or only to the run?**
+
+| severity | when | what happens |
+|---|---|---|
+| **fatal** | the label is provably not measuring what it claims, and the condition is a property of the code rather than of the machine | sampling stops, the report is marked invalid and leads with the failure, the operation and the fix are named |
+| **warning** | the measurement is honest but the label is in the wrong tier, or the run's conditions limit what the numbers mean | printed with the report, which stays valid |
+| **note** | what the reader needs in order to read the numbers — the bound, the noise floor, what was excluded | printed |
+
+**Too small is fatal. Too long is a warning.** They look symmetric and are not:
+
+- *Too small* is deterministic. A 20 ns operation is 20 ns on a loaded machine, a quiet one, a
+  different machine, and every rerun. There is no run in which the label is fine, so stopping costs
+  the user one run and saves them a wrong conclusion. It is also detectable within seconds — see the
+  bound below, which needs no hits at all.
+- *Too long* depends on the run. Contention is a property of the workload that day; a `StampedLock`
+  optimistic read is a 15 ns fine operation in a read-mostly phase and a parked thread in a
+  write-heavy one, from identical source. Worse, Calcite proved that an operation can outlive a tick
+  and still be measured perfectly: those rule labels are coarse-sized, and their shares agreed with
+  JFR to about a percentage point and became the 275× finding. Aborting on that signal would have
+  destroyed the most valuable result this project has produced.
+
+**Fatal never means killing the host.** This is a library inside somebody else's process. Fatal
+means the profiling session stops and says why; the application carries on. Our own bench may
+exit(1) on it, because the bench *is* the application.
+
+**And it is switchable, because of Calcite.** `strict = false` downgrades fatal to warning, for the
+case where the labels are on code you do not own and cannot resize. The two harnesses in this
+repository both switch it off deliberately — they exist to stress the instrument below its floor,
+which is exactly what a real user should be stopped from doing by accident.
+
+### Catching an operation that is below the floor
+
+The implied duration already says it when the operation gets hits. What makes this a *check* rather
+than a column is that it also works when the operation is never sampled at all, which is the case
+that looks like a blind spot and is in fact the strongest evidence available.
+
+Seeing zero hits in *n* samples bounds the true rate at under `3/n` with 95% confidence — the rule
+of three — and the arithmetic then collapses: an operation's total occupancy is under **three ticks**
+however many samples were taken, so its cost per call is under `3 × tick / calls`. Forty million
+calls at a 1 ms tick puts it under 0.075 ns, a fraction of one cycle.
+
+One formula covers both cases. Take the upper confidence bound on the hit count —
+`hits + 2√hits + 3`, which is just 3 when hits is zero — and if even *that* implies a duration below
+the floor, the operation is too small, whatever the sampler did or did not catch.
+
+Two adjustments keep it from accusing the innocent: the sampler reads operations below 45 ns some
+5–9% low, which is systematic and in the wrong direction here, so the bound is inflated by 20%
+before comparing; and everything else is left to the bound's own conservatism. `edgeScan` at 45 ns
+is genuinely under the floor and is deliberately not named, because being sure matters more than
+being complete.
+
+**The call counts have to be this session's.** The first version divided session hits by the
+registry's process-lifetime totals, which include threads that died before sampling began — the
+bench's warm-up is exactly that — and every implied duration came out about a third low. It was
+caught because the check is a *bound*: it accused a 20 ns operation of being under 7.9 ns, and an
+upper bound below the truth is impossible. An estimate that came out 60% low would have been
+believed. The sampler now snapshots the counts before its first tick.
+
+**What cannot be caught, and it belongs in the message rather than in a document.** C2 unrolling
+adjacent short loops and shuffling work across the label boundaries is undetectable — the demo lost
+95% of one operation and nothing in the data said so. That is a second, independent reason not to
+put labels on tiny operations, and the only defence is the advice, which is why the advice is
+printed rather than filed.
+
+### What settles the thresholds, and in what order
+
+Decided with the numbers rather than in advance, because the first thing the detector will do on
+real code is fire on operations whose measurement is perfectly honest.
+
+1. ~~build the detector and the implied duration column, verify on the bench where nothing should
+   fire~~ — **done**.
+2. ~~Run it on the Calcite trial.~~ **Done, and it changed the design.** The controls held — rules
+   under 10 µs per firing read 0.00%, rules over 100 µs read 39–75% — and GC turned out not to be
+   the false-positive source it was feared to be: 119 pauses totalling 2.6% of wall time, against
+   the duty cycle's independently measured 3.01% of occupancy that was not CPU.
+   What failed was the decision rule. Judging each operation against the *run-wide* rate of long
+   executions assumes long executions are the exception; in Calcite's planner that rate is 53.52%,
+   because most of those labels genuinely are coarse. Nothing could ever be named. **The floor now
+   comes from the duty cycle** — what the machine did to everything — which separates all three
+   data sets we have. Full numbers in [findings.md](findings.md#the-detector-against-calcite).
+3. Add the contended bench operation, which gives a known blocking rate to measure against.
+4. Then decide what the tool *does* about a flagged operation.
+
+**Step 4 is deliberately last.** The Calcite labels sit on operations of hundreds of microseconds:
+they are not fine operations by any definition here, and yet the shares they produced agreed with
+JFR to about a percentage point and became the 275× finding. So the detector will flag them, and
+aborting on that would have destroyed the single most valuable result this project has produced.
+What distinguishes *honest but coarse-sized* from *corrupted* is not duration but whether the
+thread was on CPU while it ran — which is the per-operation duty cycle, [ideas.md](ideas.md) item
+10, and not something this signal can decide alone. Erring early is right; erring on this signal
+alone is not.
 
 ### What this phase deliberately does not do
 
@@ -313,13 +466,17 @@ on at most one core each. Nothing here can be verified against it as it stands. 
 - an operation that contends on a real lock, with the contention rate a parameter, so the duty cycle
   and the *stuck* counter have a known truth to be checked against;
 - a mode with threads well above core count;
-- the expected duty cycle computed from the configuration, in the manner of phase 1's two truths, so
-  the measurement is checked rather than admired.
+- ~~the expected duty cycle computed from the configuration~~ — **done, and it had to be done
+  differently.** The configuration cannot predict the duty cycle, because the operating system
+  deschedules threads that have nothing to wait for. The second truth is instead the workers' own
+  account of their preemptions, from the gaps in the clock readings the run loop already makes:
+  `Worker.stallNanos`, no new bench machinery and nothing added to the hot loop.
 
-**Done when:** duty cycle reads ~100% on the existing non-blocking bench (the null test, and the one
-most likely to expose a broken implementation); an injected blocking operation moves it by the
-injected amount within measurement; threads at 2× cores are reported as such; and the detector fires
-on the injected blocker and stays silent otherwise.
+**Done when:** ~~duty cycle reads ~100% on the existing non-blocking bench~~ → the OS accounting and
+the workers' own account of the same quantity agree, which they do to 0.54 pp at 8 threads and
+0.36 pp in starvation mode; an injected blocking operation moves it by the injected amount within
+measurement; threads at 2× cores are reported as such; and the detector fires on the injected
+blocker and stays silent otherwise.
 
 ## Phase 4 — the coarse tier · after 3.5
 

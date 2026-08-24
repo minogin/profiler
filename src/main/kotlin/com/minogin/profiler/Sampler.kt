@@ -26,6 +26,16 @@ const val MAX_OPERATIONS = 256
 const val NO_OP_INDEX = MAX_OPERATIONS
 
 /**
+ * How many threads the long-instance detector can track at once.
+ *
+ * Only a ceiling on the sampler's parallel arrays — 16 KB for the lot — and indexes are recycled
+ * when threads die, so this is a limit on *simultaneous* registered threads and not on how many a
+ * process may create. A thread past the ceiling is still sampled and still counted; it is only
+ * invisible to the detector, and the report says so rather than quietly dropping it.
+ */
+const val MAX_SLOTS = 1024
+
+/**
  * One thread's slot: the id of the operation that thread is currently inside.
  *
  * The padding is not decoration. A slot is a 12-byte header plus a 4-byte field, so four of them
@@ -37,7 +47,22 @@ const val NO_OP_INDEX = MAX_OPERATIONS
  * The cost is under 2 KB for the whole registry.
  */
 @Suppress("unused")
-class OpSlot {
+class OpSlot(
+    /**
+     * This slot's position in the sampler's own parallel arrays, or -1 if the registry was full
+     * when the thread arrived and the detector cannot track it.
+     *
+     * The sampler needs somewhere to remember what it saw here last tick, and that somewhere must
+     * not be this object: a write from the sampling thread would invalidate the owner's cache line
+     * on every tick, which is exactly the false sharing all the padding below exists to prevent.
+     * So the slot carries an index and the sampler keeps its own arrays.
+     *
+     * Assigned at construction and never changed. Released when the thread dies, and handed to the
+     * next thread that arrives — the sampler notices, because the new thread's call counter will
+     * not match what the old one left behind.
+     */
+    @JvmField val index: Int,
+) {
     /**
      * Accessed opaquely, not volatile. A volatile store on x86 is not a store — it needs a
      * StoreLoad barrier, a lock-prefixed instruction costing tens of cycles, and the hook does two
@@ -55,6 +80,17 @@ class OpSlot {
      */
     @JvmField
     var current: Int = NO_OP
+
+    /**
+     * The owning thread, as an id rather than a reference — a reference would keep a dead thread
+     * and everything it held reachable for as long as the slot lived.
+     *
+     * Written once at construction, which happens on the owning thread inside the ThreadLocal
+     * supplier, so this costs nothing on the hot path and needs no publication guarantee beyond
+     * the one final-field-like initialisation already gives the sampler.
+     */
+    @JvmField
+    val threadId: Long = Thread.currentThread().threadId()
 
     @JvmField var p1: Long = 0
     @JvmField var p2: Long = 0
@@ -107,6 +143,16 @@ class OpSlot {
         @JvmStatic
         val CURRENT: VarHandle =
             MethodHandles.lookup().findVarHandle(OpSlot::class.java, "current", Int::class.javaPrimitiveType)
+
+        /**
+         * For the sampler's read of somebody else's call counter. The owner keeps writing a plain
+         * `counts[id]++` — the hot path is not touched — while the reader goes through this, so
+         * the JIT cannot hoist the read out of the sampling loop and hand back a value from a
+         * minute ago. Coherence does the rest; a few nanoseconds stale is the same bargain the
+         * slot itself already makes.
+         */
+        @JvmStatic
+        val COUNTS: VarHandle = MethodHandles.arrayElementVarHandle(LongArray::class.java)
     }
 }
 
@@ -116,6 +162,9 @@ fun OpSlot.setOpaque(id: Int) = OpSlot.CURRENT.setOpaque(this, id)
 /** Reads the slot as the sampler does: no fence, possibly a few nanoseconds stale. */
 fun OpSlot.getOpaque(): Int = OpSlot.CURRENT.getOpaque(this) as Int
 
+/** How many times this thread has entered [id], read from another thread. See [OpSlot.COUNTS]. */
+fun OpSlot.countOpaque(id: Int): Long = OpSlot.COUNTS.getOpaque(counts, id + OpSlot.COUNT_PAD) as Long
+
 /**
  * The slot registry. A thread gets its slot from a ThreadLocal and is added to the walk list on
  * first access. Threads are expected to register themselves up front, so the list is stable by
@@ -124,8 +173,22 @@ fun OpSlot.getOpaque(): Int = OpSlot.CURRENT.getOpaque(this) as Int
 object Profiler {
     private val allSlots = CopyOnWriteArrayList<OpSlot>()
 
+    /**
+     * Slot indexes in use, and the ones given back by threads that have died.
+     *
+     * Recycled rather than ever-growing, because a pool that creates and destroys threads for the
+     * life of a process would otherwise walk off the end of the sampler's arrays. Exhausting the
+     * ceiling is not fatal: the slot still works and is still sampled, it merely cannot be tracked
+     * by the long-instance detector, and the report says how many such slots there were.
+     */
+    private val freeIndexes = java.util.concurrent.ConcurrentLinkedQueue<Int>()
+    private val nextIndex = AtomicInteger(0)
+
+    private fun takeIndex(): Int =
+        freeIndexes.poll() ?: nextIndex.getAndIncrement().let { if (it < MAX_SLOTS) it else -1 }
+
     private val local: ThreadLocal<OpSlot> = ThreadLocal.withInitial {
-        val s = OpSlot()
+        val s = OpSlot(takeIndex())
         allSlots.add(s)
         s
     }
@@ -177,8 +240,14 @@ object Profiler {
             for (id in 0 until MAX_OPERATIONS) retiredCounts[id] += s.countOf(id)
         }
         allSlots.remove(s)
+        // Removed from the walk list first, so the sampler cannot be reading this slot at the
+        // moment its index is handed to somebody else.
+        if (s.index >= 0) freeIndexes.add(s.index)
         local.remove()
     }
+
+    /** Slots that arrived after the ceiling and are therefore invisible to the detector. */
+    fun untrackedSlots(): Int = (nextIndex.get() - MAX_SLOTS).coerceAtLeast(0)
 
     /** Every live registered slot. Read by the sampler. */
     fun slots(): List<OpSlot> = allSlots
@@ -187,11 +256,22 @@ object Profiler {
     fun callsOf(id: Int): Long =
         synchronized(retiredCounts) { retiredCounts[id] } + allSlots.sumOf { it.countOf(id) }
 
-    /** Starts sampling. One sampler at a time. */
-    fun start(stepMillis: Double = 1.0, wait: WaitStrategy = WaitStrategy.SPIN, jitter: Double = 0.25) {
+    /**
+     * Starts sampling. One sampler at a time.
+     *
+     * [strict] stops the session if a label turns out to be on something below the floor — see the
+     * severity ladder in plan.md. Switch it off to profile code you do not own and cannot resize.
+     */
+    fun start(
+        stepMillis: Double = 1.0,
+        wait: WaitStrategy = WaitStrategy.SPIN,
+        jitter: Double = 0.25,
+        strict: Boolean = true,
+    ) {
         check(sampler == null) { "already sampling" }
         startedAt = System.nanoTime()
-        sampler = Sampler((stepMillis * 1_000_000).toLong(), wait, jitter).also { it.start() }
+        sampler = Sampler((stepMillis * 1_000_000).toLong(), wait, jitter, strict = strict)
+            .also { it.start() }
     }
 
     /** Stops sampling and returns what was collected. */
@@ -201,14 +281,80 @@ object Profiler {
         sampler = null
         val duration = System.nanoTime() - startedAt
         val stats = (0 until registeredCount()).map { id ->
-            OperationStat(id, nameOf(id), s.counters[id], callsOf(id))
+            OperationStat(id, nameOf(id), s.counters[id], s.sessionCalls(id), s.stuckHits[id], s.stuckInstances[id])
         }
-        return Report(stats, s.counters[NO_OP_INDEX], s.ticks, s.span, duration, s.maxSlots)
+        return Report(
+            stats, s.counters[NO_OP_INDEX], s.ticks, s.span, duration, s.maxSlots, s.duty(), s.failure
+        )
     }
 }
 
+/**
+ * Whether one operation's long executions are evidence of anything, given what the machine was
+ * doing to every operation at the same time — see [Report.machineFloor].
+ *
+ * All three conditions matter and the third was learned the moment this first ran: on a quiet
+ * machine the floor falls to 1%, so a single long execution out of two thousand samples clears
+ * three times it and means nothing whatever. A ratio against a small number is not evidence. The
+ * floor on the share and the minimum count are what keep the answer honest when the machine is
+ * behaving perfectly.
+ *
+ * One function so that the library's report and the bench's own check cannot drift apart, which
+ * they did within an hour of the bench check being written by hand.
+ */
+/** See [Report.impliedUpperNanosOf]. Shared so the run-time check and the report cannot disagree. */
+fun impliedUpperNanos(hits: Long, calls: Long, stepNanos: Double): Double =
+    if (calls == 0L) Double.NaN else (hits + 2 * sqrt(hits.toDouble()) + 3) * stepNanos / calls
+
+/** Whether a label is on something too small for the instrument to describe. See [Report.tooSmall]. */
+fun isTooSmall(hits: Long, calls: Long, stepNanos: Double): Boolean =
+    calls > 0 && impliedUpperNanos(hits, calls, stepNanos) * Report.FLOOR_BIAS_ALLOWANCE < Report.FLOOR_NANOS
+
+/**
+ * What to tell someone whose label is below the floor. Both reasons, because the second is the one
+ * they cannot check for themselves.
+ */
+fun tooSmallMessage(name: String, calls: Long, upperNanos: Double): String = String.format(
+    Locale.ROOT,
+    "%s: %,d calls at under %s each, below the %.0f ns floor.%n" +
+            "    The hook is a large fraction of an operation that size, the sampler reads it low by " +
+            "5-9%%,%n" +
+            "    and C2 can move work across the boundaries of adjacent short labels without leaving a " +
+            "trace in the numbers.%n" +
+            "    Label the enclosing loop instead and divide by the iteration count.",
+    name, calls, duration(upperNanos), Report.FLOOR_NANOS
+)
+
+fun isSuspect(hits: Long, stuckHits: Long, stuckInstances: Long, machineFloor: Double): Boolean =
+    hits > 0 && stuckInstances >= Report.SUSPECT_MIN_INSTANCES &&
+            stuckHits.toDouble() / hits > maxOf(machineFloor * Report.SUSPECT_OVER_BASELINE, Report.SUSPECT_MIN_SHARE)
+
+/**
+ * A duration in whatever unit keeps it readable. The fine tier spans four orders of magnitude, and
+ * a column of nanoseconds makes 1.5 ms and 9 µs look like the same kind of number, which is the
+ * one distinction this column exists to draw.
+ */
+fun duration(nanos: Double): String = when {
+    nanos.isNaN() -> "-"
+    nanos < 1_000 -> String.format(Locale.ROOT, "%.1f ns", nanos)
+    nanos < 1_000_000 -> String.format(Locale.ROOT, "%.1f us", nanos / 1e3)
+    else -> String.format(Locale.ROOT, "%.2f ms", nanos / 1e6)
+}
+
 /** One operation's line in a [Report]. */
-class OperationStat(val id: Int, val name: String, val hits: Long, val calls: Long)
+class OperationStat(
+    val id: Int,
+    val name: String,
+    val hits: Long,
+    val calls: Long,
+    /** Hits that caught an execution already running a tick earlier. */
+    val stuckHits: Long,
+    /** How many distinct executions those hits represent. */
+    val stuckInstances: Long,
+) {
+    /** The fraction of this operation's occupancy spent inside executions longer than a tick. */
+    val stuckShare: Double get() = if (hits == 0L) 0.0 else stuckHits.toDouble() / hits
+}
 
 /**
  * What a sampling session collected.
@@ -224,7 +370,17 @@ class Report(
     val samplingSpanNanos: Long,
     val durationNanos: Long,
     val threads: Int,
+    val duty: DutyReport,
+    /**
+     * Why the session stopped early, or null. Non-null means the numbers below describe a run the
+     * profiler could not have measured correctly, and they are shown only so the reader can see
+     * what led to the verdict.
+     */
+    val failure: String? = null,
 ) {
+    /** False when a fatal finding stopped the session. See the severity ladder in plan.md. */
+    val ok: Boolean get() = failure == null
+
     val labelledHits: Long get() = operations.sumOf { it.hits }
 
     fun shareOf(op: OperationStat): Double =
@@ -234,8 +390,98 @@ class Report(
     fun noiseFloorOf(op: OperationStat): Double =
         if (op.hits > 0) 1.0 / sqrt(op.hits.toDouble()) else Double.NaN
 
+    /** What one sample is worth in thread-time: the step the sampler actually achieved. */
+    val stepNanos: Double get() = if (ticks > 1) samplingSpanNanos.toDouble() / (ticks - 1) else Double.NaN
+
+    /**
+     * The most an execution can plausibly have cost, from the sampling alone.
+     *
+     * The hit count is a count of rare events, so its upper confidence bound is
+     * `hits + 2√hits + 3` — and that is `3` when nothing was ever sampled, which is the rule of
+     * three and the reason an operation the sampler never caught is still measurable. Seeing it
+     * zero times in *n* samples means its whole occupancy is under three ticks however large *n*
+     * was, so its cost per call is under `3 × tick / calls`. Forty million calls at a 1 ms tick
+     * puts that under 0.075 ns, a fraction of one cycle.
+     *
+     * This is what makes "too small" provable rather than suspected: if even the upper bound is
+     * below the floor, no amount of missing evidence can rescue the label.
+     */
+    fun impliedUpperNanosOf(op: OperationStat): Double = impliedUpperNanos(op.hits, op.calls, stepNanos)
+
+    /**
+     * Operations labelled on something too small for the instrument to describe.
+     *
+     * The bound is inflated by [FLOOR_BIAS_ALLOWANCE] first: the sampler reads short operations
+     * 5-9% low below 45 ns — measured against the configured truth — and that bias points the wrong way
+     * here, since it would make an innocent operation look smaller than it is.
+     */
+    fun tooSmall(): List<OperationStat> = operations
+        .filter { isTooSmall(it.hits, it.calls, stepNanos) }
+        .sortedByDescending { it.calls }
+
+    /**
+     * What one execution appears to have cost, from the sampling alone: `hits × step / calls`.
+     *
+     * The smell test the person who wrote the code can apply and the tool cannot. An operation
+     * known to be 20 ns showing 500 ns here is stalling on something, and no amount of share
+     * arithmetic would have said so. It is occupancy per call, not CPU per call, and it inherits
+     * the same bound as every other number here.
+     */
+    fun impliedNanosOf(op: OperationStat): Double =
+        if (op.calls == 0L) Double.NaN else op.hits * stepNanos / op.calls
+
+    /**
+     * The run-wide rate of executions caught spanning a tick. Reported, but *not* what an operation
+     * is judged against — see [machineFloor].
+     */
+    val stuckBaseline: Double
+        get() = if (labelledHits == 0L) 0.0 else operations.sumOf { it.stuckHits }.toDouble() / labelledHits
+
+    /**
+     * How much of an operation's long-running time the *machine* can account for, and therefore the
+     * floor an operation has to clear before it has anything to answer for.
+     *
+     * It is the non-CPU fraction from the duty cycle. A thread preempted by the scheduler or frozen
+     * by a GC pause is still holding its label, so it appears here as an execution that outlived a
+     * tick, and neither is anything to do with the operation. Both are already measured, in
+     * aggregate, by the duty cycle — so the quantity that bounds the error on the shares is the
+     * same quantity that bounds the false positives here.
+     *
+     * **The obvious alternative is wrong and Calcite proved it.** Judging each operation against
+     * the *run-wide* rate assumes long executions are the exception. Against Calcite's planner that
+     * rate was 53.52%, because most of those labels genuinely are coarse operations — so three
+     * times it was unreachable and not one operation could ever be named. A baseline built from the
+     * operations under test cannot detect a defect that most of them share.
+     *
+     * Falls back to the run-wide rate where the platform gives no duty cycle at all, which is worth
+     * having but is the weaker test, for the reason above.
+     */
+    val machineFloor: Double get() = if (duty.available) 1 - duty.duty else stuckBaseline
+
+    /**
+     * Operations whose executions span a tick far more often than the run as a whole — the ones
+     * that are not the size their label claims.
+     *
+     * Both conditions are provisional and marked as such: this project sets tolerances from
+     * measurement, and the measurements that would settle these are the contended bench operation
+     * and the Calcite trial, neither of which has been run against this yet. The second condition
+     * exists so that a single GC pause, which can freeze one operation across several ticks,
+     * cannot on its own accuse it.
+     */
+    fun suspect(): List<OperationStat> = operations
+        .filter { isSuspect(it.hits, it.stuckHits, it.stuckInstances, machineFloor) }
+        .sortedByDescending { it.stuckShare }
+
     fun render(): String = buildString {
         val achieved = if (ticks > 1) samplingSpanNanos.toDouble() / (ticks - 1) / 1e6 else Double.NaN
+        if (failure != null) {
+            appendLine("!".repeat(96))
+            appendLine("PROFILING STOPPED — this label could not have produced a correct number:")
+            appendLine("  $failure")
+            appendLine("Everything below is what led to that verdict, not a result. Pass strict=false to")
+            appendLine("profile anyway, which is what to do when the code is not yours to change.")
+            appendLine("!".repeat(96))
+        }
         appendLine("=".repeat(84))
         appendLine(
             String.format(
@@ -249,19 +495,99 @@ class Report(
                 idleHits, idleHits * 100.0 / (labelledHits + idleHits).coerceAtLeast(1)
             )
         )
-        appendLine("=".repeat(84))
-        appendLine(String.format(Locale.ROOT, "%-32s %10s %14s %9s %8s", "operation", "share", "calls", "hits", "noise"))
-        appendLine("-".repeat(84))
+        // The bound belongs beside the sampling rate, not in a footnote: both say how much the
+        // numbers below are worth, one against chance and one against stalling.
+        for (l in duty.lines(labelledHits.toDouble() / (labelledHits + idleHits).coerceAtLeast(1))) appendLine(l)
+        appendLine("=".repeat(96))
+        appendLine(
+            String.format(
+                Locale.ROOT, "%-28s %9s %14s %9s %7s %11s %7s",
+                "operation", "share", "calls", "hits", "noise", "implied/call", "over 1 tick"
+            )
+        )
+        appendLine("-".repeat(96))
         for (op in operations.sortedByDescending { it.hits }) {
             appendLine(
                 String.format(
-                    Locale.ROOT, "%-32s %9.3f%% %,14d %9d %7.2f%%",
-                    op.name, shareOf(op) * 100, op.calls, op.hits, noiseFloorOf(op) * 100
+                    Locale.ROOT, "%-28s %8.3f%% %,14d %9d %6.2f%% %11s %6.2f%%",
+                    op.name, shareOf(op) * 100, op.calls, op.hits, noiseFloorOf(op) * 100,
+                    duration(impliedNanosOf(op)), op.stuckShare * 100
                 )
             )
         }
-        appendLine("-".repeat(84))
-        appendLine("share is of labelled samples; noise is 1/sqrt(hits), the error chance alone gives")
+        appendLine("-".repeat(96))
+        appendLine("share is of labelled samples and is occupancy, not CPU — the duty cycle above bounds the gap")
+        appendLine("noise is 1/sqrt(hits), the error chance alone gives")
+        appendLine(
+            String.format(
+                Locale.ROOT,
+                "implied/call is hits x step / calls; 'over 1 tick' is occupancy inside executions that outlived a tick",
+            )
+        )
+        appendLine(
+            String.format(
+                Locale.ROOT,
+                "  run-wide %.2f%%, of which the machine itself accounts for up to %.2f%% (preemption and GC pauses)",
+                stuckBaseline * 100, machineFloor * 100
+            )
+        )
+        for (op in suspect()) {
+            appendLine(
+                String.format(
+                    Locale.ROOT,
+                    "  ! %s: %,d executions lasted over a tick (%.1f%% of its occupancy against a %.1f%% machine floor, %s per call)",
+                    op.name, op.stuckInstances, op.stuckShare * 100, machineFloor * 100,
+                    duration(impliedNanosOf(op))
+                )
+            )
+        }
+        if (suspect().isNotEmpty()) {
+            appendLine("    an execution outliving a tick is not a fine operation — it blocked, or it belongs in the coarse tier")
+        }
+        // The other end of the same question. Fatal under strict, so under strict this list is at
+        // most one long and the session has already stopped; without it, every offender is named.
+        for (op in tooSmall()) {
+            appendLine("  ! " + tooSmallMessage(op.name, op.calls, impliedUpperNanosOf(op)))
+        }
+        if (Profiler.untrackedSlots() > 0) {
+            appendLine("    (${Profiler.untrackedSlots()} threads arrived past the $MAX_SLOTS-slot ceiling and are not checked)")
+        }
+    }
+
+    companion object {
+        /**
+         * How far above the run-wide rate an operation has to sit before it is named, how many
+         * long executions it needs behind that rate, and the floor below which the rate is not
+         * worth mentioning at all.
+         *
+         * All three are provisional. The measurements that would settle them — a bench operation
+         * contending on a real lock at a known rate, and the Calcite trial, which has a rule of
+         * ~1.5 ms per firing and one of ~9 µs per firing in the same run — have not been made yet.
+         * Written here rather than buried so that the day they are measured, this is the one place
+         * that changes.
+         */
+        const val SUSPECT_OVER_BASELINE = 3.0
+        const val SUSPECT_MIN_INSTANCES = 20L
+        const val SUSPECT_MIN_SHARE = 0.02
+
+        /**
+         * Below this, a label is not describing the operation it names.
+         *
+         * Measured rather than chosen: each leaf's sampled share against the configured truth, over
+         * a hundredfold range of durations. From 70 ns upward every leaf lands within ±2.4% and
+         * most of them inside their own noise floor; at 45 ns and below they read 4.5–9.1% low
+         * against noise floors of 1.4–1.7%, so three to six times noise and all in the same
+         * direction. The break sits between 45 and 70 ns.
+         *
+         * The hook's own cost is *not* what sets this. At 20 ns the hook is 8.5% of the operation
+         * and is correctable in principle, since the call count measures exactly the quantity the
+         * correction needs. What is not correctable is the bias, and beneath it the hazard that
+         * C2 will shuffle work across the boundaries of adjacent short labels altogether.
+         */
+        const val FLOOR_NANOS = 50.0
+
+        /** The short-operation bias, so the check cannot accuse an operation of the sampler's own error. */
+        const val FLOOR_BIAS_ALLOWANCE = 1.2
     }
 }
 
@@ -321,7 +647,35 @@ class Sampler(
     private val stepNanos: Long,
     private val wait: WaitStrategy,
     private val jitterFraction: Double = 0.25,
+    dutyWindowNanos: Long = DutyCycle.DEFAULT_WINDOW_NANOS,
+    /**
+     * Whether a label below the floor stops the session. See the severity ladder in plan.md: a
+     * label on something too small is a property of the code and not of the run, so there is no
+     * rerun in which it becomes valid, and continuing for twenty minutes to hand back a number that
+     * was never going to be right is the worse of the two failures.
+     *
+     * Off for code you do not own and cannot resize.
+     */
+    private val strict: Boolean = true,
 ) : Thread("sampler") {
+
+    /**
+     * Why the session stopped early, or null if it did not. Checked once a second, so a mistake
+     * that could never have produced a valid answer is caught in seconds rather than at the end.
+     */
+    @Volatile
+    var failure: String? = null
+        private set
+
+    private var nextFloorCheck = Long.MIN_VALUE
+
+    /**
+     * The duty cycle rides on this thread's tick loop, but at its own far lower rate — it costs one
+     * native call per thread and it is measuring something that moves in scheduler ticks. Carried
+     * here rather than on a thread of its own because this thread already walks the slot list, and
+     * because the two must cover exactly the same span if the bound is to apply to these shares.
+     */
+    private val duty = DutyCycle(dutyWindowNanos)
 
     // Ticking on an exact beat can lock onto a workload that has a rhythm of its own near the
     // same period — the wagon-wheel effect, where more samples do not help because every sample
@@ -336,6 +690,31 @@ class Sampler(
     /** Hits per operation; the last entry counts slots that held no operation. */
     val counters = LongArray(MAX_OPERATIONS + 1)
 
+    /**
+     * Of those hits, the ones that caught an execution which had already been running at the
+     * previous tick — see [stuckHits] and the arrays below.
+     */
+    val stuckHits = LongArray(MAX_OPERATIONS)
+
+    /** How many distinct executions lasted across a tick: one per unbroken run of stuck samples. */
+    val stuckInstances = LongArray(MAX_OPERATIONS)
+
+    /**
+     * What the last tick found in each slot, kept on this side of the fence.
+     *
+     * The test is two words against two words. If a slot holds the same operation as last tick
+     * *and* that thread's entry counter for it has not moved, then nobody entered the operation in
+     * between, so this is not a new execution — it is the same one, still running, and it has now
+     * lasted at least a whole tick. For an operation whose label claims tens of nanoseconds that is
+     * four orders of magnitude out.
+     *
+     * A counter that went *backwards* means the index was recycled to a new thread, which is
+     * treated as a fresh execution — the one case where the answer would otherwise be nonsense.
+     */
+    private val prevOp = IntArray(MAX_SLOTS) { NO_OP }
+    private val prevCount = LongArray(MAX_SLOTS)
+    private val prevStuck = BooleanArray(MAX_SLOTS)
+
     var ticks: Long = 0; private set
     var lagged: Long = 0; private set
     var minStep: Long = Long.MAX_VALUE; private set
@@ -347,6 +726,25 @@ class Sampler(
 
     @Volatile private var running = true
 
+    /**
+     * Call counts as they stood when this session began.
+     *
+     * Every number derived from calls — the implied duration, the floor check — divides *this
+     * session's* hits by them, so they have to be this session's calls. The registry's totals are
+     * for the life of the process and include calls made by threads that died before sampling
+     * started, whose counts are folded into the retired totals and stay there.
+     *
+     * Found by the floor check accusing a 20 ns operation of being under 7.9 ns — an upper bound
+     * below the truth, which is arithmetically impossible and so could only be a mismatch of what
+     * the numerator and the denominator were counting. The bench's warm-up is a separate set of
+     * worker threads that exit before the measured run, and it was inflating every call count by
+     * about a tenth.
+     */
+    private val callsAtStart = LongArray(MAX_OPERATIONS)
+
+    /** Calls made since this session began. See [callsAtStart]. */
+    fun sessionCalls(id: Int): Long = (Profiler.callsOf(id) - callsAtStart[id]).coerceAtLeast(0)
+
     init {
         isDaemon = true
         priority = MAX_PRIORITY
@@ -354,6 +752,8 @@ class Sampler(
 
     override fun run() {
         val slots = Profiler.slots()
+        // Before the first tick, so that no call is counted whose sample could not have been taken.
+        for (id in 0 until MAX_OPERATIONS) callsAtStart[id] = Profiler.callsOf(id)
         var next = System.nanoTime() + nextInterval()
         var prev = 0L
         var first = 0L
@@ -366,9 +766,37 @@ class Sampler(
             for (s in slots) {
                 val c = s.getOpaque()
                 counters[if (c < 0) NO_OP_INDEX else c]++
+
+                val idx = s.index
+                if (idx < 0) continue           // past the ceiling: sampled, but not tracked
+                if (c < 0) {
+                    prevOp[idx] = NO_OP
+                    prevStuck[idx] = false
+                    continue
+                }
+                // The second word. One extra cache line per slot per tick, on a thread that has a
+                // core to itself, and nothing at all on the hot path — the counter is already
+                // maintained by the hook for the calls column.
+                val n = s.countOpaque(c)
+                if (prevOp[idx] == c && prevCount[idx] == n) {
+                    stuckHits[c]++
+                    // Only the first tick of a run counts as an instance, so a single execution
+                    // spanning ten ticks is one long execution and not ten.
+                    if (!prevStuck[idx]) {
+                        stuckInstances[c]++
+                        prevStuck[idx] = true
+                    }
+                } else {
+                    prevStuck[idx] = false
+                }
+                prevOp[idx] = c
+                prevCount[idx] = n
             }
             if (slots.size > maxSlots) maxSlots = slots.size
             ticks++
+            // Self-throttling: these return immediately on all but one tick in a thousand.
+            duty.tick(now, slots)
+            floorCheck(now)
 
             if (prev == 0L) {
                 first = now
@@ -388,7 +816,36 @@ class Sampler(
                 lagged++
             }
         }
+        // The tail of the run belongs to the measurement as much as the middle does. Taken here
+        // rather than in shutdown() so that it happens on this thread, before the slots go.
+        duty.finish(System.nanoTime(), slots)
     }
+
+    /**
+     * Is any label on something too small to be described? Evaluated once a second.
+     *
+     * Nothing has to be assumed about how much evidence has accumulated: the bound is a *upper*
+     * one, so early in the run, with few samples, it is simply too loose to accuse anybody. It
+     * tightens as the run goes on and fires the moment the answer is certain, which for an
+     * operation called millions of times is within the first second or two.
+     */
+    private fun floorCheck(now: Long) {
+        if (!strict || failure != null || now < nextFloorCheck) return
+        nextFloorCheck = now + FLOOR_CHECK_NANOS
+        if (ticks < 2) return
+        val step = span.toDouble() / (ticks - 1)
+        for (id in 0 until Profiler.registeredCount()) {
+            val calls = sessionCalls(id)
+            if (!isTooSmall(counters[id], calls, step)) continue
+            failure = tooSmallMessage(Profiler.nameOf(id), calls, impliedUpperNanos(counters[id], calls, step))
+            // Stop sampling rather than the application: this is somebody else's process.
+            running = false
+            return
+        }
+    }
+
+    /** How much of the occupancy this session sampled was CPU. See [DutyCycle]. */
+    fun duty(): DutyReport = duty.report()
 
     private fun waitUntil(deadline: Long) {
         when (wait) {
@@ -425,4 +882,9 @@ class Sampler(
 
     /** Total samples taken: one per slot per tick. */
     fun totalSamples(): Long = counters.sum()
+
+    private companion object {
+        /** Once a second. The check walks the slot registry per operation, so not per tick. */
+        const val FLOOR_CHECK_NANOS = 1_000_000_000L
+    }
 }

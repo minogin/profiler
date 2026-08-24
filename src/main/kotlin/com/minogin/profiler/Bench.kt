@@ -12,6 +12,22 @@ const val STAGE_HOOK = 4
 private const val CLOCK_CHUNK = 256
 
 /**
+ * A gap between two consecutive clock checks longer than this is taken to be the thread having
+ * been off the CPU rather than slow.
+ *
+ * One chunk of 256 root calls costs of the order of 100 us, and the machine's clock swings by 2x
+ * inside a run, so an unstalled chunk can take anywhere from 50 to 200 us. Half a millisecond is
+ * clear of that and far below Windows' 15.6 ms quantum, so what is counted here is descheduling
+ * and not jitter.
+ *
+ * The consequence is that this is a *lower* bound on off-CPU time: a preemption shorter than the
+ * threshold is invisible, and one that happens to land inside a chunk boundary is charged in full.
+ * That is the right direction for its purpose, which is to confirm an OS number rather than
+ * replace it.
+ */
+private const val STALL_GAP_NANOS = 500_000L
+
+/**
  * A worker thread. Inactive threads exist and take part in the barriers but do no work —
  * that is the artificial starvation mode (3 busy out of 16).
  */
@@ -33,6 +49,22 @@ class Worker(
     val measuredSelf = DoubleArray(OP_COUNT)
     val measuredInclusive = DoubleArray(OP_COUNT)
 
+    /**
+     * The worker's own account of how much of the run it spent off the CPU, and the wall time that
+     * account covers.
+     *
+     * The second reading of the duty cycle, and it owes nothing to the operating system's own
+     * numbers — this is the thread noticing that the clock jumped while it was not looking. The
+     * bench never blocks, so anything here is the scheduler taking the core away, which on a
+     * hybrid machine under load it does far more than the bench's design assumed.
+     *
+     * It costs nothing: the run loop already reads nanoTime once per chunk to check its deadline.
+     */
+    var stallNanos: Long = 0; private set
+    var stalls: Long = 0; private set
+    var maxStallNanos: Long = 0; private set
+    var runWallNanos: Long = 0; private set
+
     /** Hook analysis: the hook timed alone, and leaf operations timed with and without it. */
     var hookDirect: Double = Double.NaN
         private set
@@ -50,6 +82,10 @@ class Worker(
     fun resetCounters() {
         rootCalls.fill(0L)
         if (::slot.isInitialized) slot.resetCounts()
+        stallNanos = 0
+        stalls = 0
+        maxStallNanos = 0
+        runWallNanos = 0
     }
 
     override fun run() {
@@ -86,6 +122,14 @@ class Worker(
         // One perfectly predicted branch per root call. It costs the same on both sides of the
         // labelled/unlabelled comparison, so it cancels exactly and cannot bias the result.
         val lbl = labeled
+        // The deadline check doubles as the stall detector: the gap between two of these readings
+        // is a chunk of work, unless the thread lost the CPU in between, and then it is that too.
+        val started = System.nanoTime()
+        var last = started
+        var shortest = Long.MAX_VALUE
+        var stalled = 0L
+        var events = 0L
+        var worst = 0L
         while (true) {
             var k = 0
             while (k < CLOCK_CHUNK) {
@@ -95,8 +139,23 @@ class Worker(
                 counts[op]++
                 k++
             }
-            if (System.nanoTime() >= d) break
+            val now = System.nanoTime()
+            val gap = now - last
+            if (gap < shortest) shortest = gap
+            if (gap > STALL_GAP_NANOS) {
+                stalled += gap
+                events++
+                if (gap > worst) worst = gap
+            }
+            last = now
+            if (now >= d) break
         }
+        // Each counted gap includes the chunk of work that ran inside it. Subtracting the fastest
+        // chunk the thread managed all run takes the work back out and leaves the stall itself.
+        stallNanos = stalled - events * (if (shortest == Long.MAX_VALUE) 0 else shortest)
+        stalls = events
+        maxStallNanos = worst
+        runWallNanos = last - started
         state = s
         idx = i
         Sink.consume(s)
@@ -241,6 +300,12 @@ class Worker(
     }
 }
 
+/**
+ * What the working threads saw of their own scheduling during a run. Summed over active workers:
+ * [wallNanos] is thread-time, so it is roughly the run duration times the number of them.
+ */
+class Stalls(val wallNanos: Long, val offCpuNanos: Long, val events: Long, val worstNanos: Long)
+
 /** The bench: a thread pool and the barrier the main thread drives them through stages with. */
 class Bench(val threads: Int, val activeThreads: Int, val labeled: Boolean, val workload: Workload) {
     private val barrier = CyclicBarrier(threads + 1)
@@ -286,6 +351,16 @@ class Bench(val threads: Int, val activeThreads: Int, val labeled: Boolean, val 
     }
 
     fun totalRootCalls(): Long = workers.sumOf { w -> w.rootCalls.sum() }
+
+    /** The workers' own account of the last run: wall time, time off the CPU, and how often. */
+    fun stalls(): Stalls = workers.filter { it.active }.let { active ->
+        Stalls(
+            wallNanos = active.sumOf { it.runWallNanos },
+            offCpuNanos = active.sumOf { it.stallNanos },
+            events = active.sumOf { it.stalls },
+            worstNanos = active.maxOfOrNull { it.maxStallNanos } ?: 0L,
+        )
+    }
 
     fun resetCounters() = workers.forEach { it.resetCounters() }
 }
