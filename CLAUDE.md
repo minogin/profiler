@@ -5,6 +5,12 @@
 * I might use Russian when talking to you, but all the code, comments, etc. should be in English
 * Answer me in the same language I ask you in.
 
+## Your behaviour
+
+* Use simple terms
+* Explain things in simple ways
+* Provide examples, when you explain things
+
 ## How we collaborate
 * Never start long-running operations without my consent
 * Explain to me the code you generated briefly after every turn

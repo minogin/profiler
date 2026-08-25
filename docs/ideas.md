@@ -422,12 +422,31 @@ that one exists.
 - **`Thread.getAllStackTraces` is a global safepoint (339.6 µs for 8 threads) and must never be used
   here.** Walk threads one at a time.
 
-**What is left to decide before this becomes a phase.** The measurement says it is affordable; it
-does not say what the feature should be.
+**The premise is now tested too, not only the cost.** Walking one stack per unlabelled window longer
+than a tick — *on demand* rather than at a fixed rate — puts the missing label at **48.4%** of the
+walked stacks on the broken Lucene placement and out of the top ten on the good one. The trigger
+doubles as a filter: a long unlabelled window is a label somebody forgot, while pervasive
+fine-grained unlabelled time is the host's coordination, and only the first fires it.
 
-1. *Where the rate comes from.* A fixed 10 Hz, or a fraction of the label walk, or adaptive — take
-   more when coverage is poor, none when it is good. Adaptive is attractive and is also a way to
-   make the cost unpredictable.
+**Two things the test changed.**
+
+- **Filter by thread state first, and it is free.** 76.6%–86.9% of triggered windows are a parked
+  pool thread, not unlabelled work. `Thread.getState()` is a field read and needs no handshake, so
+  the cheap check goes first; without it the answer is a screen of `Unsafe.park` and nothing else is
+  visible.
+- **The same filter belongs in the report, independently of this feature.** 79.2% of *all*
+  unlabelled observations are a non-runnable thread, which is why the duty cycle reads 56% and why
+  coverage reads 49.8% where against runnable occupancy it is ~83%. That is item 10's per-thread
+  split and it is now the more valuable of the two.
+
+**What is left to decide before this becomes a phase.** The measurement says it is affordable and the
+test says it works; neither says what the feature should be.
+
+1. *Where the rate comes from.* On demand, as tested — one stack per unlabelled window over a tick,
+   which self-limits to the rate of the phenomenon — with a global cap, because self-limiting is not
+   the same as bounded. A low uniform trickle alongside it would characterise the diffuse remainder
+   that never triggers, which is the difference between "you forgot something" and "you are fine".
+   Whether that second mechanism earns its complexity is open.
 2. *What to keep.* A whole trace is the honest thing to aggregate and the expensive thing to hold.
    One frame is not obviously the right one — the top frame is codec internals, and the frame that
    would have named the Lucene mistake was six deep. Probably: keep the whole trace, aggregate by

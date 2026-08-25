@@ -451,6 +451,64 @@ tenfold.** That is the same trap as measuring the caller instead of the victim, 
 median for 8 threads, against 11.9 µs for a single handshake — 28× the cost, and it stops every
 thread in the process whether it was interesting or not. The convenient call is the wrong call.
 
+### Would a triggered stack have named the missing label? Yes — and the trigger needs a filter
+
+The proposal is to walk a stack **on demand** rather than at a fixed rate: when a thread has been
+outside every label for longer than a tick, which is the threshold the long-instance detector already
+uses for labelled work. The argument is that the trigger doubles as a filter — a long unlabelled
+window is usually a label somebody forgot, while unlabelled time that is fine-grained and pervasive
+is the host's own coordination, which no label could have covered.
+
+Tested with `--gaps`, on the broken placement and the good one as a control. One stack per window,
+and only threads whose slot is genuinely empty are walked. **Deepest frame in `lucene.search`, which
+is where a clause's identity lives:**
+
+| | broken placement | good placement |
+|---|---|---|
+| `MultiTermQueryConstantScoreBlendedWrapper.rewriteInner` | **48.4%** | *not in the top ten* |
+| `ExactPhraseMatcher.advancePosition` | 7.9% | 16.3% |
+| `MaxScoreBulkScorer.scoreInnerWindowMultipleEssentialClauses` | 5.1% | 9.8% |
+| `FilterDocIdSetIterator.docID` | 4.2% | 9.4% |
+
+The premise holds. On the broken placement the feature would have said *"of the time outside every
+label where a thread was actually running, 48.4% is in `rewriteInner`"* — which names the missing
+label outright. On the good placement that frame is gone and what remains is Lucene's coordination,
+spread with no culprit above 16%. The control is what makes this evidence rather than a story: the
+frame that appears in one and not the other is exactly the one the fix moved.
+
+**But three quarters of the triggers are not unlabelled work at all — they are parked threads.**
+Without a filter, 76.6% (broken) to 86.9% (good) of triggered windows are a pool thread waiting for
+its next task, and the answer is a screen of `Unsafe.park`. A slot is empty for two entirely
+different reasons and only one of them is a missing label. **`Thread.getState()` reads a field and
+needs no handshake**, so the cheap check goes first and the expensive one is never paid for an idle
+thread. The numbers in the table above are with that filter; without it the top frame in both
+columns is `Unsafe.park` and nothing else is visible.
+
+*Caveat on the run-length evidence:* the distribution of consecutive unlabelled ticks does show
+windows far longer than scattering alone would give — 2× the geometric expectation from four ticks
+on, rising past 30× at twelve — but it was computed without the runnable filter, so most of that
+excess is idle threads rather than long unlabelled operations. The frame attribution above is the
+evidence for the trigger; the run-length table is not.
+
+### Why the duty cycle sits at 56%: the unlabelled time is mostly idle threads
+
+The same probe answers a question that had been open since the trial. Counting the *state* of the
+thread at every unlabelled observation, not only the triggered ones:
+
+- 50.2% of slot observations are outside every label;
+- **79.2% of those are a thread that was not runnable at all** — 39.7% of all observations;
+- the duty cycle for the same run reads 56.21% on CPU, so 43.8% of occupancy was not CPU.
+
+So parked pool threads account for roughly nine tenths of the off-CPU occupancy. Not memory-mapped
+page faults, not the main thread waiting on the executor — idle workers between tasks. This is
+[ideas.md](ideas.md) item 10's prediction, measured on foreign code for the first time.
+
+**And it makes the coverage figure much better than it reads.** Treating labelled observations as
+runnable — which is not verified, and would be false for a label wrapping something that blocks —
+labels cover about **83% of the observations where a thread could have been running**, against the
+49.8% of all observations the report currently prints. The honest denominator for "how much of this
+run do my labels account for" is runnable occupancy, and the report does not yet use it.
+
 **Method note: the first two attempts at this measurement were both wrong, in the ways this file
 keeps recording.** `LockSupport.parkNanos` has a granularity near a millisecond here, so a rate
 limiter built on it silently capped at 1,417 stacks/s when asked for 10,000 — the high-rate
@@ -948,15 +1006,20 @@ cycle machinery already probes for another purpose. The second is the cheapest a
 measurement. Whichever is chosen, the "identical on every machine and every rerun" claim in
 `floorCheck`'s documentation has to go — it is false on this hardware.
 
-**Why the duty cycle sits at 56% on a workload that ought to be CPU-bound.** Lucene search, eight
-worker threads plus the main thread on sixteen cores, reported 55.85–57.18% of sampled wall time on
-CPU across every configuration. One idle pool thread accounts for roughly 11 points of that; the
-remainder is unexplained. Candidates not yet separated: memory-mapped page faults through
-`MemorySessionImpl` (7.69% of self time in the flame graph), the main thread blocking on
-`TaskExecutor` while the slices run, and slice completion skew. The consequence is that the bound
-the duty cycle puts on a share — "at most 79.06 points of any share is occupancy that was not CPU" —
-is wider than every share it applies to and tells the reader nothing on this workload. Honest and
-useless are not the same defect, but they are both defects.
+**~~Why the duty cycle sits at 56% on a workload that ought to be CPU-bound.~~ Answered:** parked
+pool threads, accounting for about nine tenths of the off-CPU occupancy — 79.2% of unlabelled slot
+observations are a thread that is not runnable. Measured above. The candidates guessed at here
+originally — memory-mapped page faults, the main thread blocking on `TaskExecutor`, slice skew —
+are between them the remaining tenth.
+
+*What is now open in its place:* the report divides by the wrong denominator twice over. Coverage is
+quoted against all occupancy where it should be against *runnable* occupancy (49.8% against ~83% on
+the same run), and the duty cycle's bound on a share is computed over every thread including the
+idle ones, which is why it comes out wider than the shares it applies to. Both want the per-thread
+split in [ideas.md](ideas.md) item 10, and both now have a number showing what it is worth. One
+thing to verify first, because the ~83% assumes it: that a thread inside a label is always runnable.
+It would not be for a label wrapping something that blocks, and the bench's contended-lock mode is
+exactly where to check.
 
 **The detector's thresholds are provisional.** Naming an operation takes three conditions together:
 a rate of long executions three times the machine floor, a floor of 2% under the rate itself, and at

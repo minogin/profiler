@@ -1,6 +1,8 @@
 package com.minogin.profiler.trial.lucene
 
+import com.minogin.profiler.NO_OP
 import com.minogin.profiler.Profiler
+import com.minogin.profiler.getOpaque
 import com.minogin.profiler.trial.analyzeJfr
 import com.minogin.profiler.trial.recordExecutionSamples
 import org.apache.lucene.document.IntPoint
@@ -293,6 +295,156 @@ private class Prober(val bed: Bed, val ratePerSecond: Int) : Thread("stack-probe
 }
 
 /**
+ * Does an unlabelled gap have a shape a trigger could find, and would a stack name it?
+ *
+ * The proposal is to walk a stack not at a fixed rate but *on demand* — when a thread has been
+ * outside every label for longer than a tick, which is the same threshold the long-instance detector
+ * already uses for labelled work. The argument for it is that the trigger doubles as a filter: a
+ * long unlabelled window is usually a label somebody forgot, while unlabelled time that is
+ * fine-grained and pervasive is the host's own coordination, which no label could ever have covered.
+ *
+ * That argument rests on a claim about *shape*, and the claim was derived rather than measured. This
+ * measures it, three ways:
+ *
+ * 1. **The run-length distribution of unlabelled observations**, against what pure chance would give.
+ *    If unlabelled time were scattered uniformly, consecutive unlabelled ticks would follow a
+ *    geometric distribution with the observed unlabelled fraction. Runs longer than that are real
+ *    windows, and they are what a trigger can see.
+ * 2. **Where the triggered stacks land.** Only threads whose slot is genuinely empty are walked, so
+ *    this is the feature's own view and not a general profile.
+ * 3. **Against a control.** Run it on the good placement as well as the broken one: the frames that
+ *    appear for the broken placement and not for the good one are exactly what the feature exists to
+ *    surface.
+ */
+private class GapProbe(val bed: Bed, val triggerTicks: Int, val stepNanos: Long = 1_000_000L) : Thread("gap-probe") {
+
+    @Volatile
+    var running = true
+
+    private val leaf = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val searchFrame = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val runLengths = java.util.concurrent.ConcurrentHashMap<Int, Long>()
+
+    var observations = 0L
+    var unlabelled = 0L
+    var stacks = 0L
+
+    /** Triggers that turned out to be a parked thread rather than unlabelled work. */
+    var parked = 0L
+
+    /** Unlabelled observations where the thread was not even runnable. */
+    var unlabelledParked = 0L
+
+    init {
+        isDaemon = true
+    }
+
+    override fun run() {
+        // Consecutive unlabelled ticks per thread, and whether this window has been sampled already.
+        // One stack per window, not one per tick: a thread stuck outside every label for a second
+        // would otherwise hand back a thousand copies of the same answer and pay for all of them.
+        val consecutive = HashMap<Long, Int>()
+        val sampled = HashSet<Long>()
+        var next = System.nanoTime()
+        while (running) {
+            val now = System.nanoTime()
+            if (now < next) continue
+            next = maxOf(next + stepNanos, now - stepNanos)
+            val slots = Profiler.slots().associateBy { it.threadId }
+            for (t in bed.workers) {
+                val slot = slots[t.threadId()] ?: continue
+                observations++
+                if (slot.getOpaque() == NO_OP) {
+                    unlabelled++
+                    // Every unlabelled observation, not only the triggered ones: this is what settles
+                    // whether unlabelled occupancy is work nobody labelled or a pool thread with
+                    // nothing to do, and the duty cycle has been an open question for want of it.
+                    if (t.state != Thread.State.RUNNABLE) unlabelledParked++
+                    val n = (consecutive[t.threadId()] ?: 0) + 1
+                    consecutive[t.threadId()] = n
+                    if (n >= triggerTicks && sampled.add(t.threadId())) {
+                        // A slot is empty for two quite different reasons, and only one of them is a
+                        // missing label: the thread is running code nobody labelled, or it is parked
+                        // waiting for work. In a thread pool the second dominates completely, so
+                        // without this the answer is a screen of Unsafe.park. Thread.getState reads
+                        // a field and needs no handshake, so the cheap check comes first and the
+                        // expensive one is never paid for an idle thread.
+                        if (t.state != Thread.State.RUNNABLE) { parked++; continue }
+                        val trace = t.stackTrace
+                        if (trace.isNotEmpty()) {
+                            stacks++
+                            record(trace)
+                        }
+                    }
+                } else {
+                    consecutive.remove(t.threadId())?.let { runLengths.merge(it, 1L, Long::plus) }
+                    sampled.remove(t.threadId())
+                }
+            }
+        }
+    }
+
+    private fun record(trace: Array<StackTraceElement>) {
+        leaf.merge(short(trace[0]), 1L, Long::plus)
+        // The first frame from the leaf upward that belongs to Lucene's search package, which is
+        // where a clause's identity lives. Below it is codec and JDK plumbing shared by everything.
+        val f = trace.firstOrNull { it.className.startsWith("org.apache.lucene.search") }
+        searchFrame.merge(if (f == null) "<none>" else short(f), 1L, Long::plus)
+    }
+
+    private fun short(f: StackTraceElement) = "${f.className.substringAfterLast('.')}.${f.methodName}"
+
+    fun report(): String = buildString {
+        val p = unlabelled.toDouble() / observations.coerceAtLeast(1)
+        appendLine(
+            String.format(
+                Locale.ROOT,
+                "GAP PROBE — %,d slot observations, %,d unlabelled (%.1f%%); %,d windows triggered, of which %,d were a parked thread (%.1f%%) and %,d were walked",
+                observations, unlabelled, p * 100, stacks + parked, parked, parked * 100.0 / (stacks + parked).coerceAtLeast(1), stacks
+            )
+        )
+        appendLine(
+            String.format(
+                Locale.ROOT,
+                "  of the %,d unlabelled observations, %,d were a thread that was not runnable at all (%.1f%%)",
+                unlabelled, unlabelledParked, unlabelledParked * 100.0 / unlabelled.coerceAtLeast(1)
+            )
+        )
+        appendLine()
+        appendLine("  unlabelled run length, against what scattering alone would give")
+        appendLine("  " + "-".repeat(72))
+        appendLine(String.format(Locale.ROOT, "  %8s %12s %12s %12s", "ticks", "windows", "expected", "observed/exp"))
+        val total = runLengths.values.sum()
+        for (k in runLengths.keys.sorted().take(12)) {
+            val observed = runLengths.getValue(k)
+            // Geometric: a window of exactly k unlabelled ticks, if each observation were an
+            // independent coin toss at the marginal unlabelled rate.
+            val expected = total * Math.pow(p, (k - 1).toDouble()) * (1 - p)
+            appendLine(
+                String.format(
+                    Locale.ROOT, "  %8d %12d %12.0f %11.2fx",
+                    k, observed, expected, if (expected <= 0) Double.NaN else observed / expected
+                )
+            )
+        }
+        val long = runLengths.filterKeys { it >= triggerTicks }.values.sum()
+        appendLine(String.format(Locale.ROOT, "  windows of >= %d ticks: %,d of %,d (%.1f%%)", triggerTicks, long, total, long * 100.0 / total.coerceAtLeast(1)))
+
+        fun table(title: String, m: Map<String, Long>) {
+            appendLine()
+            appendLine("  $title")
+            appendLine("  " + "-".repeat(72))
+            val n = m.values.sum().coerceAtLeast(1)
+            for ((name, c) in m.entries.sortedByDescending { it.value }.take(10)) {
+                appendLine(String.format(Locale.ROOT, "  %-52s %8d %7.1f%%", name, c, c * 100.0 / n))
+            }
+        }
+        table("where the triggered stacks landed — leaf frame", leaf)
+        table("where the triggered stacks landed — deepest frame in lucene.search", searchFrame)
+    }
+}
+
+/**
  * The profiling run: search in a loop for a fixed wall-clock span, with whatever instrumentation
  * the mode asks for, and optionally with JFR recording the same window.
  */
@@ -307,6 +459,7 @@ private fun load(
     jfr: String?,
     warmups: Int,
     stacks: Int,
+    gapTrigger: Int,
 ) {
     Bed(corpus, threads, mode).use { bed ->
         println("threads=$threads placement=$mode sampler=$sampler strict=$strict; warm-up $warmups searches, then searching for $seconds s")
@@ -318,6 +471,7 @@ private fun load(
         if (sampler) Profiler.start(stepMillis = step, strict = strict)
 
         val prober = if (stacks > 0) Prober(bed, stacks).also { it.start() } else null
+        val gaps = if (gapTrigger > 0) GapProbe(bed, gapTrigger).also { it.start() } else null
 
         val deadline = System.nanoTime() + seconds * 1_000_000_000L
         var searches = 0L
@@ -343,6 +497,7 @@ private fun load(
         }
         val elapsed = System.nanoTime() - started
         prober?.running = false
+        gaps?.running = false
 
         val report = if (sampler) Profiler.stop() else null
         if (recording != null) {
@@ -377,6 +532,10 @@ private fun load(
                             (withoutNanos.toDouble() / without.coerceAtLeast(1)) - 1) * 100
                 )
             )
+        }
+        if (gaps != null) {
+            println()
+            print(gaps.report())
         }
         if (mode == Placement.TIME) {
             println()
@@ -490,6 +649,7 @@ fun main(args: Array<String>) {
                 jfr = opt["jfr"],
                 warmups = opt["warmups"]?.toInt() ?: 30,
                 stacks = opt["stacks"]?.toInt() ?: 0,
+                gapTrigger = opt["gaps"]?.toInt() ?: 0,
             )
         }
     }

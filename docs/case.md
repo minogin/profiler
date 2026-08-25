@@ -227,13 +227,18 @@ chose in advance. If the cost is somewhere nobody suspected, the flame graph wil
 labels will file it under whichever label happened to be set. The Calcite profile's JDK-heavy self
 time was unactionable, but it was also *true*, and it is the kind of truth labels cannot produce.
 
-**And the share they alone can speak for is not small.** On Lucene, **47.8% of occupancy was outside
-every label** — `MaxScoreBulkScorer`'s coordination, the collector, the priority queue, weight
-construction — despite Lucene exposing far more extension points than Calcite did. More hooks, worse
-coverage, because a scored query's cost genuinely is about half coordination. On that workload the
-labels explain where 52% of the time went and a flame graph is the only thing with anything to say
-about the rest. Anyone reading our report as if it accounted for the whole run would be wrong by
-half.
+**And the share they alone can speak for is not small — though smaller than we first said.** On
+Lucene, 47.8% of occupancy was outside every label, and the first version of this entry read that as
+"the labels explain half the run and a flame graph owns the rest". Measured afterwards, that was
+wrong: **79.2% of the unlabelled observations are a thread that was not runnable at all**, a pool
+worker between tasks. Excluding those, labels cover about **83% of the time a thread could have been
+running**. What genuinely belongs to the host — `MaxScoreBulkScorer`'s coordination, the collector,
+the priority queue — is nearer a sixth of the run than a half.
+
+A sixth is still not nothing, and it is still ours to concede: those are boundaries Lucene exposes no
+hook for, and a flame graph is the only thing with anything to say about them. But the correction
+cuts the other way too, and it is the more general lesson: **an unlabelled fraction is not a coverage
+failure until you have separated it from idleness**, and our report currently does not.
 
 **A misplaced label is invisible; a wrong flame graph is at least a flame graph.** The first Lucene
 placement labelled the scorer and not the factory that built it, and reported the clause that

@@ -363,19 +363,32 @@ row, and neither is `cat` at 304 M. **An implied per-call duration far below the
 about the placement, not just about the label** — which is what the floor check already believes,
 and it was right here.
 
-**4. Half the time is outside every label, and that is the ceiling on this kind of placement.**
-47.8% of occupancy is in `MaxScoreBulkScorer`'s coordination, the collector, the priority queue and
-weight construction. Calcite's item 4 said the fine tier "can attribute time to the domain concepts
-the library exposes a hook for, and nothing else". Lucene exposes more hooks than Calcite and the
-figure is *worse*, because a query's cost genuinely is half coordination. Worth saying plainly: on
-this workload the tool explains where 52% of the time went, and the flame graph is still the only
-thing with anything to say about the rest.
+**4. Half the time is outside every label — but most of that half is idle threads, not missing
+coverage.** 47.8% of occupancy is outside every label, and this entry originally read that as the
+ceiling on placement in third-party code. Measured afterwards with the gap probe: **79.2% of those
+unlabelled observations are a thread that was not runnable at all**, a pool worker between tasks.
+Excluding them, the labels cover about **83% of the time a thread could have been running**, and what
+genuinely belongs to Lucene's own coordination — `MaxScoreBulkScorer`, the collector, the priority
+queue — is nearer a sixth of the run than a half. Calcite's item 4 still stands as a limit; it is
+just a smaller limit than the raw number suggested. **The general lesson is the one the report has
+not learned yet: an unlabelled fraction is not a coverage failure until idleness has been subtracted
+from it.**
 
-**5. The duty cycle's bound is technically true and practically useless here.** 55.85% CPU produced
-"at most 79.06 points of any share is occupancy that was not CPU" — a bound wider than every share
-it applies to. It is honest and it is what the design promised, and on this workload it tells the
-reader nothing. Why the duty cycle sits at 56% with eight busy search threads on sixteen cores is
-itself unexplained and is [an open question](findings.md#open-questions).
+**5. The duty cycle's bound is technically true and practically useless here — for the same
+reason.** 55.85% CPU produced "at most 79.06 points of any share is occupancy that was not CPU", a
+bound wider than every share it applies to. That is now explained: parked pool threads account for
+about nine tenths of the off-CPU occupancy, and they are outside every label, so the bound is
+computed over threads that cannot be contributing to any share. Both this and item 4 are the same
+missing per-thread split, and both now have a number saying what it is worth —
+[ideas.md](ideas.md) item 10.
+
+**5b. And a stack, taken on demand, would have named the missing label.** The placement mistake in
+§3 was found by disagreeing with JFR. Tested afterwards: walking one stack per unlabelled window
+longer than a tick puts `MultiTermQueryConstantScoreBlendedWrapper.rewriteInner` at **48.4%** of the
+walked stacks on the broken placement, and out of the top ten entirely on the good one. It costs
+0.001% at the intended rate. The catch is that three quarters of the triggers are parked threads and
+must be filtered by `Thread.getState()` first, or the answer is a screen of `Unsafe.park` — full
+numbers in [findings.md](findings.md#walking-a-stack).
 
 **6. The depth argument did not come up.** Maximum stack depth 44, zero truncated samples. JFR's
 64-frame limit is a real failure mode and it is not this workload's. Recorded because the honest
@@ -415,6 +428,10 @@ java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement PRODU
 java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement TIME --sampler false --seconds 20
 java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement NAIVE --seconds 20
 java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement NAIVE --strict true --seconds 20
+
+# does a triggered stack name a missing label? PRODUCT against LABEL as the control
+java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement PRODUCT --seconds 30 --gaps 2
+java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement LABEL --seconds 30 --gaps 2
 
 # what any of it costs
 java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt \
