@@ -104,13 +104,15 @@ class LabelledWeight(query: Query, val inner: Weight, val clause: Clause) : Weig
      * report suggested anything was missing.
      */
     override fun scorerSupplier(context: LeafReaderContext): ScorerSupplier? =
-        clause.probe { inner.scorerSupplier(context) }?.let { LabelledSupplier(it, clause) }
+        (if (clause.factories) clause.probe { inner.scorerSupplier(context) } else inner.scorerSupplier(context))
+            ?.let { LabelledSupplier(it, clause) }
 }
 
 class LabelledSupplier(val inner: ScorerSupplier, val clause: Clause) : ScorerSupplier() {
 
     /** Labelled: for a rewriting clause this is where most of the clause's time is. See above. */
-    override fun get(leadCost: Long): Scorer = LabelledScorer(clause.probe { inner.get(leadCost) }, clause)
+    override fun get(leadCost: Long): Scorer =
+        LabelledScorer(if (clause.factories) clause.probe { inner.get(leadCost) } else inner.get(leadCost), clause)
 
     override fun cost(): Long = inner.cost()
 
@@ -122,7 +124,7 @@ class LabelledSupplier(val inner: ScorerSupplier, val clause: Clause) : ScorerSu
      * well as the scoring, for the reason given on `scorerSupplier`.
      */
     override fun bulkScorer(): BulkScorer =
-        if (clause.bulk) LabelledBulkScorer(clause.probe { inner.bulkScorer() }, clause)
+        if (clause.bulk) LabelledBulkScorer(if (clause.factories) clause.probe { inner.bulkScorer() } else inner.bulkScorer(), clause)
         else super.bulkScorer()
 
     override fun setTopLevelScoringClause() = inner.setTopLevelScoringClause()

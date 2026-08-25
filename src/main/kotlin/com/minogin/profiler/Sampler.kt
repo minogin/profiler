@@ -431,6 +431,19 @@ fun duration(nanos: Double): String = when {
     else -> String.format(Locale.ROOT, "%.2f ms", nanos / 1e6)
 }
 
+/**
+ * A total of thread-time, in whatever unit keeps it readable.
+ *
+ * Separate from [duration] because the two live at opposite ends of the scale: a per-call duration
+ * runs to nanoseconds and an occupancy total to seconds, and one formatter covering both would
+ * print 40 seconds as "40080.00 ms".
+ */
+fun threadTime(nanos: Double): String = when {
+    nanos.isNaN() -> "-"
+    nanos < 1_000_000_000.0 -> String.format(Locale.ROOT, "%.1f ms", nanos / 1e6)
+    else -> String.format(Locale.ROOT, "%.2f s", nanos / 1e9)
+}
+
 /** One operation's line in a [Report]. */
 class OperationStat(
     val id: Int,
@@ -486,6 +499,45 @@ class Report(
 
     /** What one sample is worth in thread-time: the step the sampler actually achieved. */
     val stepNanos: Double get() = if (ticks > 1) samplingSpanNanos.toDouble() / (ticks - 1) else Double.NaN
+
+    /**
+     * This operation's occupancy as thread-time rather than as a fraction — and it is the column to
+     * compare between two runs.
+     *
+     * [shareOf] is a share of *labelled* samples, which is the right denominator (see the note on
+     * [Report]) and a treacherous number to compare across runs: it re-scales every row at once
+     * whenever the set of labels changes.
+     *
+     * Measured on the Lucene trial, two runs of each placement, where the only difference is that
+     * one labels the factory that builds a clause's scorer and the other does not:
+     *
+     * ```
+     *                 share                    occupancy
+     *   phrase   58.4% 57.2%  ->  42.9% 43.6%   38.2 s 41.5 s  ->  41.0 s 40.1 s
+     *   prefix   30.9% 32.3%  ->  48.6% 47.7%   20.2 s 23.5 s  ->  46.5 s 44.0 s
+     * ```
+     *
+     * By share, the phrase clause appears to have become **fourteen points cheaper** — a change
+     * with a story attached, and the story is false. Its occupancy does not separate by placement at
+     * all: 38–41 seconds in every run, which is this machine's run-to-run spread. The clause that
+     * actually changed doubled, and the coverage gained by the fix (65–73 s → 92–96 s) is that one
+     * clause and nothing else.
+     *
+     * A misplaced label is invisible in the share column and obvious in this one.
+     */
+    fun occupancyNanosOf(op: OperationStat): Double = op.hits * stepNanos
+
+    /** Thread-time spent inside any label. */
+    val labelledNanos: Double get() = labelledHits * stepNanos
+
+    /**
+     * Thread-time the sampler observed at all — every slot read on every tick, labelled or not.
+     *
+     * The honest denominator for "how much of this run do my labels account for", and the number
+     * that makes a coverage figure actionable: *"labels cover 94 s of 181"* is a sentence you can do
+     * something about in a way that *"52%"* is not.
+     */
+    val observedNanos: Double get() = (labelledHits + idleHits) * stepNanos
 
     /** Occupancy that was not CPU, in samples. The whole run's supply of stalling. */
     val offCpuSamples: Double
@@ -666,37 +718,43 @@ class Report(
     fun render(): String = buildString {
         val achieved = if (ticks > 1) samplingSpanNanos.toDouble() / (ticks - 1) / 1e6 else Double.NaN
         if (failure != null) {
-            appendLine("!".repeat(96))
+            appendLine("!".repeat(102))
             appendLine("PROFILING STOPPED — this label could not have produced a correct number:")
             appendLine("  $failure")
             appendLine("Everything below is what led to that verdict, not a result. Pass strict=false to")
             appendLine("profile anyway, which is what to do when the code is not yours to change.")
-            appendLine("!".repeat(96))
+            appendLine("!".repeat(102))
         }
-        appendLine("=".repeat(84))
+        appendLine("=".repeat(102))
         appendLine(
             String.format(
                 Locale.ROOT, "%,d labelled samples over %.1f s, %,d ticks at %.3f ms, %d threads",
                 labelledHits, durationNanos / 1e9, ticks, achieved, threads
             )
         )
+        // Coverage in units, not only as a ratio. A percentage is a comparison against a total the
+        // reader has to take on trust; the total itself is the thing that makes the gap actionable,
+        // and it is the first place a label in the wrong place shows up as a number.
         appendLine(
             String.format(
-                Locale.ROOT, "outside any operation: %,d samples (%.1f%% of all)",
-                idleHits, idleHits * 100.0 / (labelledHits + idleHits).coerceAtLeast(1)
+                Locale.ROOT,
+                "labels cover %s of the %s of thread-time observed (%.1f%%); %s was outside every label, in %,d samples",
+                threadTime(labelledNanos), threadTime(observedNanos),
+                labelledHits * 100.0 / (labelledHits + idleHits).coerceAtLeast(1),
+                threadTime(observedNanos - labelledNanos), idleHits
             )
         )
         // The bound belongs beside the sampling rate, not in a footnote: both say how much the
         // numbers below are worth, one against chance and one against stalling.
         for (l in duty.lines(labelledHits.toDouble() / (labelledHits + idleHits).coerceAtLeast(1))) appendLine(l)
-        appendLine("=".repeat(96))
+        appendLine("=".repeat(102))
         appendLine(
             String.format(
-                Locale.ROOT, "%-28s %9s %14s %9s %7s %11s %7s",
-                "operation", "share", "calls", "hits", "noise", "implied/call", "over 1 tick"
+                Locale.ROOT, "%-28s %9s %10s %14s %9s %7s %11s %7s",
+                "operation", "share", "occupancy", "calls", "hits", "noise", "implied/call", "over 1 tick"
             )
         )
-        appendLine("-".repeat(96))
+        appendLine("-".repeat(102))
         // Operations the sampler never caught are folded away rather than printed as a screen of
         // zeroes — Calcite's report carried twenty-five rules at 0.000%. Folded, not dropped: the
         // count says how many there were, and a *called* operation with no samples is a real
@@ -705,13 +763,13 @@ class Report(
         for (op in seen.sortedByDescending { it.hits }) {
             appendLine(
                 String.format(
-                    Locale.ROOT, "%-28s %8.3f%% %,14d %9d %6.2f%% %11s %6.2f%%",
-                    op.name, shareOf(op) * 100, op.calls, op.hits, noiseFloorOf(op) * 100,
-                    duration(impliedNanosOf(op)), op.stuckShare * 100
+                    Locale.ROOT, "%-28s %8.3f%% %10s %,14d %9d %6.2f%% %11s %6.2f%%",
+                    op.name, shareOf(op) * 100, threadTime(occupancyNanosOf(op)), op.calls, op.hits,
+                    noiseFloorOf(op) * 100, duration(impliedNanosOf(op)), op.stuckShare * 100
                 )
             )
         }
-        appendLine("-".repeat(96))
+        appendLine("-".repeat(102))
         if (unseen.isNotEmpty()) {
             val called = unseen.filter { it.calls > 0 }
             appendLine(
@@ -723,6 +781,8 @@ class Report(
             )
         }
         appendLine("share is of labelled samples and is occupancy, not CPU — the duty cycle above bounds the gap")
+        appendLine("occupancy is hits x step as thread-time: absolute, so unlike share it does not move when a")
+        appendLine("  label is added, moved or removed — which makes it the column to compare between two runs")
         appendLine("noise is 1/sqrt(hits), the error chance alone gives")
         appendLine(
             String.format(
@@ -759,7 +819,7 @@ class Report(
         // A leaked label does not look like an error. It looks like a finding: one operation
         // quietly accumulating everybody else's samples, with a plausible number beside it.
         if (imbalances > 0 || openAtEnd > 0) {
-            appendLine("-".repeat(96))
+            appendLine("-".repeat(102))
             if (imbalances > 0) appendLine(
                 "! $imbalances labels were still open at a point the caller said should be quiescent — " +
                         "everything after each leak was billed to the leaked operation"
@@ -770,7 +830,7 @@ class Report(
             )
             appendLine("  a label placed with enter/exit has no finally: a body that throws leaves it set")
         }
-        appendLine("-".repeat(96))
+        appendLine("-".repeat(102))
         // Said in the output rather than in a document, because the one time it mattered it was
         // worth a factor of 275 and nothing on the screen hinted at it.
         appendLine("A share is where time went. It is not what removing the operation would save:")

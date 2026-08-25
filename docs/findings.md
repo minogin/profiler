@@ -791,6 +791,33 @@ really was outside every label. What caught it was disagreement with an independ
 **A misplaced label is invisible from inside the report** — the same conclusion the leak experiment
 below reaches by a different route.
 
+**Invisible in the share column, obvious in absolute thread-time — which is why the report now
+carries both.** The mistake was preserved as a configuration and both placements run twice, so the
+difference could be measured rather than recalled:
+
+| | share | | occupancy | |
+|---|---|---|---|---|
+| | product only | factories too | product only | factories too |
+| phrase clause | 58.4%, 57.2% | 42.9%, 43.6% | 38.2 s, 41.5 s | 41.0 s, 40.1 s |
+| prefix clause | 30.9%, 32.3% | 48.6%, 47.7% | 20.2 s, 23.5 s | 46.5 s, 44.0 s |
+| labels cover | — | — | 65.3 s, 72.5 s | 95.5 s, 92.1 s |
+
+By share the phrase clause appears to become **fourteen points cheaper** when a different clause's
+label is fixed — a change with a plausible story attached, and the story is false. Its occupancy
+does not separate by placement at all: 38–41 s in all four runs, which is this machine's run-to-run
+spread. The prefix clause doubles, and the 25 s of coverage the fix gained is that one clause and
+nothing else.
+
+The general rule: **share re-scales every row whenever the set of labels changes, so it cannot be
+compared between runs; absolute occupancy can.** That is the column to watch while placing labels,
+and placing labels is iterative by nature. It costs nothing new — `hits × step` — and it was already
+being thrown away.
+
+**It does not solve the cold start.** With no earlier run to diff against, 36% coverage and 53%
+coverage both look like "some coverage", and nothing in the absolute numbers says which is missing a
+label. Localising a gap on a first run needs either bracketing by a coarse label or an actual stack,
+and both are open — see [ideas.md](ideas.md) items 13 and 14.
+
 **Placement by wrapping can silently change what the library does, and the counts column is the
 tell.** Lucene 10 gives an iterator four bulk fast paths — `intoBitSet`, `docIDRunEnd`,
 `nextDocsAndScores`, `ScorerSupplier.bulkScorer` — each with a working base-class default that falls

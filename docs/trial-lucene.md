@@ -156,6 +156,33 @@ was a third low on the clause that mattered. What caught it was step 4 of the re
 something independent, and where the two disagree, that is the finding. Nothing internal to the tool
 could have caught it, because from the tool's point of view the time really was outside every label.
 
+### What the report should have shown, and now does
+
+The mistake is kept as a configuration — `--placement PRODUCT` — so the difference can be measured
+rather than recalled. Two runs of each, alternating:
+
+| | share | | occupancy | |
+|---|---|---|---|---|
+| | `PRODUCT` | `LABEL` | `PRODUCT` | `LABEL` |
+| `clause:phrase` | 58.4%, 57.2% | 42.9%, 43.6% | **38.2 s, 41.5 s** | **41.0 s, 40.1 s** |
+| `clause:prefix` | 30.9%, 32.3% | 48.6%, 47.7% | 20.2 s, 23.5 s | 46.5 s, 44.0 s |
+| labels cover | 36.3%, 40.3% | 53.1%, 51.2% | 65.3 s, 72.5 s | 95.5 s, 92.1 s |
+
+Read the share column and the phrase clause has become **fourteen points cheaper** because a
+*different* clause's label was fixed. That is arithmetic — every row re-scales when the labelled
+total changes — but it reads as a finding, and it is the kind of finding that stops you looking
+further, because you can tell a story about it.
+
+Read the occupancy column and the phrase clause has not moved at all: 38–41 seconds in all four
+runs, which is this machine's run-to-run spread and shows no separation by placement. The prefix
+clause doubles. The 25 seconds of coverage the fix bought is that one clause and nothing else.
+
+**So the report now carries absolute occupancy beside share, and coverage in thread-time rather than
+only as a ratio.** It costs nothing — `hits × step`, already collected and previously discarded —
+and it makes the iterative case self-diagnosing: move a label, diff the column, see exactly what
+changed. It does *not* solve the cold start, where there is no earlier run to diff against; that
+needs bracketing by a coarse label or an actual stack, and both are open.
+
 **Placement by wrapping means labelling the factory as well as the product**, and the general form
 of that rule is worth stating: *a label belongs on the whole lifecycle of the thing it names, and a
 framework that separates construction from use will separate the cost too.*
@@ -380,6 +407,9 @@ java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt \
 
 # ours
 java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement LABEL --seconds 20
+
+# the mistake, kept so the good placement can be measured against it
+java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement PRODUCT --seconds 20
 
 # the Elasticsearch-style alternative, and the naive wrapper
 java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement TIME --sampler false --seconds 20

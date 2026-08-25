@@ -48,6 +48,19 @@ enum class Placement {
      * to assert it.
      */
     NAIVE,
+
+    /**
+     * Labelled on the *product* only — the scorer and its iterator — with every factory call left
+     * bare. The first version of these wrappers, kept because it is the mistake worth reproducing.
+     *
+     * It is a reasonable-sounding rule: building a scorer is setup, the work is in the scan. True
+     * of a term clause; false of a prefix clause, which rewrites into a hundred terms and unions
+     * their postings into a bitset before a single document is scored. The report it produces looks
+     * completely healthy — shares sum, every number is plausible, the ranking is sensible — and it
+     * is a third low on the clause that matters. This configuration exists so that the difference
+     * between a good placement and a bad one can be *measured* rather than recalled.
+     */
+    PRODUCT,
 }
 
 /**
@@ -63,7 +76,7 @@ enum class Placement {
 class Clause(val name: String, mode: Placement) {
 
     @JvmField
-    val labelled = mode == Placement.LABEL || mode == Placement.NAIVE
+    val labelled = mode == Placement.LABEL || mode == Placement.NAIVE || mode == Placement.PRODUCT
 
     @JvmField
     val timed = mode == Placement.TIME
@@ -71,6 +84,10 @@ class Clause(val name: String, mode: Placement) {
     /** Whether Lucene's bulk escape hatches are delegated. False only for [Placement.NAIVE]. */
     @JvmField
     val bulk = mode != Placement.NAIVE
+
+    /** Whether the factory calls carry the label too. False only for [Placement.PRODUCT]. */
+    @JvmField
+    val factories = mode != Placement.PRODUCT
 
     /**
      * Registered once, at construction. A name lookup per `nextDoc` would cost many times the hook

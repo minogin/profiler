@@ -338,37 +338,90 @@ moved by under 0.4 points, so only this one column is affected.
 
 Three candidate fixes, cheapest first:
 
-1. **Require two consecutive windows.** Fire only if the estimate is below the floor in two
-   successive checks. Costs one extra second and no new measurement, and it would have suppressed
-   the false stop above while keeping the true one — the naive wrapper's labels were 8.2 ns, four
-   times under the floor rather than fractionally under it.
+1. ~~**Require two consecutive windows.**~~ **Falsified by our own data — do not do this.** It was
+   written on the assumption that the early estimate is *noisy*. It is not: the counters are
+   cumulative and the estimate drifts steadily upward as the clock decays, so consecutive windows
+   sit inside the drift and both fire. For `term#2` on the careful placement the bound reads 33 ns
+   at one second, 41 ns at five, 53 ns at ten and 68 ns at twenty; any consecutive-window rule fires
+   in the first half of that. Recorded rather than deleted because the reasoning was plausible and
+   the data killed it, which is the only reason this file is worth keeping.
 2. **Require a minimum evidence budget** — a sample count or an elapsed time — before the check may
-   fire at all. Simple, but picking the number is exactly the kind of judgement this project keeps
+   fire at all. This one *is* supported: at twenty seconds the check declines to fire on the careful
+   placement and does fire on the naive one, so it is correct given time. But the crossover here is
+   between five and ten seconds, and that number is a property of this laptop's throttle curve, not
+   of anything the tool knows. Picking it is exactly the kind of judgement this project keeps
    getting wrong without a bench for it.
-3. **Normalise by an observed clock rate.** The duty machinery already probes the processor's
-   performance counter for a different purpose. Most principled, most work, and it makes the floor
-   a machine-relative quantity, which may be the honest thing for it to be.
+3. **Fire immediately only on an unambiguous margin, and wait otherwise.** The observed clock swing
+   is 2.2–3×, so an estimate below floor/3 cannot be a throttling artifact and can be fatal on
+   sight; between floor/3 and the floor, keep watching and downgrade to a warning if it never
+   settles. Separates the two cases we have at twenty seconds and does not need a magic delay.
+   Whether it separates them at one second is untested — at one second the naive and careful
+   placements both read 24–28 ns for the same label, so possibly not.
+4. **Normalise by an observed clock rate, or express the floor in units of the hook.** The three
+   reasons for a floor — the hook is a visible fraction, the sampler reads short operations low, C2
+   moves work across adjacent boundaries — are all *ratios*, and both sides of every one of them
+   scale with the clock. An absolute-nanosecond floor is machine-dependent by construction. A floor
+   of k × measured-hook-cost would be machine-independent, which is what the documentation already
+   claims. It also implies the floor depends on *how the label was placed*: an inline `op(id){}` hook
+   is 1.7 ns and a wrapped one is 3–6 ns, so a wrapped placement's floor should be two to three times
+   higher — which would put most of the Lucene term clauses in marginal territory. Most principled,
+   most work, and the conclusion may be unwelcome.
 
 Related: the ladder's premise is that a below-floor label is *fatal* because it is deterministic,
 while a long operation is only a *warning* because it depends on the day's workload. If the floor
 verdict depends on the machine's power state, that distinction is weaker than it was written to be
 and may deserve revisiting rather than patching.
 
-## 13. Report the boundary a label does not cover · open
+## 13. Report the boundary a label does not cover · partly promoted
 
 Lucene's first placement wrapped the scorer and not the supplier that built it, and lost a third of
 the decisive clause with nothing in the report to suggest it. The general problem is that the tool
 cannot see what it was not asked to look at, and unattributed occupancy is reported only as one
 aggregate number ("47.8% outside any operation").
 
-An idea, untested and possibly not implementable cheaply: when a thread is sampled outside every
-label, record something about *where* — not a full stack, which is the thing this design exists to
-avoid, but one frame, or a single identifying pointer, sampled at a much lower rate than the label
-walk. The report could then say "of the 47.8% outside any label, a third is in one place" and put a
-name to it. That is the difference between "your labels cover half the run" and "your labels cover
-half the run, and here is the shape of the other half". Cost and feasibility both unknown.
+**Half of this is now built and is not an idea any more.** The report carries absolute occupancy per
+operation and coverage in thread-time, which solves the *iterative* case completely: move a label,
+diff the occupancy column, see exactly what changed and by how much. Measured, in
+[findings.md](findings.md#placement). What is left here is the cold start — a first run, nothing to
+diff against, and no way to tell 36% coverage from 53% coverage.
 
-## 14. Make cross-checking a first-class feature, not a trial-only exercise · open
+Two routes remain, and they are complementary rather than alternative:
+
+**Bracketing, which the coarse tier gives us for free.** You localise a gap by enclosing it. With a
+coarse label around one search, the report can say *"48% unlabelled, all of it inside `search` and
+none inside `collect`"*; two levels narrow it again. This is a better argument for phase 4 than the
+one currently written into the plan, which is about per-execution durations and percentiles. It
+needs no new mechanism at all — it falls out of the cross-tabulation the coarse tier already
+implies.
+
+**A low-rate stack sample, but only on the ticks that are unlabelled** — item 14.
+
+## 14. A low-rate stack sample on unlabelled ticks · open
+
+We refuse to walk stacks because the cost is per sample. But localising a gap does not need a stack
+per sample — it needs enough to tell "one place" from "everywhere". At 10 Hz over twenty seconds
+that is 200 stacks against 20,000 label ticks, and it fires *only when the slot is empty*, which is
+exactly when the thread is established not to be doing anything we are measuring. Nothing on the hot
+path changes.
+
+It would have caught the Lucene mistake outright. The missing work was 9.05% of all samples under
+one distinctive frame, so ~18 of 200 low-rate samples would have landed there, and the report could
+have said: *"of the time outside every label, the largest single place is
+`RewritingWeight.scorerSupplier` — 31% of it"*. That names the missing label rather than announcing
+that one exists.
+
+**Unknown and blocking: what a stack costs.** Taking another thread's stack needs a handshake with
+that thread — per-thread since JDK 10 rather than a global safepoint, so much cheaper than it used
+to be, but there is no number here and guessing is how this project has been wrong before. 80
+handshakes a second across 8 threads *ought* to be free. That is a half-hour measurement on the
+bench, and it decides whether this is a design or a dead end.
+
+**The line it crosses, deliberately.** It makes the tool a stack profiler in a small way. The
+argument for doing it anyway is that this is diagnostics *about the placement*, not the measurement:
+no sampled stack ever enters a share, and the measurement stays an integer in a slot. Worth crossing
+knowingly rather than by accident.
+
+## 15. Make cross-checking a first-class feature, not a trial-only exercise · open
 
 Both trials turned on comparing our labels against an independent measurement, and on Lucene the
 comparison found *our* error rather than the other tool's. Every user placing labels in code they do

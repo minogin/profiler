@@ -610,7 +610,24 @@ Did not hold:
    two consecutive windows rather than one.
 2. **A misplaced label is invisible from inside the report.** Labelling the scorer but not the
    factory that builds it reported the decisive clause a third low, with every number plausible and
-   nothing indicating a gap. Only an independent measurement found it.
+   nothing indicating a gap. Only an independent measurement found it. **Since fixed, in part** —
+   see below.
+
+### What the trial changed in the tool
+
+**Absolute occupancy beside share, and coverage in thread-time.** `share` is a share of *labelled*
+samples, which is the right denominator and a treacherous number to compare between runs: it
+re-scales every row whenever the set of labels changes. Measured with the bad placement preserved as
+a configuration and both run twice, the phrase clause appears to become fourteen points cheaper when
+a *different* clause's label is fixed — while its occupancy does not move at all (38–41 s in every
+run) and the clause actually fixed doubles. The column costs nothing: `hits × step`, already
+collected and previously discarded.
+
+That makes the *iterative* case self-diagnosing — move a label, diff the column. It does not solve
+the cold start, where there is no earlier run to compare against; that needs bracketing by a coarse
+label (which phase 4 gives for free, and this is a better argument for phase 4 than the one below)
+or a low-rate stack sample on unlabelled ticks ([ideas.md](ideas.md) item 14). Numbers in
+[findings.md](findings.md#placement).
 
 **And the closest competitor was measured.** Elasticsearch's approach — wrap every scorer in
 `System.nanoTime()` — ranks the wrong clause first on this workload, because the instrument charges
