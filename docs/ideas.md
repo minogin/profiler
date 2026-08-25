@@ -396,7 +396,7 @@ implies.
 
 **A low-rate stack sample, but only on the ticks that are unlabelled** — item 14.
 
-## 14. A low-rate stack sample on unlabelled ticks · open
+## 14. A low-rate stack sample on unlabelled ticks · unblocked, ready to promote
 
 We refuse to walk stacks because the cost is per sample. But localising a gap does not need a stack
 per sample — it needs enough to tell "one place" from "everywhere". At 10 Hz over twenty seconds
@@ -410,11 +410,33 @@ have said: *"of the time outside every label, the largest single place is
 `RewritingWeight.scorerSupplier` — 31% of it"*. That names the missing label rather than announcing
 that one exists.
 
-**Unknown and blocking: what a stack costs.** Taking another thread's stack needs a handshake with
-that thread — per-thread since JDK 10 rather than a global safepoint, so much cheaper than it used
-to be, but there is no number here and guessing is how this project has been wrong before. 80
-handshakes a second across 8 threads *ought* to be free. That is a half-hour measurement on the
-bench, and it decides whether this is a design or a dead end.
+**~~Unknown and blocking: what a stack costs.~~ Measured — see
+[findings.md](findings.md#walking-a-stack). It is affordable by three orders of magnitude.**
+
+- On the Lucene workload, at 10 and at 100 stacks/s the effect on search time is inside a ±2% floor;
+  it only becomes measurable at ~76,000/s, where it is +9.10%. Extrapolated down: **0.001% at
+  10 stacks/s.**
+- Caller cost is ≈5 µs of handshake plus ≈0.11 µs per frame, and it *rises* as the rate falls —
+  116.7 µs per stack at 10 Hz against 11.9 µs at 76 kHz, because an isolated handshake has to bring
+  a running thread to a safepoint from scratch. Still 1.2 ms/s at the intended rate.
+- **`Thread.getAllStackTraces` is a global safepoint (339.6 µs for 8 threads) and must never be used
+  here.** Walk threads one at a time.
+
+**What is left to decide before this becomes a phase.** The measurement says it is affordable; it
+does not say what the feature should be.
+
+1. *Where the rate comes from.* A fixed 10 Hz, or a fraction of the label walk, or adaptive — take
+   more when coverage is poor, none when it is good. Adaptive is attractive and is also a way to
+   make the cost unpredictable.
+2. *What to keep.* A whole trace is the honest thing to aggregate and the expensive thing to hold.
+   One frame is not obviously the right one — the top frame is codec internals, and the frame that
+   would have named the Lucene mistake was six deep. Probably: keep the whole trace, aggregate by
+   the deepest frame belonging to a package the user named.
+3. *How it reports.* The point is one sentence — *"of the time outside every label, the largest
+   single place is X, at 31% of it"* — not a flame graph. A second table would undo the reason this
+   design exists.
+4. *Whether it stays off by default.* It is diagnostics about the placement, not measurement, and
+   the measurement must never depend on it.
 
 **The line it crosses, deliberately.** It makes the tool a stack profiler in a small way. The
 argument for doing it anyway is that this is diagnostics *about the placement*, not the measurement:

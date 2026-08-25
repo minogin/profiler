@@ -158,6 +158,7 @@ src/main/kotlin/com/minogin/profiler/
   Burn.kt       the busy loop, calibration, iteration fitting
   Bench.kt      worker threads and the stages they are driven through
   Sampler.kt    slots, the hook, the sampling thread
+  StackCost.kt  what a cross-thread stack costs, which decides whether we may ever take one
   Main.kt       orchestration, the two truths, the verdicts
 trial/          the fine tier pointed at Apache Calcite, and the harness that did it
 trial-lucene/   the same pointed at Apache Lucene: the corpus, the wrappers, four configurations

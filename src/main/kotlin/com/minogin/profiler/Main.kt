@@ -152,6 +152,14 @@ fun main(args: Array<String>) {
         return
     }
 
+    // What a cross-thread stack costs — the measurement that decides whether the tool may ever take
+    // one to say *where* its unlabelled time went. Its own mode because it registers no operations
+    // and needs no calibration beyond the busy loop.
+    if (opt["stackcost"] != null) {
+        runStackCost(victims = activeThreads)
+        return
+    }
+
     println("=".repeat(96))
     println("PHASE 1 — BENCH + PHASE 2 — SAMPLER")
     if (sweep != null) {

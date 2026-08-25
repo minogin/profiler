@@ -119,7 +119,21 @@ class Bed(
 
     private val directory = FSDirectory.open(corpus.dir)
     val reader: DirectoryReader = DirectoryReader.open(directory)
-    private val pool: ExecutorService? = if (threads > 1) Executors.newFixedThreadPool(threads) else null
+
+    /**
+     * The search threads, kept so their stacks can be taken.
+     *
+     * Only used by `--stacks`, which prices the idea of walking a stack on the ticks that found no
+     * label — the one thing this design cannot otherwise do is say *where* its unlabelled time went.
+     * The bench measures that in the abstract; this measures it on threads doing real work with
+     * memory-mapped I/O in them, which is a different proposition and might be a cheaper one.
+     */
+    val workers = java.util.concurrent.CopyOnWriteArrayList<Thread>()
+
+    private val pool: ExecutorService? =
+        if (threads > 1) Executors.newFixedThreadPool(threads) { r ->
+            Thread(r).also { it.isDaemon = true; workers += it }
+        } else null
 
     val searcher: IndexSearcher =
         if (pool != null) SlicedSearcher(reader, pool) else IndexSearcher(reader)
@@ -202,6 +216,83 @@ private fun qualify(corpus: Corpus, threads: Int) {
 }
 
 /**
+ * Takes the search threads' stacks at a fixed rate, one second on and one second off.
+ *
+ * Toggling inside a single run rather than comparing two runs is the whole point. This machine's
+ * throughput falls by more than a factor of two over a twenty-second run, so two separate runs would
+ * charge the throttle curve to whichever configuration went second — the trap this project has
+ * fallen into four times. Alternating every second interleaves the two configurations against a
+ * clock that moves on a scale of seconds, which is the only honest way to see an effect this small.
+ */
+private class Prober(val bed: Bed, val ratePerSecond: Int) : Thread("stack-prober") {
+
+    @Volatile
+    var probing = false
+
+    @Volatile
+    var running = true
+
+    val taken = java.util.concurrent.atomic.LongAdder()
+    private val costs = java.util.concurrent.ConcurrentLinkedQueue<Long>()
+    private val depths = java.util.concurrent.ConcurrentLinkedQueue<Int>()
+
+    init {
+        isDaemon = true
+    }
+
+    override fun run() {
+        val period = 1_000_000_000L / ratePerSecond.coerceAtLeast(1)
+        var next = System.nanoTime()
+        var phase = System.nanoTime() + 1_000_000_000L
+        var block = 0
+        var i = 0
+        while (running) {
+            val now = System.nanoTime()
+            if (now >= phase) {
+                // ABBA, not ABAB. Flipping every second would put every probing phase at an even
+                // second and every control phase at an odd one, and this machine throttles
+                // monotonically through a run - so the probing phases would all be systematically
+                // later, and the drift would be charged to the stack walk. The same position
+                // artifact that once reported an instrumented configuration as 6.6% faster.
+                // off, on, on, off, off, on, on, off ... puts the two symmetrically in time.
+                block++
+                probing = (block % 4 == 1 || block % 4 == 2)
+                phase = now + 1_000_000_000L
+                next = now
+            }
+            if (!probing) continue
+            if (now < next) continue
+            val threads = bed.workers
+            if (threads.isEmpty()) continue
+            val t0 = System.nanoTime()
+            val trace = threads[i++ % threads.size].stackTrace
+            val cost = System.nanoTime() - t0
+            if (trace.isNotEmpty()) {
+                taken.increment()
+                // Sampled rather than all of them, so the recording is not itself a cost.
+                if (i % 32 == 0) {
+                    costs.add(cost)
+                    // The depth of the traces actually taken, not of a thread probed afterwards - by then
+                    // the workers are parked in the pool and read 11 frames deep instead of forty.
+                    depths.add(trace.size)
+                }
+            }
+            next = maxOf(next + period, System.nanoTime() - period)
+        }
+    }
+
+    /** Median caller cost, and the depth the real workload actually reaches. */
+    fun report(): String {
+        val c = costs.toLongArray().sortedArray()
+        val d = depths.toIntArray().sortedArray()
+        return if (c.isEmpty()) "no stacks taken" else String.format(
+            Locale.ROOT, "%,d stacks taken, caller cost median %.1f us (p90 %.1f us); depth of the traces taken: median %d, p90 %d, max %d",
+            taken.sum(), c[c.size / 2] / 1e3, c[(c.size * 9) / 10] / 1e3, d[d.size / 2], d[(d.size * 9) / 10], d.last()
+        )
+    }
+}
+
+/**
  * The profiling run: search in a loop for a fixed wall-clock span, with whatever instrumentation
  * the mode asks for, and optionally with JFR recording the same window.
  */
@@ -215,6 +306,7 @@ private fun load(
     step: Double,
     jfr: String?,
     warmups: Int,
+    stacks: Int,
 ) {
     Bed(corpus, threads, mode).use { bed ->
         println("threads=$threads placement=$mode sampler=$sampler strict=$strict; warm-up $warmups searches, then searching for $seconds s")
@@ -225,14 +317,32 @@ private fun load(
         val recording = if (jfr != null) recordExecutionSamples(1) else null
         if (sampler) Profiler.start(stepMillis = step, strict = strict)
 
+        val prober = if (stacks > 0) Prober(bed, stacks).also { it.start() } else null
+
         val deadline = System.nanoTime() + seconds * 1_000_000_000L
         var searches = 0L
+        // Two buckets, filled by the same loop in the same run, according to which second-long phase
+        // the prober happened to be in. Each search is charged to the state that was true when it
+        // started, so a search straddling a toggle lands in one bucket rather than being split.
+        var withStacks = 0L
+        var withStacksNanos = 0L
+        var without = 0L
+        var withoutNanos = 0L
         val started = System.nanoTime()
         while (System.nanoTime() < deadline) {
+            val probing = prober?.probing == true
+            val t0 = System.nanoTime()
             Sink.last = bed.searchOnce()
+            val took = System.nanoTime() - t0
             searches++
+            if (probing) {
+                withStacks++; withStacksNanos += took
+            } else {
+                without++; withoutNanos += took
+            }
         }
         val elapsed = System.nanoTime() - started
+        prober?.running = false
 
         val report = if (sampler) Profiler.stop() else null
         if (recording != null) {
@@ -248,6 +358,26 @@ private fun load(
                 searches, elapsed / 1e9, millis(elapsed) / searches, searches / (elapsed / 1e9)
             )
         )
+        if (prober != null) {
+            println()
+            println("STACK PROBE — " + prober.report())
+            println(
+                String.format(
+                    Locale.ROOT,
+                    "  seconds with stacks being taken: %,d searches, %.3f ms each",
+                    withStacks, millis(withStacksNanos) / withStacks.coerceAtLeast(1)
+                )
+            )
+            println(
+                String.format(
+                    Locale.ROOT,
+                    "  seconds without:                 %,d searches, %.3f ms each  (%+.2f%%)",
+                    without, millis(withoutNanos) / without.coerceAtLeast(1),
+                    ((withStacksNanos.toDouble() / withStacks.coerceAtLeast(1)) /
+                            (withoutNanos.toDouble() / without.coerceAtLeast(1)) - 1) * 100
+                )
+            )
+        }
         if (mode == Placement.TIME) {
             println()
             print(bed.trialQuery.clauses.render())
@@ -359,6 +489,7 @@ fun main(args: Array<String>) {
                 step = opt["step"]?.toDouble() ?: 1.0,
                 jfr = opt["jfr"],
                 warmups = opt["warmups"]?.toInt() ?: 30,
+                stacks = opt["stacks"]?.toInt() ?: 0,
             )
         }
     }

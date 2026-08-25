@@ -382,6 +382,83 @@ on boundaries costing hundreds of microseconds and is five parts per million —
 both A/B comparisons came out with the wrong sign. "Do not label anything comparable to the hook"
 has a happy converse: on coarse enough boundaries the instrument is free.
 
+## Walking a stack
+
+Why this is measured at all: the Lucene trial showed that a label in the wrong place is invisible
+from inside the report, and the only thing that can say *where* unlabelled time went is a stack. The
+idea is to walk one **only on ticks that found the slot empty, and a hundred times less often than
+the label walk** — enough to tell "the gap is one place" from "the gap is everywhere", never on the
+hot path. It was blocked on a number. Reproduce with `--stackcost`; the numbers below are from the
+bench and from the Lucene trial's `--stacks`.
+
+**There are two costs and only one of them is easy to measure.** `Thread.getStackTrace` on another
+thread is a handshake: the target has to reach a safepoint before it can be walked. A microbenchmark
+of the *caller* measures a cost the workers actually pay and reports it as free. Both are measured
+here, separately.
+
+**Caller cost is a fixed handshake plus a per-frame charge.** Bench, 8 victims at a controlled depth,
+2,000 timed walks each:
+
+| frames reached | median | mean | p99 | max |
+|---|---|---|---|---|
+| 19 | 6.8 µs | 7.6 µs | 19.4 µs | 259.6 µs |
+| 67 | 12.4 µs | 13.1 µs | 23.9 µs | 1,394.9 µs |
+| 259 | 40.3 µs | 38.5 µs | 63.0 µs | 974.2 µs |
+| 1,024 | 119.5 µs | 101.5 µs | 237.1 µs | 1,147.1 µs |
+
+That is **≈5 µs fixed plus ≈0.11 µs per frame**, consistent across a 54× range of depth. The tail is
+three orders of magnitude above the median, which is what a handshake with an unlucky thread looks
+like.
+
+**The victim's cost only becomes measurable at about 75,000 stacks per second.** On the Lucene
+workload — real threads, memory-mapped I/O, traces of median depth 18 and maximum 40 — with the
+prober toggling on and off *inside a single run*, ABBA rather than alternating:
+
+| stacks/s | search time with | without | difference |
+|---|---|---|---|
+| 10 | 4.336 ms | 4.379 ms | −0.98% |
+| 100 | 6.339 ms | 6.434 ms | −1.48% |
+| 10,000 | 6.824 ms | 6.698 ms | +1.89% |
+| ~76,000 | 5.659 ms | 5.187 ms | **+9.10%** |
+
+The first three straddle zero and are the floor; the last is real and reproduced (+8.10% in an
+earlier run at the same rate). Extrapolating linearly from it: **0.9% at 10,000/s, 0.09% at 1,000/s,
+0.001% at 10/s.** The proposed rate has about three orders of magnitude of headroom before the cost
+is even measurable.
+
+The bench agrees. Its control moves 4.28% between rounds on its own, so 10, 100 and 1,000 stacks/s
+all sit below the floor there too; at 71,575/s it reads −9.85% and at unthrottled 74,301/s −9.94%,
+the two agreeing on **≈44 laps of lost work per stack**, or roughly 11 µs of victim thread-time at
+depth 65.
+
+**A stack costs *more* when you take them rarely, which is the opposite of convenient.** Caller cost
+on the same Lucene threads, against the rate:
+
+| stacks/s | median caller cost |
+|---|---|
+| 10 | **116.7 µs** |
+| 100 | 78.1 µs |
+| 10,000 | 19.6 µs |
+| ~76,000 | 11.9 µs |
+
+Ten times dearer at 10 Hz than at 76 kHz. Back-to-back handshakes find threads already at or near a
+safepoint; an isolated one has to bring a running thread to one from scratch. It does not change the
+verdict — 10 stacks/s at 117 µs is 1.2 ms/s, 0.12% of one core — but **a benchmark that measured
+only the unthrottled case would have reported 12 µs and understated the intended operating point
+tenfold.** That is the same trap as measuring the caller instead of the victim, one level down.
+
+**`Thread.getAllStackTraces` is a global safepoint and must never be used for this.** 339.6 µs
+median for 8 threads, against 11.9 µs for a single handshake — 28× the cost, and it stops every
+thread in the process whether it was interesting or not. The convenient call is the wrong call.
+
+**Method note: the first two attempts at this measurement were both wrong, in the ways this file
+keeps recording.** `LockSupport.parkNanos` has a granularity near a millisecond here, so a rate
+limiter built on it silently capped at 1,417 stacks/s when asked for 10,000 — the high-rate
+configurations never ran and the answer looked like "free at every rate". And toggling the prober
+every second put every probing phase at an even second and every control phase at an odd one, so on
+a machine that throttles monotonically the drift was charged to the stack walk: it produced +4.89%
+at 100 stacks/s against −0.34% at 10,000, which is incoherent. ABBA phasing fixed it.
+
 ## The sampler
 
 **Parking cannot hold a millisecond step under load.** Measured at a 1 ms request with 8 workers
