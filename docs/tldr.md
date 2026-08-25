@@ -78,7 +78,10 @@ JIT deleted, a comparison that reported an instrumented run as 15% *faster*, a "
 out below the thing it was bounding.
 
 Then the same tool was pointed at Calcite, which nobody here wrote, and its answers agreed with
-JFR's to about a percentage point.
+JFR's to about a percentage point. Then at Lucene, where JFR *disagreed* — and the disagreement
+turned out to be ours: a label placed on a scorer but not on the factory that built it, losing a
+third of the clause that mattered while every number in the report still looked fine. Fixed, and
+recorded, because that is the failure mode this design has and a flame graph does not.
 
 ## What the report says, and what it refuses to say
 
@@ -101,8 +104,10 @@ that and their numbers were correct.
 
 ## Where it stands
 
-Built and verified: the bench, the fine tier, the check of the sampler against known truth, the
-Calcite trial, and — currently — bounding what a share is worth.
+Built and verified: the bench, the fine tier, the check of the sampler against known truth,
+bounding what a share is worth, and two trials on foreign code — Calcite, and Lucene, where eight
+clauses of one query were separated that a flame graph could not tell apart at all, on eight
+threads, at a cost of 6.5% against 35% for the way a production search engine does it.
 
 Not built: the coarse tier, following work across thread hand-offs and coroutines, whole-application
 parallelism, the annotation and agent surface, JFR output. [plan.md](plan.md) has the order.

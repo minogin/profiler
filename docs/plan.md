@@ -18,7 +18,8 @@ words, is [tldr.md](tldr.md).
 | — | Trial — the fine tier on somebody else's code | **done** |
 | 3.5 | What a share is worth — bounding the error, not classifying operations | **done** |
 | 3.75 | Placement — enter/exit, the balance check, report polish | **done** |
-| — | Trials 2+ — foreign code, concurrent: Lucene, Netty, a compiler, two negative controls | **next** |
+| — | Trial 2 — Lucene: concurrent, and identity by instance rather than by class | **done** |
+| — | Trials 3+ — Netty, a compiler, two negative controls | **next** |
 | 4 | The coarse tier — contexts, spans, cross-tabulation | after the trials |
 | 5 | Crossing threads — propagation, and per-operation parallelism | not started |
 | 6 | Thread state and the whole-application parallelism coefficient | not started |
@@ -579,12 +580,54 @@ workload with forty labels of which fifteen ever fire. **All three hold.**
 - The counterfactual warning closes every report.
 - `op(id, times = n)` reports in the caller's units for a label placed around a loop.
 
-## Trials 2+ — foreign code, concurrent this time · next
+## Trial 2 — Lucene · done
 
-One real workload is one data point, and every design decision since has been extrapolated from it.
-The second trial matters more than any feature on this list.
+The full record is [trial-lucene.md](trial-lucene.md); this is what it changed.
 
-**What makes a good target**, from what the first trial actually taught us:
+**It qualified for a cleaner reason than Calcite did.** Calcite's flame graph pointed the wrong way;
+Lucene's does not point at all. Four `TermQuery` clauses on four different terms share every frame
+they have, and a flame graph attributed three of eight clauses with 51.2% of samples naming no
+clause at all. The labels separated all eight: prefix 48.49%, phrase 42.66%, and the four
+same-class clauses spanning 2.080% down to 0.163%.
+
+**Everything under test came through, and two things did not.**
+
+Held: the lexical form came back (a wrapper body is a block we own, so `enter`/`exit` was never
+needed — the opposite shape from Calcite, and the second data point that both forms are required);
+the counts column separated 20.8 M calls at 2.2 µs from 495 M at 81 ns for two clauses holding
+nearly the same share; the long-instance detector fired on the prefix clause and was right; the
+concurrency was uneventful — eight worker threads, no imbalance, no leak, shares reproducing across
+run lengths to within 0.4 points; and `strict` caught a genuinely bad placement in one second.
+
+Did not hold:
+
+1. **The floor check is not machine-independent.** It also stopped a *correct* placement, citing
+   27.5 ns for a label whose settled figure is 49.7 ns. On this laptop, throughput falls 2.2× between
+   a two-second run and a forty-second one, so implied per-call duration rises 3× with run length
+   while every share stays put. The claim in `floorCheck`'s own documentation — "identical on every
+   machine and every rerun" — is false here. Candidate fixes are in
+   [findings.md](findings.md#open-questions); the cheapest is to require the estimate to be low in
+   two consecutive windows rather than one.
+2. **A misplaced label is invisible from inside the report.** Labelling the scorer but not the
+   factory that builds it reported the decisive clause a third low, with every number plausible and
+   nothing indicating a gap. Only an independent measurement found it.
+
+**And the closest competitor was measured.** Elasticsearch's approach — wrap every scorer in
+`System.nanoTime()` — ranks the wrong clause first on this workload, because the instrument charges
+per call and the two top clauses differ 21× in call count. One free parameter reconciles all eight
+clauses to an RMS of 0.09 pp. It is in [case.md](case.md), and it is the strongest single argument
+for sampling this project has produced.
+
+**What did not come up:** stack depth. Lucene's deepest sample was 44 frames with zero truncation,
+so the argument that beat Calcite hardest was irrelevant here.
+
+## Trials 3+ — the rest of the list · next
+
+Two data points now, and they disagreed usefully — Calcite said the tool needed a non-lexical form,
+Lucene said the lexical one was back and that the danger had moved from *leaking* a label to
+*misplacing* one. A third will do the same to whatever we believe after two.
+
+**What makes a good target**, from what the trials actually taught us:
 
 1. hot operations of tens of nanoseconds, executed billions of times;
 2. **the domain's identity is not the stack's identity** — several logical operations behind one
@@ -593,20 +636,12 @@ The second trial matters more than any feature on this list.
    Calcite planning is single-threaded and never tested any of it;
 4. extension points that can be decorated without forking.
 
-**First: Apache Lucene.** Query clauses all run through the same `Scorer` and `DocIdSetIterator`
-frames, so "which clause of this query costs the time" has no stack answer; search is concurrent by
-default across segments; and Lucene is built to be extended, so the labels can be placed by wrapping
-rather than forking. The counts column should also earn its keep, since clause evaluation counts
-differ by orders of magnitude between clause types. Cost: an index has to be built to search, which
-is a few dozen lines of generated documents.
-
-**Then the rest of the list, in this order and for these reasons.** Not one trial — several, because
-one data point produced a friction list we then designed against for a week, and two produced a
-better one.
+**Next: Netty**, then the compiler, then the two negative controls. Lucene is done and its record is
+[trial-lucene.md](trial-lucene.md).
 
 | candidate | why it is on the list | what it tests that the others do not |
 |---|---|---|
-| **Lucene** search | clauses and scorers share `Scorer` / `DocIdSetIterator` frames; concurrent across segments; built to be extended | placement by *wrapping* rather than by callback, and the first concurrent foreign workload |
+| ~~**Lucene** search~~ · **done** | clauses share `Scorer` / `DocIdSetIterator` frames; concurrent across segments; built to be extended | placement by *wrapping*, and the first concurrent foreign workload — both delivered, plus the timed-wrapper comparison nobody planned |
 | **Netty** pipeline | N handlers behind one `channelRead`; event-loop threads | a different concurrency shape entirely — few threads, many tasks, and time that is mostly *not* CPU |
 | **javac or the Kotlin compiler** | many passes through the same visitor frames; the identity question is "which pass", which no stack answers | depth — compilers recurse hard, and JFR truncates at 64 frames where a slot has no depth at all |
 | **JGraphT** or any graph library | closest to the shape this project came from: node expansion, edge scan, tens of nanoseconds | whether the tool says anything useful when methods *are* the operations |
@@ -622,32 +657,45 @@ belongs there.
 Each trial gets its own module beside [`trial/`](../trial), so nothing it depends on can reach the
 profiler, which still takes no dependencies at all.
 
-### Starting it — what the first trial says to do, in order
+### Running one — what the first two trials say to do, in order
 
-The Calcite trial is the template and [trial.md](trial.md) is its full record. What that exercise
-established about *how to run one*:
+[trial.md](trial.md) and [trial-lucene.md](trial-lucene.md) are the two full records. What they
+establish about *how to run one*:
 
 1. **Qualify the candidate before instrumenting it.** Calcite earned the trial by taking 16–20 s to
    plan a four-table join against 184 ms for three, and by having a flame graph that was over 60%
    JDK collections and string building. A workload nobody would want profiled proves nothing. For
    Lucene that means finding a query whose cost is real and whose *clause* costs are not obvious.
-2. **Find the one hook the library exposes.** For Calcite it was `RelOptListener`, and everything
-   else in the planner was unreachable without forking. Lucene's equivalent is wrapping `Query` /
-   `Weight` / `Scorer`, which is a supported extension point rather than a callback — a different
-   shape of placement, and the second data point on whether `enter`/`exit` was the right addition.
-3. **Measure the mechanism separately from the hook.** Attaching *any* listener made Calcite
-   allocate two objects per rule firing. The comparison has to be three-way — nothing,
-   mechanism-with-no-op, mechanism-with-label — or our hook is charged for somebody else's cost.
-4. **Check the labels against something independent.** JFR, recorded over the same run, agreed
-   within about a percentage point on every rule. Where the two disagree, that is the finding.
-5. **Keep the friction list as you go.** It is the deliverable that gets dropped when the finding
+2. **Find the hook the library exposes, and label the whole lifecycle of what it names.** For
+   Calcite it was `RelOptListener` and nothing else was reachable without forking; for Lucene it was
+   the `Query → Weight → ScorerSupplier → Scorer → DocIdSetIterator` chain. Lucene added the rule
+   that costs the most to learn: **label the factory as well as the product.** Labelling only the
+   scorer, and not the supplier that built it, reported the decisive clause at 32.2% instead of
+   48.5% — and the report looked entirely healthy either way.
+3. **Do not let the wrapper change the workload.** New with Lucene, and Calcite could not have shown
+   it. Base classes supply working defaults for bulk fast paths, so a wrapper that overrides only
+   the obvious methods still returns the right answers about a workload the library would never have
+   run: 13.3% slower, one clause's calls 40× higher, its rank moved from seventh to third. Every
+   escape hatch has to be delegated, and the check that it worked is a flame graph over the inert
+   wrapper against one over the bare code.
+4. **Measure the mechanism separately from the hook.** Attaching *any* listener made Calcite
+   allocate two objects per rule firing; wrapping cost Lucene 3.84% before a single label was
+   placed, of a 6.54% total. The comparison has to be three-way — nothing, mechanism-with-no-op,
+   mechanism-with-label — or our hook is charged for somebody else's cost. Interleave it and swap
+   the order every round: this machine's clock moved 2.5× mid-comparison and all configurations
+   moved together, which is the only reason the number survived.
+5. **Check the labels against something independent, and take the disagreement seriously.** JFR
+   agreed with Calcite's labels to about a percentage point. On Lucene it disagreed, and the
+   disagreement was ours — item 2 above. Where the two disagree, that is the finding, and it is not
+   automatically the other tool's fault.
+6. **Keep the friction list as you go.** It is the deliverable that gets dropped when the finding
    goes well, and it is what phase 3.75 was built out of.
 
-**What is new since the first trial, and therefore under test:** `enter`/`exit` and the balance
-check; the duty cycle and the bound it puts on every share; the long-execution detector and its
-verdicts; the floor check, which under `strict` stops a session within a second; folded empty
-operations; and `op(id, times = n)`. Lucene is concurrent, which none of the phase 3.5 work has
-ever met on foreign code.
+**What is under test after two trials.** Lucene exercised `enter`/`exit` by *not needing it*, the
+duty cycle and its bound on foreign concurrent code, the long-execution detector, the floor check
+under `strict`, folded empty operations, and the counts column. Still never met on foreign code:
+`op(id, times = n)`, the balance check on a workload that actually throws, and anything at all above
+the fine tier.
 
 ## Phase 4 — the coarse tier · after the trials
 

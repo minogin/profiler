@@ -162,6 +162,30 @@ configuration that sustained 23M calls/s decayed to 12M within three seconds, an
 went from 0.83 to 2.37 ns per iteration. The guards caught it and refused to produce numbers.
 Letting the machine idle restored it.
 
+**Throttling makes implied per-call duration depend on how long you profile for. Share does not.**
+The clearest single measurement of the clock's effect on a *report*, from the Lucene trial — same
+process, same query, only the run length varied:
+
+| run length | searches/s | `term#2` implied/call | `term#2` share | `phrase` implied/call | `phrase` share |
+|---|---|---|---|---|---|
+| 2 s | 234.5 | 18.1 ns | 1.692% | 42.9 ns | 40.182% |
+| 5 s | 151.0 | 31.2 ns | 1.940% | 68.0 ns | 42.300% |
+| 10 s | 128.6 | 41.0 ns | 1.894% | 77.1 ns | 42.330% |
+| 20 s | 114.9 | 54.1 ns | 2.070% | 88.3 ns | 42.350% |
+| 40 s | 108.8 | — | — | — | — |
+
+Throughput falls **2.2×** between a two-second run and a forty-second one. Every implied per-call
+duration rises roughly in proportion; **every share moves by under 0.4 points.** So the two columns
+are worth different things: a share is a statement about the program, and an implied duration is a
+statement about the program *on this machine, at the clock it happened to be running at*.
+
+*Consequence, and it is a defect:* the floor check fires on whichever value it sees first. On the
+correctly-placed Lucene labels it stopped the session at 998 ticks citing `clause:term#2` at "under
+27.5 ns", where the settled twenty-second figure for that label is 49.7 ns — above the floor. Its
+justification for firing early ("a label below the floor is a property of the placement, identical
+on every machine and every rerun") allows for statistical noise in the sample count and not for the
+machine halving its clock between second one and second twenty. See the open questions.
+
 **The probe does not keep the CPU warm.** Tested on the theory that repeatedly running
 `Get-Counter` holds cores at a high P-state: 25 samples at 1 s intervals on an idle machine
 bounced between 87% and 128% of nominal with no upward trend. First five averaged 103.8%, last
@@ -239,6 +263,15 @@ each operation against the *median* load factor while the bench already tolerate
 per-operation scatter around that median. The share comparison above uses no call counts and no
 median, and is the measurement that belongs here.
 
+**Placement by wrapping costs 2–4× the bare hook, because of the indirection in front of it.**
+Measured on Lucene, where each label sits inside a wrapper method that the JIT cannot devirtualise:
+roughly 267,000 labelled calls per search, and the label's share of the slowdown works out at
+**3–6 ns per labelled call** against 1.7 ns for the hook measured alone on the bench. The range is
+wide because it comes from a difference of two noisy configurations (wrapped-and-labelled minus
+wrapped-and-inert: +2.7 points by mean, +5.0 by median). This is the honest number to quote when
+the label cannot be placed inline — and it is a property of the placement mechanism, not of the
+hook, which is why it had to be measured against the inert wrapper rather than against bare code.
+
 **Opaque labels do not fence the work between them, and the JIT will move it.** The API demo
 originally wrote its three operations with literal trip counts — `burn(s, 40)`, `burn(s, 120)`,
 `burn(s, 15)` — all inlined into one loop body over a single dependency chain. Measured shares came
@@ -259,7 +292,33 @@ believes the answer.
 
 ## Against a stack profiler
 
-All from the Calcite trial — the numbers and the workload are in [trial.md](trial.md).
+From the two trials — Calcite in [trial.md](trial.md), Lucene in [trial-lucene.md](trial-lucene.md).
+Entries say which.
+
+**Many instances behind one class is the shape a flame graph cannot address even in principle.**
+Calcite's gap was many classes behind one inherited method, which is at least *recoverable* from the
+stacks if wrongly. Lucene's is four `TermQuery` clauses on four different terms: one `TermScorer`,
+one `ImpactsDISI.advance`, no frame anywhere that differs. Measured on an eight-clause query, by
+counting every collapsed stack attributable to exactly one clause: a flame graph identifies **three
+of eight clauses** covering 48.8% of samples, and **51.2% of samples contain no clause frame at
+all**. Our labels separate all eight, and the four that share a class span 2.080% down to 0.163% —
+a 13× spread inside a group the stacks cannot subdivide.
+
+**Counts separate two opposite problems that share a percentage.** Lucene's prefix clause holds
+48.5% and its phrase clause 42.7%, and they are nothing alike: 20.8 M calls at 2.2 µs against
+495 M calls at 81 ns. A 24× difference in call count one way and a 27× difference in unit cost the
+other. The fix for one is to stop expanding it; the fix for the other is to stop calling it. Second
+independent workload on which the counts column was the most valuable one.
+
+**The timed-wrapper approach ranks the wrong operation first, and it is what production search
+engines ship.** Elasticsearch profiles queries by wrapping every scorer in `System.nanoTime()`.
+Run against the same eight clauses through the same wrappers as our labels, it reports phrase 48.85%
+ahead of prefix 40.70%; sampling reports prefix 48.49% ahead of phrase 42.66%. Six clauses agree to
+within a point and the top two are swapped. **One free parameter — a fixed cost per instrumented
+call — reconciles all eight to an RMS of 0.09 pp** (fitted 21.50 ns/call; largest residual 0.18 pp).
+The instrument accounts for 17.3% of the total it reports, concentrated on the clause making 21× as
+many calls as its rival, which is exactly the clause it promotes. Cost: +35.4% throughput, against
++6.5% for the wrapper plus our label.
 
 **Two sampling mechanisms with nothing in common agree to about a percentage point.** Our shares
 against JFR's inclusive shares, same run, per rule: gaps of 1.0, 0.8, 1.1, 0.6, 0.1 and 0.2 pp.
@@ -294,6 +353,11 @@ measured at 46% of planning time turned out to be worth a **275×** speedup when
 it was creating work for every other operation as well as doing its own. Nothing in the report says
 this, and a reader who treats shares as "what I would save" will be wrong in the safe direction
 sometimes and the unsafe direction other times. It needs to be said in the output.
+
+**A stack profiler's depth limit is a real failure mode that does not always apply.** Calcite
+truncated 2.4% of stacks and raising the limit moved a rule's share by 3.7 pp. Lucene's maximum
+stack depth over 10,329 samples was **44, with zero truncation**. Recorded because a list of
+advantages is only honest if it includes the ones that did not come up.
 
 **Placing a label in code you do not own means finding the one hook it exposes.** For Calcite that
 was a listener notified before and after each rule firing — enough, because the rule is the unit
@@ -710,6 +774,46 @@ now the ranking of the operations that carry the time, which is what the answer 
 
 ## Placement
 
+**A label belongs on the whole lifecycle of what it names, and a framework that separates
+construction from use separates the cost too.** Lucene's clauses were first wrapped at the *product*
+— the scorer and its iterator — leaving the factory calls bare, on the reasoning that building a
+scorer is setup and the work is in the scan. True of a term clause; false of a prefix clause, which
+rewrites into a hundred terms and unions their postings into a bitset before a single document is
+scored. Measured: the prefix clause read **32.211%** with the factories unlabelled and **48.491%**
+with them labelled, and unattributed occupancy fell from 60.7% to 47.8%. The single hottest complete
+stack in the whole baseline recording — 9.05% of all samples — is that bitset being built inside
+`ScorerSupplier.get`.
+
+**And the report gave no sign of it.** Shares summed to 100%, every clause carried a plausible
+number, the ordering looked sensible, and the answer was a third low on the clause that mattered.
+Nothing internal to the tool could have caught it, because from the tool's point of view the time
+really was outside every label. What caught it was disagreement with an independent measurement.
+**A misplaced label is invisible from inside the report** — the same conclusion the leak experiment
+below reaches by a different route.
+
+**Placement by wrapping can silently change what the library does, and the counts column is the
+tell.** Lucene 10 gives an iterator four bulk fast paths — `intoBitSet`, `docIDRunEnd`,
+`nextDocsAndScores`, `ScorerSupplier.bulkScorer` — each with a working base-class default that falls
+back to a doc-at-a-time loop. A wrapper that overrides only the obvious methods compiles, returns
+the right documents, and profiles a query the library would never have run: **13.3% slower, one
+clause's calls 40× higher (13.9 M → 556 M), its share 2.9× higher (1.73% → 4.94%), and its rank
+moved from seventh to third.** Delegating all four preserves the path exactly — `MaxScoreBulkScorer`
+inclusive 76.49% unwrapped against 76.85% wrapped, and the fallback bulk scorer never appears. The
+naive report is not marked wrong anywhere, but 556 M calls at 8.2 ns each is not a plausible row:
+**an implied per-call duration far below the floor is evidence about the placement, not only about
+the label.**
+
+**`strict` caught that on its own, in one second, on foreign code** — `clause:term#2: 5,115,899
+calls at under 23.9 ns each, below the 50 ns floor` — against a mistake nobody anticipated when the
+check was written. See the caveat under "The machine" and in the open questions: it stopped the
+correct placement too.
+
+**Wrapping restores the lexical form; a callback does not.** Calcite's only boundary was a pair of
+notifications with no `finally`, which is why `Profiler.enter` / `exit` exist. Lucene's extension
+point is a wrapper, and a wrapper method body is a block we own — so `op(id) { }` works everywhere,
+its `finally` is compiler-generated, and no leak is possible. Two libraries, two shapes, and the
+second data point that the library needs both forms.
+
 **A leaked label does not look like an error. It looks like a finding.** Measured on purpose: one
 worker of four enters an operation and never exits it on every thousandth pass, so everything that
 thread does afterwards is billed to that operation until the next check. By construction that
@@ -729,6 +833,26 @@ the sampler never once caught is a statement about its size — under a nanoseco
 rule of three — and belongs in front of the reader.
 
 ## Open questions
+
+**The floor check is not machine-independent, and it stopped a correct placement.** Measured above:
+implied per-call duration on this laptop rises 3× between a two-second and a twenty-second run,
+purely from throttling, so `strict` halted a Lucene placement whose settled number is above the
+floor. Three candidate fixes, none tried: require a minimum elapsed time or a minimum sample count
+before the check may fire; require the estimate to be stable across two consecutive windows rather
+than merely low in one; or normalise per-call duration by an observed clock rate, which the duty
+cycle machinery already probes for another purpose. The second is the cheapest and needs no new
+measurement. Whichever is chosen, the "identical on every machine and every rerun" claim in
+`floorCheck`'s documentation has to go — it is false on this hardware.
+
+**Why the duty cycle sits at 56% on a workload that ought to be CPU-bound.** Lucene search, eight
+worker threads plus the main thread on sixteen cores, reported 55.85–57.18% of sampled wall time on
+CPU across every configuration. One idle pool thread accounts for roughly 11 points of that; the
+remainder is unexplained. Candidates not yet separated: memory-mapped page faults through
+`MemorySessionImpl` (7.69% of self time in the flame graph), the main thread blocking on
+`TaskExecutor` while the slices run, and slice completion skew. The consequence is that the bound
+the duty cycle puts on a share — "at most 79.06 points of any share is occupancy that was not CPU" —
+is wider than every share it applies to and tells the reader nothing on this workload. Honest and
+useless are not the same defect, but they are both defects.
 
 **The detector's thresholds are provisional.** Naming an operation takes three conditions together:
 a rate of long executions three times the machine floor, a floor of 2% under the rate itself, and at

@@ -43,3 +43,5 @@ bin/
 
 ### Mac OS ###
 .DS_Store
+### Trial indexes — generated, large, and not worth a clean rebuild
+/trial-lucene/index/

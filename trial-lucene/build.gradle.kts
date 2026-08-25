@@ -9,15 +9,14 @@ repositories {
 
 dependencies {
     // The profiler under trial. Source dependency on the root project — the point of the exercise
-    // is that a third party needs nothing but Profiler.register / op(id) { }.
+    // is that a third party needs nothing but Profiler.register and a place to put the label.
     implementation(project(":"))
-
     implementation(project(":trial-common"))
 
-    implementation("org.apache.calcite:calcite-core:1.42.0")
-    // Calcite logs through slf4j. Without a binding every run opens with a warning; nop keeps the
-    // console clean and, more to the point, keeps a logging framework out of the profile.
-    runtimeOnly("org.slf4j:slf4j-nop:2.0.16")
+    implementation("org.apache.lucene:lucene-core:10.4.0")
+    // The analyzer the corpus is written and queried with. Kept explicit: which analyzer is used
+    // decides the term distribution, and the term distribution is the whole experiment.
+    implementation("org.apache.lucene:lucene-analysis-common:10.4.0")
 }
 
 kotlin {
@@ -25,7 +24,7 @@ kotlin {
 }
 
 application {
-    mainClass.set("com.minogin.profiler.trial.CalciteTrialKt")
+    mainClass.set("com.minogin.profiler.trial.lucene.LuceneTrialKt")
 }
 
 /** Writes the runtime classpath to a file, so the trial can be launched by `java` directly with

@@ -9,6 +9,8 @@
           <set>
             <option value="$PROJECT_DIR$" />
             <option value="$PROJECT_DIR$/trial" />
+            <option value="$PROJECT_DIR$/trial-common" />
+            <option value="$PROJECT_DIR$/trial-lucene" />
           </set>
         </option>
         <option name="myGradleHome" value="" />

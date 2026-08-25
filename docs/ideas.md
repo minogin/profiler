@@ -327,6 +327,56 @@ The sampler reads high on parents and low on short leaves. With call counts the 
 arithmetic rather than a model, and the counts are already collected. Blocked on understanding the
 bias well enough to know what to correct — see the open question in findings.md.
 
+## 12. Make the floor check survive a machine whose clock moves · open
+
+The floor check fires within a second on the argument that a below-floor label is a property of the
+code, "identical on every machine and every rerun". Measured on Lucene, that is false here: this
+laptop's throughput falls 2.2× between a two-second run and a forty-second one, and implied per-call
+duration rises with it — 18.1 ns at two seconds, 54.1 ns at twenty, for the same label. `strict`
+stopped a *correct* placement citing 27.5 ns against a settled 49.7 ns. Shares over the same range
+moved by under 0.4 points, so only this one column is affected.
+
+Three candidate fixes, cheapest first:
+
+1. **Require two consecutive windows.** Fire only if the estimate is below the floor in two
+   successive checks. Costs one extra second and no new measurement, and it would have suppressed
+   the false stop above while keeping the true one — the naive wrapper's labels were 8.2 ns, four
+   times under the floor rather than fractionally under it.
+2. **Require a minimum evidence budget** — a sample count or an elapsed time — before the check may
+   fire at all. Simple, but picking the number is exactly the kind of judgement this project keeps
+   getting wrong without a bench for it.
+3. **Normalise by an observed clock rate.** The duty machinery already probes the processor's
+   performance counter for a different purpose. Most principled, most work, and it makes the floor
+   a machine-relative quantity, which may be the honest thing for it to be.
+
+Related: the ladder's premise is that a below-floor label is *fatal* because it is deterministic,
+while a long operation is only a *warning* because it depends on the day's workload. If the floor
+verdict depends on the machine's power state, that distinction is weaker than it was written to be
+and may deserve revisiting rather than patching.
+
+## 13. Report the boundary a label does not cover · open
+
+Lucene's first placement wrapped the scorer and not the supplier that built it, and lost a third of
+the decisive clause with nothing in the report to suggest it. The general problem is that the tool
+cannot see what it was not asked to look at, and unattributed occupancy is reported only as one
+aggregate number ("47.8% outside any operation").
+
+An idea, untested and possibly not implementable cheaply: when a thread is sampled outside every
+label, record something about *where* — not a full stack, which is the thing this design exists to
+avoid, but one frame, or a single identifying pointer, sampled at a much lower rate than the label
+walk. The report could then say "of the 47.8% outside any label, a third is in one place" and put a
+name to it. That is the difference between "your labels cover half the run" and "your labels cover
+half the run, and here is the shape of the other half". Cost and feasibility both unknown.
+
+## 14. Make cross-checking a first-class feature, not a trial-only exercise · open
+
+Both trials turned on comparing our labels against an independent measurement, and on Lucene the
+comparison found *our* error rather than the other tool's. Every user placing labels in code they do
+not own has the same exposure and none of the harness. Two thoughts, neither worked out: a documented
+recipe (record JFR over the same window, collapse the stacks, compare inclusive shares against the
+label shares) shipped as part of the README rather than as trial code; or a mode that records both
+at once and prints them side by side, which is more use and considerably more work.
+
 ---
 
 ## Promoted to plan.md

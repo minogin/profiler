@@ -18,7 +18,20 @@ Numbers cited here are recorded in full in [findings.md](findings.md) and [trial
 
 Everything in this section applies to any profiler whose input is a periodic dump of thread stacks:
 JFR's `jdk.ExecutionSample`, async-profiler, the IntelliJ profiler, and every flame graph made from
-any of them. Observed on Apache Calcite 1.42.0 query planning.
+any of them. Observed on Apache Calcite 1.42.0 query planning, and — where an entry says so — on
+Apache Lucene 10.4.0 search.
+
+**Two instances of one class have the same stack, and no amount of reading it deeper will help.**
+The Calcite entries below are about many *classes* behind one inherited method, which is at least
+recoverable from the frames, if wrongly. The commoner case is worse. A Lucene `BooleanQuery` with
+four `TermQuery` clauses on four different terms runs one `TermScorer` through one
+`ImpactsDISI.advance` four times over; the identity that decides what to do about the query — *which
+term* — is a field of an object, and no frame carries it. Measured by counting every collapsed stack
+attributable to exactly one clause of an eight-clause query: **a flame graph identifies three of the
+eight, covering 48.8% of samples, and 51.2% of samples contain no clause frame at all.** Our labels
+separate all eight, and the four clauses sharing a class span 2.080% down to 0.163%. There is no
+"read it more carefully" available here — Calcite's failure was a wrong answer, Lucene's is no
+answer.
 
 **It names methods, and the thing you want named is often not a method.** The largest meaningful
 frame in the Calcite profile was `ConverterRule.onMatch` at 49.14% inclusive. `ConverterRule` is a
@@ -137,6 +150,47 @@ sample time because the label is already in the slot being read.
 **It does not solve placement, and neither do we.** Both need somewhere to put the begin and the
 end. See below.
 
+## Timed wrappers — what a production search engine actually ships
+
+*Measured, on Lucene. Full record in [trial-lucene.md](trial-lucene.md).* Elasticsearch answers
+"which clause of this query cost the time" with a bespoke profiler: `ProfileWeight` and
+`ProfileScorer` wrap every scorer and put `System.nanoTime()` on both sides of every call. That such
+a thing had to be built at all is the strongest external evidence that the question is real and that
+stack profilers do not answer it. It is also the closest competitor this project has, and on the one
+workload where the two have been run side by side, **it names the wrong clause first.**
+
+Same wrappers, same boundaries, same run length, only the instrument differing:
+
+| | timed | sampled |
+|---|---|---|
+| phrase clause | **48.85%** | 42.66% |
+| prefix clause | 40.70% | **48.49%** |
+
+Six of the eight clauses agree to within a point. The two that matter are swapped.
+
+**The cause is that the instrument charges per call, and calls are not evenly spread.** The phrase
+clause makes 524.5 M calls, the prefix clause 24.6 M — 21× as many. Fitting a single free parameter,
+a fixed cost per instrumented call, against all eight clauses reconciles them to an RMS of 0.09
+percentage points (largest residual 0.18) at 21.50 ns per call. On that fit the instrument accounts
+for **17.3% of the total time it reports**, essentially all of it landing on the clause it then
+promotes to first place.
+
+**And it is not cheap.** Against an uninstrumented baseline, interleaved with order swapped, n=480
+per configuration: wrapping alone +3.84%, wrapping plus our label +6.54%, wrapping plus timing
+**+35.36%**.
+
+Two honest qualifications. This is one workload, and the failure needs a large spread in call counts
+between operations — where all operations are called about equally often, per-call cost biases every
+row alike and cancels out of the shares. And the reconciliation is a one-parameter fit, not an
+independent measurement of `nanoTime`; what makes it evidence is that the model was stated before it
+was fitted and that eight points fall on it.
+
+The general form is worth stating, because it applies to us too: **an instrument whose cost is
+proportional to call count, measuring quantities that are not, redistributes time towards whatever
+is called most.** A sampled label is charged per *unit of time*, which is the same quantity it
+reports, so it has no equivalent failure mode — that is the structural argument for sampling over
+timing at this operation size, and it now has a number attached.
+
 ---
 
 ## What none of them can do, including this one
@@ -146,6 +200,13 @@ end. See below.
 24.6% of self time, memo registration, rule-match digest strings — are unreachable without forking.
 Those are the costs a flame graph is *already* worst at, so this is where the two techniques fail
 together rather than where one rescues the other.
+
+**And more hooks does not mean better coverage.** Lucene exposes an extension point at every stage
+of query execution, far more than Calcite did, and the fraction of time our labels could not reach
+was *worse*: **47.8% of occupancy outside every label**, against Calcite's much smaller remainder.
+The reason is not a missing hook — it is that a scored query's cost genuinely is about half
+coordination between clauses, and coordination is not a clause. The limit is a property of the
+workload's shape, not of how generous the library is, so no amount of extension points removes it.
 
 **A hook that only observes cannot test its own finding.** Calcite's `RelOptListener` is notified
 before and after a rule fires and has no way to say "skip this one". So the profiler can say an
@@ -165,6 +226,20 @@ and it does not go away.
 chose in advance. If the cost is somewhere nobody suspected, the flame graph will show it and the
 labels will file it under whichever label happened to be set. The Calcite profile's JDK-heavy self
 time was unactionable, but it was also *true*, and it is the kind of truth labels cannot produce.
+
+**And the share they alone can speak for is not small.** On Lucene, **47.8% of occupancy was outside
+every label** — `MaxScoreBulkScorer`'s coordination, the collector, the priority queue, weight
+construction — despite Lucene exposing far more extension points than Calcite did. More hooks, worse
+coverage, because a scored query's cost genuinely is about half coordination. On that workload the
+labels explain where 52% of the time went and a flame graph is the only thing with anything to say
+about the rest. Anyone reading our report as if it accounted for the whole run would be wrong by
+half.
+
+**A misplaced label is invisible; a wrong flame graph is at least a flame graph.** The first Lucene
+placement labelled the scorer and not the factory that built it, and reported the clause that
+mattered at 32.2% instead of 48.5%. Every share summed, every number was plausible, and nothing in
+the report indicated a gap. It was found by disagreeing with JFR. A tool whose failures are silent
+needs a second opinion in a way that a tool whose failures are visible does not.
 
 **They work on code you cannot modify at all.** No hook, no source, no build — an agent-based
 sampler still works. Our fine tier stops where the host's extension points stop.

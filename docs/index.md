@@ -3,10 +3,11 @@
 Each one has a job, and nothing is written in two places. Start with [tldr.md](tldr.md) if you have
 five minutes, or with [profiler.md](profiler.md) if you want the design.
 
-**Where we are right now:** phases 1, 2, 3, 3.5 and 3.75 are done, and so is the first trial, on
-Apache Calcite. Next are the **trials on foreign code, Lucene first**, and [plan.md](plan.md#trials-2--foreign-code-concurrent-this-time--next)
-carries the candidate list — Lucene, Netty, a compiler, and two deliberate negative controls — with
-the criteria and the five steps the first trial taught us about running one.
+**Where we are right now:** phases 1, 2, 3, 3.5 and 3.75 are done, and so are two trials — Apache
+Calcite, and Apache Lucene, which was the first concurrent workload we did not write. Next are the
+**remaining trials**, and [plan.md](plan.md#trials-3--the-rest-of-the-list--next) carries the list —
+Netty, a compiler, and two deliberate negative controls — with the criteria and the six steps the
+two trials taught us about running one.
 
 | document | what belongs in it | read it when |
 |---|---|---|
@@ -15,7 +16,8 @@ the criteria and the five steps the first trial taught us about running one.
 | [plan.md](plan.md) | work we committed to, phase by phase, rewritten as each closes to say what was actually built | you want to know where we are |
 | [findings.md](findings.md) | only things we measured, each with the measurement that produced it | you want to know what is true, and why we believe it |
 | [case.md](case.md) | observations of existing tools failing at something, and where they are better than us | you want to know why this exists at all |
-| [trial.md](trial.md) | the fine tier pointed at Apache Calcite — every number from that exercise | you want the one end-to-end result on code we did not write |
+| [trial.md](trial.md) | the fine tier pointed at Apache Calcite — every number from that exercise | you want the first end-to-end result on code we did not write |
+| [trial-lucene.md](trial-lucene.md) | the same, pointed at Apache Lucene — concurrent, and the first head-to-head against a timed-wrapper profiler | you want the second, and the strongest argument for sampling we have |
 | [ideas.md](ideas.md) | things worth doing that we have not committed to | you want to know what was considered and deferred |
 | [../README.md](../README.md) | how to use it and how to run the bench | you want to run something |
 
@@ -39,3 +41,5 @@ the criteria and the five steps the first trial taught us about running one.
 | `src/main/kotlin/com/minogin/profiler/Workload.kt`, `Burn.kt`, `Bench.kt` | the bench — a workload whose true answer is known |
 | `src/main/kotlin/com/minogin/profiler/Main.kt` | the harness that runs it all and checks every claim |
 | `trial/` | the Calcite trial, in its own module so its dependencies cannot leak into the profiler |
+| `trial-lucene/` | the Lucene trial — the corpus, the wrappers that place the labels, and four instrumentation configurations to compare |
+| `trial-common/` | shared by both trials and depending on nothing but the JDK: the JFR recording and the collapsed-stack analysis |

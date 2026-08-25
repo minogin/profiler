@@ -160,6 +160,8 @@ src/main/kotlin/com/minogin/profiler/
   Sampler.kt    slots, the hook, the sampling thread
   Main.kt       orchestration, the two truths, the verdicts
 trial/          the fine tier pointed at Apache Calcite, and the harness that did it
+trial-lucene/   the same pointed at Apache Lucene: the corpus, the wrappers, four configurations
+trial-common/   shared by both trials, JDK only: the JFR recording and stack analysis
 docs/
   index.md      what each document is for — start here
   tldr.md       the whole project in plain words, for a five-minute read
@@ -167,6 +169,7 @@ docs/
   plan.md       phases and where each one stands
   findings.md   what we learned, with the measurement behind every claim
   trial.md      the trial on Apache Calcite: the finding, and where the tool got in the way
+  trial-lucene.md  the trial on Apache Lucene: concurrent, and against a timed-wrapper profiler
   case.md       where existing tools fall short, and therefore what this one is for
   ideas.md      things worth doing that are not yet decided
 ```
@@ -207,6 +210,6 @@ and JFR as an output format.
 **Constraint carried throughout:** it must not require you to hand over your thread creation. That
 ruled out an otherwise attractive optimisation, and it is why the sampler is built the way it is.
 
-See `docs/plan.md` for where things stand, `docs/trial.md` for the tool used in anger on somebody
-else's code, `docs/case.md` for the case against the existing tools built out of observed failures,
+See `docs/plan.md` for where things stand, `docs/trial.md` and `docs/trial-lucene.md` for the tool
+used in anger on somebody else's code, `docs/case.md` for the case against the existing tools built out of observed failures,
 and `docs/profiler.md` for the design and the prior art.
