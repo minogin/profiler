@@ -386,7 +386,7 @@ object Profiler {
         val stats = (0 until registeredCount()).map { id ->
             OperationStat(
                 id, nameOf(id), s.counters[id], s.sessionCalls(id), s.stuckHits[id], s.stuckInstances[id],
-                s.waitingHits[id], s.activeTicks[id],
+                s.waitingHits[id], s.stuckWaitingHits[id], s.activeTicks[id],
             )
         }
         // A label still open when the session ends is a leak by definition: nothing can close it
@@ -394,7 +394,7 @@ object Profiler {
         // operation quietly accumulating everybody else's samples — looks exactly like a finding.
         return Report(
             stats, s.counters[NO_OP_INDEX], s.ticks, s.span, duration, s.maxSlots, s.duty(), s.failure,
-            imbalances = imbalances.get(), openAtEnd = openSpans(),
+            imbalances = imbalances.get(), openAtEnd = openSpans(), stateSampled = s.sampleState,
         )
     }
 }
@@ -476,6 +476,8 @@ class OperationStat(
     val stuckInstances: Long,
     /** Hits where the owning thread was not runnable. Zero when state sampling is off. */
     val waitingHits: Long = 0,
+    /** Hits that were both long and waiting: a long execution caught with its thread parked. */
+    val stuckWaitingHits: Long = 0,
     /** Ticks at which at least one thread was inside this operation. */
     val activeTicks: Long = 0,
 ) {
@@ -518,6 +520,8 @@ class Report(
     val failure: String? = null,
     /** Times a thread was found holding a label open where the caller said it should not be. */
     val imbalances: Int = 0,
+    /** Whether each hit also recorded its thread's state. Without it the verdicts fall back. */
+    val stateSampled: Boolean = false,
     /** Threads still inside a hand-placed label when the session ended. */
     val openAtEnd: Int = 0,
 ) {
@@ -741,6 +745,43 @@ class Report(
      * which advice applies.
      */
     fun verdictFor(op: OperationStat): String {
+        // Sampled state answers this directly and per operation, so it is asked first. The
+        // aggregate below is what this had to make do with before phase 6, and it survives only as
+        // the fallback for a session that turned state sampling off.
+        if (stateSampled && op.stuckHits > 0) {
+            val waiting = op.stuckWaitingHits.toDouble() / op.stuckHits
+            return when {
+                // "Runnable", not "on a core" — the distinction is the whole known limit of this
+                // signal. A thread the scheduler preempted is still runnable, so this rules out
+                // waiting on another thread and does not rule out waiting for a core. The duty
+                // cycle above bounds that second kind, and only in aggregate.
+                waiting <= WAITING_NONE -> String.format(
+                    Locale.ROOT,
+                    "and %.1f%% of those long samples caught the thread runnable — it is not waiting on anything, " +
+                            "so the share is honest and the operation wants a coarse label for its per-execution " +
+                            "statistics (runnable is not the same as scheduled: see the duty cycle above)",
+                    (1 - waiting) * 100
+                )
+
+                // The claim the old aggregate test could never make. It is now a measurement of
+                // this operation rather than an alibi drawn from the whole run's budget.
+                waiting >= WAITING_MOSTLY -> String.format(
+                    Locale.ROOT,
+                    "and %.1f%% of those long samples caught the thread parked or blocked — it is *waiting*, " +
+                            "not working. Read this share as occupancy: it does not add up across threads the " +
+                            "way CPU does, and %s of wall clock had anyone inside it at all",
+                    waiting * 100, threadTime(elapsedNanosOf(op))
+                )
+
+                else -> String.format(
+                    Locale.ROOT,
+                    "and %.1f%% of those long samples caught the thread parked — part working, part waiting, " +
+                            "and the split is measured rather than bounded",
+                    waiting * 100
+                )
+            }
+        }
+
         val running = runningFloorOf(op)
         return when {
             running.isNaN() ->
@@ -753,16 +794,16 @@ class Report(
                 running * 100
             )
 
-            // Not "it is waiting" — that is a claim this test cannot make. The whole run's
-            // off-CPU time is a single budget and it is charged in full against every operation
-            // separately, so a small operation will always come out ambiguous however innocent it
-            // is. What the reader can act on is the size of that budget: at 4% nothing here can be
-            // mostly waiting, at 35% something is. Deciding *which* operation needs the thread's
-            // state sampled beside its label, which is phase 6.
+            // Not "it is waiting" — that is a claim this test cannot make without sampled state.
+            // The whole run's off-CPU time is a single budget and it is charged in full against
+            // every operation separately, so a small operation will always come out ambiguous
+            // however innocent it is. What the reader can act on is the size of that budget: at 4%
+            // nothing here can be mostly waiting, at 35% something is.
             else -> String.format(
                 Locale.ROOT,
-                "cannot say which: the run's whole off-CPU time is %.1f%% of occupancy, and that is enough to " +
-                        "account for all of it. Read this share as occupancy rather than as time on a core",
+                "cannot say which — state sampling is off. The run's whole off-CPU time is %.1f%% of occupancy, " +
+                        "and that is enough to account for all of it. Read this share as occupancy rather than " +
+                        "as time on a core",
                 (1 - duty.duty) * 100
             )
         }
@@ -951,6 +992,18 @@ class Report(
          * at 91%; the bench's lock operation, which does nothing but wait, comes nowhere near.
          */
         const val RUNNING_CERTAIN = 0.5
+
+        /**
+         * Below this share of waiting among an operation's long samples, it was working.
+         *
+         * Not zero, because one sample in a thousand catching a GC pause or a page fault is not
+         * the operation waiting on anything, and a verdict that hedged over it would hedge over
+         * every operation on a real machine.
+         */
+        const val WAITING_NONE = 0.05
+
+        /** Above this share, calling it waiting rather than working is the honest description. */
+        const val WAITING_MOSTLY = 0.5
     }
 }
 
@@ -1051,7 +1104,7 @@ class Sampler(
      * the cost of this has to be measurable against its own absence, and a thing that is always on
      * can only be priced by argument.
      */
-    private val sampleState: Boolean = true,
+    val sampleState: Boolean = true,
 ) : Thread("sampler") {
 
     /**
@@ -1105,6 +1158,17 @@ class Sampler(
      * threads. Separating on-a-core from preempted needs the per-thread duty cycle.
      */
     val waitingHits = LongArray(MAX_OPERATIONS)
+
+    /**
+     * Hits that were both stuck and waiting — a long execution caught with its thread parked.
+     *
+     * The pairing is the point. An operation that waits *somewhere* is not the same as one whose
+     * *long* executions are where the waiting happens, and it is the second that decides whether a
+     * flagged operation is honest-but-coarse or is occupancy masquerading as CPU. Before this the
+     * verdict had to charge the whole run's off-CPU budget against every operation separately and
+     * could only ever say "cannot say which".
+     */
+    val stuckWaitingHits = LongArray(MAX_OPERATIONS)
 
     /**
      * Ticks at which at least one thread was inside the operation — its wall-clock footprint,
@@ -1205,6 +1269,10 @@ class Sampler(
                 val c = s.getOpaque()
                 counters[if (c < 0) NO_OP_INDEX else c]++
 
+                // Carried down to the long-execution test below, so that a hit which is both long
+                // and waiting is counted as such. Knowing an operation waits somewhere is not the
+                // same as knowing its *long* executions are where the waiting is.
+                var waiting = false
                 if (c >= 0) {
                     // Once per operation per tick, not once per slot: this counts the operation's
                     // wall-clock footprint, which is the same whether one thread was inside it or
@@ -1218,7 +1286,10 @@ class Sampler(
                         // reference is null only if the thread died and the slot outlived it, in
                         // which case there is nothing to ask.
                         val t = s.thread.get()
-                        if (t != null && t.state != State.RUNNABLE) waitingHits[c]++
+                        if (t != null && t.state != State.RUNNABLE) {
+                            waiting = true
+                            waitingHits[c]++
+                        }
                     }
                 }
 
@@ -1235,6 +1306,7 @@ class Sampler(
                 val n = s.countOpaque(c)
                 if (prevOp[idx] == c && prevCount[idx] == n) {
                     stuckHits[c]++
+                    if (waiting) stuckWaitingHits[c]++
                     // Only the first tick of a run counts as an instance, so a single execution
                     // spanning ten ticks is one long execution and not ten.
                     if (!prevStuck[idx]) {

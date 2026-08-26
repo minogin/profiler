@@ -915,6 +915,40 @@ it, every non-blocking operation in the same run sits between 1.00 and 1.36 thre
 uniform schedule makes those low figures the expected answer, and the lock is the only thing in the
 run that piles threads up.
 
+### The long-execution verdict stops saying "cannot say which"
+
+The detector's advice used to be decided by charging **the whole run's off-CPU budget** against each
+operation separately, which made almost everything ambiguous by construction. It now reads the
+operation's own long-and-waiting samples, and both branches are confirmed on the workload each one
+belongs to.
+
+**Waiting — the claim the old test explicitly could not make.** Bench, contended lock:
+
+> `lockedUpdate`: 8,844 executions lasted over a tick — and **70.1% of those long samples caught the
+> thread parked or blocked — it is waiting, not working.** Read this share as occupancy: it does not
+> add up across threads the way CPU does, and 30.01 s of wall clock had anyone inside it at all.
+
+The workers' own stopwatches say 73.4% of that operation was waiting, against 70.1% among its *long*
+samples. The gap has the sign it should: a 2 ms hold always outlives a tick and so is always in the
+stuck population, while a wait shorter than a tick is not, which tilts the stuck population towards
+holders.
+
+**Working — and it took foreign code to trigger it.** Lucene, 45 s:
+
+> `clause:prefix`: 5,880 executions lasted over a tick (5.0% of its occupancy) — and **100.0% of
+> those long samples caught the thread runnable** — it is not waiting on anything, so the share is
+> honest and the operation wants a coarse label for its per-execution statistics.
+
+The bench cannot produce this case: it has exactly one operation that can be long, and that one
+blocks. An honest long operation needed a real workload, which is the same reason the Calcite trial
+existed.
+
+**The wording is "runnable", not "on a core", and the oversubscribed bench is why.** At 32 threads on
+16 cores, 59–65% of every operation's occupancy sits in executions that outlived a tick — and all
+twenty read **0.0% waiting**, correctly, because a preempted thread is `RUNNABLE`. So this signal
+rules out waiting on another thread and says nothing about waiting for a core. Claiming the second
+would contradict the duty cycle, which is the only instrument here that can bound it.
+
 ### What it costs
 
 **The slot walk goes from ~190 ns to ~284 ns per slot — about +93 ns.** Measured directly on the

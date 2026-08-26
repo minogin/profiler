@@ -1210,7 +1210,8 @@ private fun printSampler(
         operations = (0 until Profiler.registeredCount()).map { id ->
             OperationStat(
                 id, Profiler.nameOf(id), sampler.counters[id], sampler.sessionCalls(id),
-                sampler.stuckHits[id], sampler.stuckInstances[id]
+                sampler.stuckHits[id], sampler.stuckInstances[id],
+                sampler.waitingHits[id], sampler.stuckWaitingHits[id], sampler.activeTicks[id],
             )
         },
         idleHits = sampler.counters[NO_OP_INDEX],
@@ -1220,6 +1221,7 @@ private fun printSampler(
         threads = slots,
         duty = sampler.duty(),
         failure = sampler.failure,
+        stateSampled = sampler.sampleState,
     )
     printDuty(
         sampler.duty(), bench, runNanos,

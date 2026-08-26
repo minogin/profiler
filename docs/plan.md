@@ -472,6 +472,12 @@ real code is fire on operations whose measurement is perfectly honest.
    *cannot say which* and it carries the size of the budget, which is the part a reader can act on:
    3.2% on Calcite against 35.2% on the contended bench. Resolving that properly needs the thread's
    state beside the label, which is phase 6.
+   **Since resolved — phase 6's first half is built and the verdict no longer hedges.** It reads the
+   operation's own long-and-waiting samples instead of the run's aggregate budget, so it now says
+   *waiting* where it could only shrug before (`lockedUpdate`, 70.1% of its long samples parked,
+   against the workers' own 73.4%) and *working* where the old test would still have hedged
+   (Lucene's `clause:prefix`, 100.0% of its long samples runnable). The aggregate reasoning above
+   survives only as the fallback when state sampling is switched off.
 
 **Step 4 is deliberately last.** The Calcite labels sit on operations of hundreds of microseconds:
 they are not fine operations by any definition here, and yet the shares they produced agreed with
