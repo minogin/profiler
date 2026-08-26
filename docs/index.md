@@ -18,6 +18,7 @@ two trials taught us about running one.
 | [case.md](case.md) | observations of existing tools failing at something, and where they are better than us | you want to know why this exists at all |
 | [trial.md](trial.md) | the fine tier pointed at Apache Calcite — every number from that exercise | you want the first end-to-end result on code we did not write |
 | [trial-lucene.md](trial-lucene.md) | the same, pointed at Apache Lucene — concurrent, and the first head-to-head against a timed-wrapper profiler | you want the second, and the strongest argument for sampling we have |
+| [trial-netty.md](trial-netty.md) | the same pointed at Netty — event loops, and the first test of the thread-state column on foreign code | you want the third, and what a flame graph does with a handler chain |
 | [ideas.md](ideas.md) | things worth doing that we have not committed to | you want to know what was considered and deferred |
 | [../README.md](../README.md) | how to use it and how to run the bench | you want to run something |
 

@@ -24,6 +24,16 @@ fun recordExecutionSamples(periodMillis: Long): Recording {
     // Nothing is enabled by default in a bare Recording, which is what we want: only the event
     // that makes a flame graph, so the recording measures the profile and not the profiler.
     r.enable("jdk.ExecutionSample").withPeriod(Duration.ofMillis(periodMillis))
+    // To disk, with a cap far above anything a trial produces. Without this the recording keeps its
+    // events in a wrapping in-memory buffer, so a long run silently discards its early samples and
+    // the count stops growing with the run — which reads exactly like the sampler throttling and is
+    // not. Caught on the Netty trial: 1,071 samples at twenty seconds and 1,750 at sixty, against
+    // 3,887 and 12,051 once written to disk. The delivered *rate* is flat either way (194/s and
+    // 201/s), so the shares an earlier trial computed are still over a fair sample of a steady
+    // workload — but any sample *count* recorded before this fix is a floor, not the number JFR
+    // produced.
+    r.isToDisk = true
+    r.maxSize = 512L * 1024 * 1024
     r.start()
     return r
 }

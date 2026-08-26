@@ -16,3 +16,9 @@ include("trial-common")
 // class" but "which instance" — several clauses of one query, all of them TermScorer with
 // different terms behind them.
 include("trial-lucene")
+
+// The third trial: Netty, whose concurrency shape is the opposite of Lucene's — few long-lived
+// event-loop threads carrying many short tasks, and time that is mostly not CPU. It is the first
+// workload where the thread-state column has anything to say, and the first that can test whether
+// it says the wrong thing: a selector wait is native, and a thread in native code reads RUNNABLE.
+include("trial-netty")
