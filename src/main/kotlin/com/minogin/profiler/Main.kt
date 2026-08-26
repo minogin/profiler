@@ -75,6 +75,13 @@ private const val OBSERVER_TOLERANCE = 0.10
  */
 private const val DUTY_TOLERANCE_PP = 1.5
 
+/**
+ * How far the sampled waiting share may sit from the workers' own stopwatches before the check
+ * complains. Sampling error alone is a few tenths of a percent at these hit counts; the slack above
+ * that is because the two do not cover exactly the same window.
+ */
+private const val WAITING_TOLERANCE_PCT = 3.0
+
 /** How long each sweep entry re-warms before its measured run. Everything is already compiled. */
 private const val SWEEP_REWARM_NANOS = 2_000_000_000L
 
@@ -112,6 +119,10 @@ fun main(args: Array<String>) {
     // the point where it fails, so under strict rules it would stop within a second of every run
     // and measure nothing. `--strict` turns it on, which is how the stopping itself gets tested.
     val strict = opt["strict"] != null
+
+    // Whether each hit also records the owning thread's state. A switch for the same reason
+    // --labels and --sampler are: a cost that is always on can only be priced by argument.
+    val sampleState = opt["state"] != "off"
 
     // --lock=<hold micros>,<interval millis>. The one operation here that genuinely blocks, and
     // the only way anything in phase 3.5 can be checked against a known amount of waiting.
@@ -312,7 +323,9 @@ fun main(args: Array<String>) {
         bench.start()
         println("\n--- Run of $seconds s ---")
         // The sampler covers the measured run only, never the warm-up.
-        val sampler = if (sampling) Sampler((stepMillis * 1_000_000).toLong(), wait, jitter, strict = strict) else null
+        val sampler = if (sampling)
+            Sampler((stepMillis * 1_000_000).toLong(), wait, jitter, strict = strict, sampleState = sampleState)
+        else null
         val outcome = measureOnce(bench, seconds, sampler)
         printDetail(bench, outcome, sampler, stepMillis)
         // A, B and C side by side is the point of the whole exercise, so it belongs in the
@@ -1159,6 +1172,16 @@ private fun printSampler(
             achieved / 1e6, sampler.minStep / 1e6, sampler.maxStep / 1e6
         )
     )
+    // What the walk costs, per slot, so the state read can be priced against its own absence
+    // rather than argued about. Runs on the sampler's own thread, which has a core.
+    if (sampler.walkVisits > 0) println(
+        String.format(
+            Locale.ROOT, "  slot walk:      %.1f ns per slot (%.1f us per tick over %,d visits)",
+            sampler.walkNanos.toDouble() / sampler.walkVisits,
+            sampler.walkNanos.toDouble() / sampler.ticks.coerceAtLeast(1) / 1e3,
+            sampler.walkVisits
+        )
+    )
     println(
         String.format(
             Locale.ROOT, "  ticks: %,d over %.3f s, slots: %d, samples: %,d, resynced: %,d",
@@ -1204,15 +1227,30 @@ private fun printSampler(
     )
 
     printDetector(report, achieved, bench.contended, lockOpIdOf(bench), bench.stalls())
+    printWaitingCheck(sampler, bench)
 
-    println(String.format(Locale.ROOT, "\n  %-14s %14s %9s", "operation", "hits", "of total"))
+    println(
+        String.format(
+            Locale.ROOT, "\n  %-14s %14s %9s %9s %9s %8s",
+            "operation", "hits", "of total", "waiting", "elapsed", "threads"
+        )
+    )
+    val step = if (sampler.ticks > 1) sampler.span.toDouble() / (sampler.ticks - 1) else Double.NaN
     for (id in (0 until Profiler.registeredCount()).sortedByDescending { sampler.counters[it] } + listOf(NO_OP_INDEX)) {
         val hits = sampler.counters[id]
         val name = if (id == NO_OP_INDEX) "(no operation)" else Profiler.nameOf(id)
+        // NO_OP_INDEX has no entry in the per-operation arrays: nothing was inside a label, so
+        // there is no operation for the state or the footprint to belong to.
+        val waiting = if (id == NO_OP_INDEX || hits == 0L) Double.NaN
+        else sampler.waitingHits[id] * 100.0 / hits
+        val active = if (id == NO_OP_INDEX) 0L else sampler.activeTicks[id]
         println(
             String.format(
-                Locale.ROOT, "  %-14s %,14d %8.3f%%",
-                name, hits, if (samples == 0L) 0.0 else hits * 100.0 / samples
+                Locale.ROOT, "  %-14s %,14d %8.3f%% %8s %9s %8s",
+                name, hits, if (samples == 0L) 0.0 else hits * 100.0 / samples,
+                if (waiting.isNaN()) "-" else String.format(Locale.ROOT, "%.1f%%", waiting),
+                if (active == 0L) "-" else duration(active * step),
+                if (active == 0L) "-" else String.format(Locale.ROOT, "%.2f", hits.toDouble() / active),
             )
         )
     }
@@ -1485,3 +1523,62 @@ private fun warmUp(bench: Bench): Boolean {
  * chosen under.
  */
 private var FIT_CLOCK: Double = Double.NaN
+
+/**
+ * The sampled waiting share against the workers' own stopwatches — a second truth for the one
+ * quantity this bench can inject on purpose.
+ *
+ * Every thread waiting for the contended lock times its own wait with `nanoTime` and adds it to
+ * `lockWaitNanos`; the sampler independently counts hits where the slot held `lockedUpdate` and
+ * the owning thread was not runnable. The two share nothing — one is a stopwatch on the waiting
+ * thread, the other is a state read from a different thread a millisecond at a time — so agreement
+ * is evidence and disagreement is a defect in one of them.
+ *
+ * The tolerance is loose on purpose. Sampling error alone at these hit counts is a few tenths of a
+ * percent, and the two windows are not identical: the workers' figure covers the whole run while
+ * the sampler covers only the ticks it took.
+ */
+private fun printWaitingCheck(sampler: Sampler, bench: Bench) {
+    val id = lockOpIdOf(bench)
+    if (id < 0 || bench.contended == null) return
+    val s = bench.stalls()
+    if (s.lockAcquisitions == 0L) return
+
+    val step = if (sampler.ticks > 1) sampler.span.toDouble() / (sampler.ticks - 1) else return
+    val sampled = sampler.waitingHits[id] * step
+    val truth = s.lockWaitNanos.toDouble()
+    val diffPct = if (truth == 0.0) Double.NaN else abs(sampled - truth) * 100.0 / truth
+
+    println("\n--- Sampled waiting against the workers' own clocks ---")
+    println(
+        String.format(
+            Locale.ROOT,
+            "  lockedUpdate: %,d of its %,d hits caught a thread not runnable (%.1f%% of its occupancy)",
+            sampler.waitingHits[id], sampler.counters[id],
+            sampler.waitingHits[id] * 100.0 / sampler.counters[id].coerceAtLeast(1),
+        )
+    )
+    println(
+        String.format(
+            Locale.ROOT, "  sampled waiting  %.3f s   workers' own stopwatch  %.3f s   differ by %.2f%%",
+            sampled / 1e9, truth / 1e9, diffPct
+        )
+    )
+    // Every other operation in this bench is incapable of blocking, so anything above the noise
+    // floor there is the state read attributing waiting to the wrong label.
+    val worst = (0 until Profiler.registeredCount())
+        .filter { it != id && sampler.counters[it] > 0 }
+        .maxByOrNull { sampler.waitingHits[it].toDouble() / sampler.counters[it] }
+    if (worst != null) println(
+        String.format(
+            Locale.ROOT, "  worst false positive: %s at %.2f%% — nothing else here can block",
+            Profiler.nameOf(worst), sampler.waitingHits[worst] * 100.0 / sampler.counters[worst]
+        )
+    )
+    println(
+        if (diffPct <= WAITING_TOLERANCE_PCT) "  the two independent readings agree"
+        else String.format(
+            Locale.ROOT, "  THEY DISAGREE by %.2f%%, tolerance %.2f%%", diffPct, WAITING_TOLERANCE_PCT
+        )
+    )
+}

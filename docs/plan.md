@@ -22,7 +22,7 @@ words, is [tldr.md](tldr.md).
 | — | Trials 3+ — Netty, a compiler, two negative controls | **next** |
 | 4 | The coarse tier — contexts, spans, cross-tabulation | after the trials |
 | 5 | Crossing threads — propagation, and per-operation parallelism | not started |
-| 6 | Thread state and the whole-application parallelism coefficient | not started |
+| 6 | Thread state and the whole-application parallelism coefficient | **partly done** |
 | 7 | Library surface — annotations, agent, results API | not started |
 | 8 | JFR output | not started |
 
@@ -835,7 +835,39 @@ why it cannot substitute for pointing the tool at somebody else's.
 
 **What this unlocks:** per-operation parallelism becomes real rather than trivially 1.
 
-## Phase 6 — thread state and the whole-application coefficient · not started
+## Phase 6 — thread state and the whole-application coefficient · partly done
+
+### What is built · **done**
+
+The fine-tier half — thread state per operation, and per-operation concurrency. Every number in
+[findings.md](findings.md#thread-state-beside-the-label).
+
+`OpSlot` carries a **weak** reference to its thread, so the sampler can ask its state without
+pinning a thread that dies without releasing. Each tick the walk reads that state and, for a slot
+inside a label, counts the hit as waiting when the thread is not runnable; separately it stamps the
+operation as *seen this tick*, which counts ticks and not slots and so measures the operation's
+wall-clock footprint. Three columns follow: **waiting**, **elapsed**, and **threads** — the last two
+being `activeTicks × step` and `hits / activeTicks`.
+
+**Verified against a second truth that shares nothing with it.** Under the contended lock at 1.60
+utilisation, 52,422 of `lockedUpdate`'s 71,839 hits caught a thread that was not runnable — **52.483
+s of waiting against 52.482 s** summed by the waiting threads' own `nanoTime` brackets. Every other
+operation in the same run, none of which can block, read **0.00%**; and on the ordinary bench, where
+preemption takes 30% of the wall time, everything reads 0.0% too, because a preempted thread is
+`RUNNABLE` and this column is for waiting another thread caused.
+
+**What it cost:** the slot walk goes from ~190 ns to ~284 ns per slot, which at eight slots is
+0.75 µs of a 1 ms tick and does not move the achieved step. The effect on the workers could not be
+measured — this machine's throughput varies by 29% between runs of the same configuration, which is
+more than any difference between configurations. Recorded as inconclusive rather than as a number.
+
+**The scaling limit, which is new and matters:** at the 1024-slot ceiling that same per-slot cost is
+~95 µs per tick, about 10% of the step. Eight threads is free and a thousand is not — and a thousand
+slots is exactly what the virtual-thread hazard produces.
+
+### What is not built
+
+
 
 Sample the thread's state alongside the label. From that, a histogram of how often 1, 2, 3, … N
 threads were busy, and the parallelism coefficient as its mean.

@@ -476,7 +476,7 @@ recipe (record JFR over the same window, collapse the stacks, compare inclusive 
 label shares) shipped as part of the README rather than as trial code; or a mode that records both
 at once and prints them side by side, which is more use and considerably more work.
 
-## 16. Per-operation concurrency, which we already collect and throw away · open
+## 16. Per-operation concurrency, which we already collect and throw away · promoted
 
 Each tick photographs every thread at one instant, so it already knows *how many* threads were
 inside operation X at that moment. Today that is summed into occupancy and the distribution is

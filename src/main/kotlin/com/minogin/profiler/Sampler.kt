@@ -96,6 +96,22 @@ class OpSlot(
     @JvmField
     val threadId: Long = Thread.currentThread().threadId()
 
+    /**
+     * The owning thread, weakly, so the sampler can ask what state it is in.
+     *
+     * Weak and not strong. [threadId] exists because a strong reference would keep a dead thread
+     * and everything it held reachable for as long as the slot lived, and that reasoning has not
+     * changed — `release()` is called by hand, so a thread that dies without releasing would pin
+     * itself forever, which is exactly the leak the virtual-thread hazard already describes. A weak
+     * reference costs the sampler one indirection per slot per tick and cannot leak at all. The
+     * sampler has a core; the process does not have spare heap.
+     *
+     * Written once at construction on the owning thread, so nothing here reaches the hot path.
+     */
+    @JvmField
+    val thread: java.lang.ref.WeakReference<Thread> =
+        java.lang.ref.WeakReference(Thread.currentThread())
+
     @JvmField var p1: Long = 0
     @JvmField var p2: Long = 0
     @JvmField var p3: Long = 0
@@ -353,10 +369,11 @@ object Profiler {
         wait: WaitStrategy = WaitStrategy.SPIN,
         jitter: Double = 0.25,
         strict: Boolean = true,
+        sampleState: Boolean = true,
     ) {
         check(sampler == null) { "already sampling" }
         startedAt = System.nanoTime()
-        sampler = Sampler((stepMillis * 1_000_000).toLong(), wait, jitter, strict = strict)
+        sampler = Sampler((stepMillis * 1_000_000).toLong(), wait, jitter, strict = strict, sampleState = sampleState)
             .also { it.start() }
     }
 
@@ -367,7 +384,10 @@ object Profiler {
         sampler = null
         val duration = System.nanoTime() - startedAt
         val stats = (0 until registeredCount()).map { id ->
-            OperationStat(id, nameOf(id), s.counters[id], s.sessionCalls(id), s.stuckHits[id], s.stuckInstances[id])
+            OperationStat(
+                id, nameOf(id), s.counters[id], s.sessionCalls(id), s.stuckHits[id], s.stuckInstances[id],
+                s.waitingHits[id], s.activeTicks[id],
+            )
         }
         // A label still open when the session ends is a leak by definition: nothing can close it
         // now. Counted here rather than left to the user to notice, because the symptom — one
@@ -454,9 +474,25 @@ class OperationStat(
     val stuckHits: Long,
     /** How many distinct executions those hits represent. */
     val stuckInstances: Long,
+    /** Hits where the owning thread was not runnable. Zero when state sampling is off. */
+    val waitingHits: Long = 0,
+    /** Ticks at which at least one thread was inside this operation. */
+    val activeTicks: Long = 0,
 ) {
     /** The fraction of this operation's occupancy spent inside executions longer than a tick. */
     val stuckShare: Double get() = if (hits == 0L) 0.0 else stuckHits.toDouble() / hits
+
+    /** The fraction of this operation's occupancy where its thread was parked, blocked or waiting. */
+    val waitingShare: Double get() = if (hits == 0L) 0.0 else waitingHits.toDouble() / hits
+
+    /**
+     * Threads inside this operation at once, averaged over the ticks where it was running at all.
+     *
+     * The divisor that turns occupancy into elapsed time, and a diagnosis in its own right: the
+     * same hundred thread-seconds of waiting is a convoy at fifteen threads and mild persistent
+     * contention at 1.7, and the two want opposite fixes.
+     */
+    val concurrency: Double get() = if (activeTicks == 0L) Double.NaN else hits.toDouble() / activeTicks
 }
 
 /**
@@ -526,6 +562,23 @@ class Report(
      * A misplaced label is invisible in the share column and obvious in this one.
      */
     fun occupancyNanosOf(op: OperationStat): Double = op.hits * stepNanos
+
+    /**
+     * How much *wall clock* had at least one thread inside this operation — as against
+     * [occupancyNanosOf], which sums across threads.
+     *
+     * The distinction is the whole point and it only matters when threads wait. Eight threads
+     * computing for five seconds is forty thread-seconds of occupancy and the sum is real: on one
+     * thread it would genuinely take forty seconds. A hundred threads parked one second on one lock
+     * is also a hundred thread-seconds, and there the sum is fiction — the clock advanced one
+     * second and removing the lock would save one second, not a hundred. Elapsed is the number that
+     * says so, and it costs one counter per operation.
+     *
+     * It is not latency: it is the union of every execution's interval, so it says the operation had
+     * *somebody* inside it for this long and nothing about any single execution. And it is not a
+     * counterfactual — see the warning at the foot of the report.
+     */
+    fun elapsedNanosOf(op: OperationStat): Double = op.activeTicks * stepNanos
 
     /** Thread-time spent inside any label. */
     val labelledNanos: Double get() = labelledHits * stepNanos
@@ -718,14 +771,14 @@ class Report(
     fun render(): String = buildString {
         val achieved = if (ticks > 1) samplingSpanNanos.toDouble() / (ticks - 1) / 1e6 else Double.NaN
         if (failure != null) {
-            appendLine("!".repeat(102))
+            appendLine("!".repeat(WIDTH))
             appendLine("PROFILING STOPPED — this label could not have produced a correct number:")
             appendLine("  $failure")
             appendLine("Everything below is what led to that verdict, not a result. Pass strict=false to")
             appendLine("profile anyway, which is what to do when the code is not yours to change.")
-            appendLine("!".repeat(102))
+            appendLine("!".repeat(WIDTH))
         }
-        appendLine("=".repeat(102))
+        appendLine("=".repeat(WIDTH))
         appendLine(
             String.format(
                 Locale.ROOT, "%,d labelled samples over %.1f s, %,d ticks at %.3f ms, %d threads",
@@ -747,14 +800,15 @@ class Report(
         // The bound belongs beside the sampling rate, not in a footnote: both say how much the
         // numbers below are worth, one against chance and one against stalling.
         for (l in duty.lines(labelledHits.toDouble() / (labelledHits + idleHits).coerceAtLeast(1))) appendLine(l)
-        appendLine("=".repeat(102))
+        appendLine("=".repeat(WIDTH))
         appendLine(
             String.format(
-                Locale.ROOT, "%-28s %9s %10s %14s %9s %7s %11s %7s",
-                "operation", "share", "occupancy", "calls", "hits", "noise", "implied/call", "over 1 tick"
+                Locale.ROOT, "%-26s %8s %10s %8s %9s %7s %13s %8s %6s %10s %7s",
+                "operation", "share", "occupancy", "waiting", "elapsed", "threads",
+                "calls", "hits", "noise", "impl/call", "over 1t"
             )
         )
-        appendLine("-".repeat(102))
+        appendLine("-".repeat(WIDTH))
         // Operations the sampler never caught are folded away rather than printed as a screen of
         // zeroes — Calcite's report carried twenty-five rules at 0.000%. Folded, not dropped: the
         // count says how many there were, and a *called* operation with no samples is a real
@@ -763,13 +817,15 @@ class Report(
         for (op in seen.sortedByDescending { it.hits }) {
             appendLine(
                 String.format(
-                    Locale.ROOT, "%-28s %8.3f%% %10s %,14d %9d %6.2f%% %11s %6.2f%%",
-                    op.name, shareOf(op) * 100, threadTime(occupancyNanosOf(op)), op.calls, op.hits,
-                    noiseFloorOf(op) * 100, duration(impliedNanosOf(op)), op.stuckShare * 100
+                    Locale.ROOT, "%-26s %7.3f%% %10s %7.1f%% %9s %7.2f %,13d %8d %5.2f%% %10s %6.2f%%",
+                    op.name, shareOf(op) * 100, threadTime(occupancyNanosOf(op)),
+                    op.waitingShare * 100, threadTime(elapsedNanosOf(op)), op.concurrency,
+                    op.calls, op.hits, noiseFloorOf(op) * 100,
+                    duration(impliedNanosOf(op)), op.stuckShare * 100
                 )
             )
         }
-        appendLine("-".repeat(102))
+        appendLine("-".repeat(WIDTH))
         if (unseen.isNotEmpty()) {
             val called = unseen.filter { it.calls > 0 }
             appendLine(
@@ -783,6 +839,12 @@ class Report(
         appendLine("share is of labelled samples and is occupancy, not CPU — the duty cycle above bounds the gap")
         appendLine("occupancy is hits x step as thread-time: absolute, so unlike share it does not move when a")
         appendLine("  label is added, moved or removed — which makes it the column to compare between two runs")
+        appendLine("waiting is the share of those samples whose thread was parked, blocked or waiting; a thread")
+        appendLine("  the scheduler merely preempted still reads runnable, so this is waiting on another thread")
+        appendLine("elapsed is wall clock with at least one thread inside, and threads is occupancy / elapsed —")
+        appendLine("  occupancy sums across threads and elapsed does not, so 100 s of waiting is a convoy to be")
+        appendLine("  broken up at 15 threads and steady contention to be designed out at 1.7. Not latency: it")
+        appendLine("  is every execution's interval unioned, so it says nothing about any single one of them")
         appendLine("noise is 1/sqrt(hits), the error chance alone gives")
         appendLine(
             String.format(
@@ -819,7 +881,7 @@ class Report(
         // A leaked label does not look like an error. It looks like a finding: one operation
         // quietly accumulating everybody else's samples, with a plausible number beside it.
         if (imbalances > 0 || openAtEnd > 0) {
-            appendLine("-".repeat(102))
+            appendLine("-".repeat(WIDTH))
             if (imbalances > 0) appendLine(
                 "! $imbalances labels were still open at a point the caller said should be quiescent — " +
                         "everything after each leak was billed to the leaked operation"
@@ -830,7 +892,7 @@ class Report(
             )
             appendLine("  a label placed with enter/exit has no finally: a body that throws leaves it set")
         }
-        appendLine("-".repeat(102))
+        appendLine("-".repeat(WIDTH))
         // Said in the output rather than in a document, because the one time it mattered it was
         // worth a factor of 275 and nothing on the screen hinted at it.
         appendLine("A share is where time went. It is not what removing the operation would save:")
@@ -870,6 +932,9 @@ class Report(
          * C2 will shuffle work across the boundaries of adjacent short labels altogether.
          */
         const val FLOOR_NANOS = 50.0
+
+        /** How wide the report's rules and column layout are. */
+        const val WIDTH = 126
 
         /** The short-operation bias, so the check cannot accuse an operation of the sampler's own error. */
         const val FLOOR_BIAS_ALLOWANCE = 1.2
@@ -979,6 +1044,14 @@ class Sampler(
      * Off for code you do not own and cannot resize.
      */
     private val strict: Boolean = true,
+    /**
+     * Whether each hit also records whether the owning thread was runnable.
+     *
+     * A switch and not a constant, for the same reason `--labels` and `--sampler` are separate:
+     * the cost of this has to be measurable against its own absence, and a thing that is always on
+     * can only be priced by argument.
+     */
+    private val sampleState: Boolean = true,
 ) : Thread("sampler") {
 
     /**
@@ -1022,6 +1095,38 @@ class Sampler(
     val stuckInstances = LongArray(MAX_OPERATIONS)
 
     /**
+     * Of those hits, the ones where the owning thread was **not** runnable — parked, blocked, or
+     * waiting. Zero everywhere when [sampleState] is off.
+     *
+     * `RUNNABLE` is not the same as *on a core*: it also covers a thread the scheduler has
+     * preempted — 14–18% of wall time on this machine even on a bench that never blocks — and a
+     * thread sitting in a blocking socket read, which the JVM cannot see into. So this counts
+     * waiting that some *other thread* caused, which is the kind that does not add up across
+     * threads. Separating on-a-core from preempted needs the per-thread duty cycle.
+     */
+    val waitingHits = LongArray(MAX_OPERATIONS)
+
+    /**
+     * Ticks at which at least one thread was inside the operation — its wall-clock footprint,
+     * counted once however many threads were in it.
+     *
+     * This is the divisor that turns summed occupancy back into elapsed time. Occupancy alone
+     * cannot distinguish a hundred threads waiting one second from one thread waiting a hundred
+     * seconds; both are a hundred thread-seconds and their real costs are a hundredfold apart.
+     * `activeTicks × step` is the first, `hits / activeTicks` is the mean concurrency that
+     * separates them, and on a contended lock that is the difference between *break up the convoy*
+     * and *design the contention out*. See profiler.md, "Turning occupancy back into wall time".
+     */
+    val activeTicks = LongArray(MAX_OPERATIONS)
+
+    /**
+     * The tick at which each operation was last seen, so [activeTicks] counts ticks and not slots.
+     * A stamp rather than a flag array cleared each tick: one write when an operation first appears
+     * in a tick, and nothing at all for the operations that did not.
+     */
+    private val seenAt = LongArray(MAX_OPERATIONS) { -1L }
+
+    /**
      * What the last tick found in each slot, kept on this side of the fence.
      *
      * The test is two words against two words. If a slot holds the same operation as last tick
@@ -1045,6 +1150,16 @@ class Sampler(
 
     /** Most slots seen at any one tick. Read after the fact, when the threads may already be gone. */
     var maxSlots: Int = 0; private set
+
+    /**
+     * Time spent in the slot walk itself, and how many slot visits that covers, so the walk can be
+     * priced per slot with state sampling on and off.
+     *
+     * Two `nanoTime` calls per tick on a thread that has a core — about 40 ns against a millisecond,
+     * and it is the only way this feature's cost can be a number rather than an argument.
+     */
+    var walkNanos: Long = 0; private set
+    var walkVisits: Long = 0; private set
 
     @Volatile private var running = true
 
@@ -1085,9 +1200,27 @@ class Sampler(
             if (!running) break
             val now = System.nanoTime()
 
+            val walkStart = System.nanoTime()
             for (s in slots) {
                 val c = s.getOpaque()
                 counters[if (c < 0) NO_OP_INDEX else c]++
+
+                if (c >= 0) {
+                    // Once per operation per tick, not once per slot: this counts the operation's
+                    // wall-clock footprint, which is the same whether one thread was inside it or
+                    // sixteen.
+                    if (seenAt[c] != ticks) {
+                        seenAt[c] = ticks
+                        activeTicks[c]++
+                    }
+                    if (sampleState) {
+                        // A field read on the Thread object — no handshake, no safepoint. The weak
+                        // reference is null only if the thread died and the slot outlived it, in
+                        // which case there is nothing to ask.
+                        val t = s.thread.get()
+                        if (t != null && t.state != State.RUNNABLE) waitingHits[c]++
+                    }
+                }
 
                 val idx = s.index
                 if (idx < 0) continue           // past the ceiling: sampled, but not tracked
@@ -1114,6 +1247,8 @@ class Sampler(
                 prevOp[idx] = c
                 prevCount[idx] = n
             }
+            walkNanos += System.nanoTime() - walkStart
+            walkVisits += slots.size
             if (slots.size > maxSlots) maxSlots = slots.size
             ticks++
             // Self-throttling: these return immediately on all but one tick in a thousand.

@@ -887,6 +887,75 @@ run.** A 20 ns label is 20 ns on every machine and every rerun, so there is no r
 fine. A label that outlives a tick may be perfectly measured, and on the only real workload this
 project has ever pointed at, it was.
 
+## Thread state beside the label
+
+**The sampled waiting share and the workers' own stopwatches agree to 0.00%.** The bench's
+contended lock at 2 ms held every 10 ms per thread — 1.60 lock utilisation at 8 threads, so the
+queue never drains — gives `lockedUpdate` 71,839 hits of which **52,422 caught a thread that was not
+runnable**. At the achieved step that is **52.483 s of waiting**, against **52.482 s** summed by the
+waiting threads' own `nanoTime` brackets. The two share nothing: one is a stopwatch on the thread
+doing the waiting, the other is a state read taken from a different thread a millisecond at a time.
+
+**And no false positives.** The other twenty operations in the same run cannot block by
+construction, and every one of them read **0.00%**. That is the half of the check that matters more
+than the agreement, because a state read that attributed waiting to the wrong label would still
+have produced a plausible total.
+
+**A thread the scheduler merely preempted correctly does not count as waiting.** On the ordinary
+bench — which never blocks and which the duty cycle nonetheless reads at 66–71% because of
+preemption — every operation reads 0.0% waiting. `RUNNABLE` covers a preempted thread, and that is
+the intended behaviour rather than a gap: what this column measures is waiting *another thread*
+caused, which is the kind that does not add up when occupancy is summed. Preemption is the duty
+cycle's business and is already bounded there.
+
+**Occupancy divided by elapsed recovers the concurrency, and it separates the two contention
+shapes.** Same run: `lockedUpdate` holds 71.8 s of occupancy over **20.0 s of elapsed** — the whole
+run, since at 1.6 utilisation the lock is never free — at **3.75 threads** inside on average. Against
+it, every non-blocking operation in the same run sits between 1.00 and 1.36 threads. The bench's
+uniform schedule makes those low figures the expected answer, and the lock is the only thing in the
+run that piles threads up.
+
+### What it costs
+
+**The slot walk goes from ~190 ns to ~284 ns per slot — about +93 ns.** Measured directly on the
+sampler thread, `--state=off` against `--state=on`, ABBA-interleaved over four 15-second runs:
+
+| | per slot |
+|---|---|
+| off | 163.4 ns, 217.7 ns |
+| on | 268.6 ns, 299.2 ns |
+
+The ranges do not overlap, which is what makes this the conclusive half of the measurement. **At
+eight slots that is 0.75 µs added to a 1 ms tick — under 0.1% of the sampler's budget**, and the
+punctuality is untouched: the achieved step is 1.002–1.004 ms in both arms with 0–2 resyncs in both,
+and the one 27 ms outlier tick occurs once in each arm, so it is the machine and not the feature.
+
+**Ninety-three nanoseconds is a lot for a field read, and the likely reason is that it is not one.**
+`WeakReference.get()` followed by `Thread.getState()` is a chain of dependent loads — reference,
+thread, field holder, status word — none of them in the sampler's cache, since the sampler touches
+each thread's object once a millisecond and nothing else. That would make this memory latency rather
+than work. *Not verified*: it is the explanation that fits, and separating it from the weak
+reference's own read barrier would need a variant with a strong reference to compare against.
+
+**The scaling limit follows from the same number, and it is worth recording before anyone meets it.**
+At the `MAX_SLOTS` ceiling of 1024 the walk would add roughly **95 µs per tick, about 10% of a 1 ms
+step**. Eight threads is free; a thousand is not, and a thousand slots is exactly what the virtual
+thread hazard produces.
+
+**The effect on the workers could not be measured — the machine moves by more than the effect.**
+Over the same four runs, root calls per 15 s came out 234.4 M and 302.4 M with state on, against
+311.6 M and 274.0 M with it off. The spread *within* one configuration is 29%, larger than any
+difference between them, so this says nothing and is recorded as saying nothing. It is the same
+wall phase 3 hit on the hook's own throughput comparison, and for the same reason. What would settle
+it is interleaving the two configurations inside one JVM rather than across four, which the bench
+cannot currently do for this switch.
+
+There is a reason to expect the worker cost to be near zero regardless, and it should be treated as
+an argument rather than a result: the sampler reads the thread's status word, which the JVM writes
+only on a state *transition*. A compute-bound worker never transitions, so there is nothing for the
+read to contend with. A worker parking and unparking thousands of times a second does transition,
+and that is the configuration where a cost would show up if there is one.
+
 ## Statistics
 
 **Percentage points cannot separate noise from bias.** Divergence falls as `1/√N` whether the
