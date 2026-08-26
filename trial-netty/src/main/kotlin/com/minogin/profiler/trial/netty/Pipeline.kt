@@ -1,5 +1,6 @@
 package com.minogin.profiler.trial.netty
 
+import com.minogin.profiler.op
 import io.netty.buffer.Unpooled
 import io.netty.channel.ChannelHandlerContext
 import io.netty.channel.SimpleChannelInboundHandler
@@ -26,12 +27,28 @@ class Exchange(val request: FullHttpRequest) {
 }
 
 /**
+ * Where every label in this pipeline goes, and the one decision that matters about it.
+ *
+ * The label wraps the handler's **own work** and never the `fireChannelRead` below it. A stack gives
+ * inclusive time, and on a chain inclusive time contains every later handler — which is why
+ * qualification found a dozen frames between 82% and 99% and none of them meaning anything. Self
+ * time per handler is the number that was missing, and wrapping only `run` is what produces it.
+ *
+ * The `opId >= 0` branch is how the unlabelled configuration is measured against this one. It is a
+ * final field on an object that lives for the connection, so it predicts perfectly and the two
+ * configurations differ by a hook rather than by a branch.
+ */
+private inline fun labelled(opId: Int, body: () -> Unit) {
+    if (opId >= 0) op(opId) { body() } else body()
+}
+
+/**
  * A policy in the chain — and the reason this trial exists in the shape it does.
  *
- * There are several of these in the pipeline and **they are all the same class**. A flame graph sees
- * `PolicyHandler.channelRead` once, with everybody's time in it, exactly as Lucene's four
- * `TermQuery` clauses shared `TermScorer`. The difference the domain cares about is which *policy*,
- * and the stack does not have it.
+ * There are four of these in the pipeline and **they are all the same class**. A flame graph sees
+ * `PolicyHandler.run` once, with everybody's time in it — measured at 60.30% for the four together,
+ * exactly as Lucene's four `TermQuery` clauses shared `TermScorer`. The difference the domain cares
+ * about is *which policy*, and the stack does not have it.
  *
  * This is not a contrivance: a chain of configured policy objects sharing one implementation is how
  * gateways, filter chains and rule engines are ordinarily written.
@@ -42,13 +59,20 @@ class PolicyHandler(
     private val header: String,
     /** How many of the request's bytes it hashes before deciding — the policy's real cost. */
     private val depth: Int,
+    /**
+     * The label for this policy, or -1 when the trial runs unlabelled.
+     *
+     * Passed in at construction rather than assigned per object. Netty builds a fresh pipeline for
+     * every connection, so with sixteen connections there are sixteen `PolicyHandler` instances per
+     * policy — the id belongs to the *policy*, and all sixteen share it. Getting this wrong would
+     * produce sixteen labels reading a sixteenth each, which is the sort of thing that looks like a
+     * finding.
+     */
+    @JvmField val opId: Int,
 ) : SimpleChannelInboundHandler<Exchange>(false) {
 
-    /** Set by the trial when labels are placed. -1 means no label. */
-    @JvmField var opId: Int = -1
-
     override fun channelRead0(ctx: ChannelHandlerContext, ex: Exchange) {
-        run(ex)
+        labelled(opId) { run(ex) }
         ctx.fireChannelRead(ex)
     }
 
@@ -80,14 +104,12 @@ class PolicyHandler(
  *
  * A flame graph *can* name these — they are their own frames — and the point of including them is
  * to show which parts of a pipeline the existing tools already answer. Whatever the labels add here
- * is not a difference the tool invented, and [case.md](../../../../../../../docs/case.md) keeps an
- * honest section on exactly that.
+ * is not a difference the tool invented, and case.md keeps an honest section on exactly that.
  */
-class AuthHandler : SimpleChannelInboundHandler<Exchange>(false) {
-    @JvmField var opId: Int = -1
+class AuthHandler(@JvmField val opId: Int) : SimpleChannelInboundHandler<Exchange>(false) {
 
     override fun channelRead0(ctx: ChannelHandlerContext, ex: Exchange) {
-        run(ex)
+        labelled(opId) { run(ex) }
         ctx.fireChannelRead(ex)
     }
 
@@ -110,11 +132,10 @@ class AuthHandler : SimpleChannelInboundHandler<Exchange>(false) {
 }
 
 /** Distinct class: turns a path into a route name. The other half of the control. */
-class RouteHandler : SimpleChannelInboundHandler<Exchange>(false) {
-    @JvmField var opId: Int = -1
+class RouteHandler(@JvmField val opId: Int) : SimpleChannelInboundHandler<Exchange>(false) {
 
     override fun channelRead0(ctx: ChannelHandlerContext, ex: Exchange) {
-        run(ex)
+        labelled(opId) { run(ex) }
         ctx.fireChannelRead(ex)
     }
 
@@ -139,12 +160,19 @@ class RouteHandler : SimpleChannelInboundHandler<Exchange>(false) {
     }
 }
 
-/** Terminal handler: builds and writes the response. Distinct class, so nameable from a stack. */
-class RenderHandler : SimpleChannelInboundHandler<Exchange>(false) {
-    @JvmField var opId: Int = -1
+/**
+ * Terminal handler: builds and writes the response. Distinct class, so nameable from a stack.
+ *
+ * The label covers building the response and **not** `writeAndFlush`, which hands the buffer to
+ * Netty's outbound chain and the socket. Where that boundary sits is a judgement, and it is the one
+ * place in this pipeline where the label could reasonably have been drawn elsewhere: putting it
+ * around the write as well would bill the socket to this handler.
+ */
+class RenderHandler(@JvmField val opId: Int) : SimpleChannelInboundHandler<Exchange>(false) {
 
     override fun channelRead0(ctx: ChannelHandlerContext, ex: Exchange) {
-        val response = run(ex)
+        var response: DefaultFullHttpResponse? = null
+        labelled(opId) { response = run(ex) }
         ex.request.release()
         ctx.writeAndFlush(response)
     }

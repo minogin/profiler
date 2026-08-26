@@ -949,6 +949,33 @@ twenty read **0.0% waiting**, correctly, because a preempted thread is `RUNNABLE
 rules out waiting on another thread and says nothing about waiting for a core. Claiming the second
 would contradict the duty cycle, which is the only instrument here that can bound it.
 
+### The column is blind to native waiting, and an event loop is native waiting
+
+**Measured on Netty: about 61 seconds off the CPU, and the thread-state column reports zero
+milliseconds of it.** A 45-second run on four event loops, 180.00 s of thread-time observed:
+
+| | |
+|---|---|
+| unlabelled thread-time | 154.31 s |
+| …of which a thread was **not runnable** | **0.0 ms (0.0%)** |
+| duty cycle over the same run | 65.85% on CPU — so roughly **61 s off it** |
+
+The mechanism was predicted in writing before the run. `Thread.getState()` reports `RUNNABLE` for a
+thread inside a native call, and an event loop parked in `epoll_wait` or `WSAPoll` is inside a
+native call. Java thread state cannot see through the JNI boundary, so it is not that the column is
+imprecise here — it is blind, on the workload shape it was built for.
+
+**What this settles about the two instruments**, which phase 3.5 argued and could not demonstrate:
+they are two different quantities and each is blind where the other sees.
+
+| | catches | misses |
+|---|---|---|
+| thread state, per operation | waiting another *thread* caused — a lock, a monitor, a park | native I/O waits; scheduler preemption |
+| duty cycle, aggregate only | everything not on a CPU, both of the above included | which operation it belonged to |
+
+61 s in one column and 0 ms in the other, same run, is as strong a demonstration as that argument
+will ever get. It is not a case for extending the state read: the JVM does not know either.
+
 ### What it costs
 
 **The slot walk goes from ~190 ns to ~284 ns per slot — about +93 ns.** Measured directly on the

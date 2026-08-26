@@ -6,7 +6,8 @@ flat out. Netty gives a handful of long-lived event loops carrying many short ta
 is mostly not CPU — which is the first foreign workload where the thread-state column built in
 phase 6 has anything to say, and the first that can show it saying the wrong thing.
 
-Harness: [`trial-netty/`](../trial-netty). Status: **qualified, not yet instrumented.**
+Harness: [`trial-netty/`](../trial-netty). Status: **labelled and measured; the A/B against the bare
+workload is still outstanding.**
 
 ---
 
@@ -128,20 +129,116 @@ Worth stating plainly because the discipline is the point: the run that looked l
 another tool was an indictment of our harness, and the only reason it was caught is that
 "three times the run for 1.6× the samples" is not a shape a fixed period can produce.
 
-## 4. What comes next
+## 4. The labels, and the number the flame graph could not give
 
-Not started. In order:
+One label per handler, placed inside the handler's own body — no wrappers, no `enter`/`exit`, the
+plain lexical form, because in Netty the extension point *is* our code. The label covers the
+handler's own work and **not** the `fireChannelRead` below it, which is what turns an inclusive
+number into a self number.
 
-1. **Place the labels**, one per policy instance plus the three distinct handlers, in the handler
-   bodies — which are ours to wrap, so this should be the lexical form as it was on Lucene.
-2. **Check the wrapper did not change the workload.** Netty's pipeline has fast paths of its own and
-   the Lucene rule applies: a flame graph over the inert instrumentation against one over the bare
-   code, comparing end-to-end throughput and not summed occupancy.
-3. **The question this trial exists for:** what the thread-state column says about event loops. The
-   prediction, recorded before running it, is that it reads **0% waiting** — a selector wait happens
-   in native code and a thread in native code reports `RUNNABLE`. If that holds, the column is blind
-   to precisely the workload shape it was built for, and that belongs in
-   [findings.md](findings.md#thread-state-beside-the-label) as a limit rather than being discovered
-   later by a user.
-4. **Per-operation concurrency** has its first foreign test here too: four event loops, so a
-   handler's `threads` column should sit near the number of loops actually carrying traffic.
+45 s, 7.0 M requests, 156,254 req/s, 26.0 s of labelled occupancy.
+
+| operation | share | occupancy | per call | bytes it hashes |
+|---|---|---|---|---|
+| `policy:abuse` | **62.169%** | 16.17 s | 2.3 µs | 1,024 |
+| `policy:quota` | **20.052%** | 5.22 s | 743.9 ns | 256 |
+| `render` | 7.498% | 1.95 s | 278.2 ns | — |
+| `policy:experiment` | **4.836%** | 1.26 s | 179.4 ns | 48 |
+| `policy:geo` | **3.366%** | 875.7 ms | 124.9 ns | 24 |
+| `auth` | 1.216% | 316.2 ms | 45.1 ns | — |
+| `route` | 0.862% | 224.2 ms | 32.0 ns | — |
+
+**The flame graph's one number was 60.30%.** It is four numbers, and they span **18×** — from 2.3 µs
+down to 125 ns. Every request pays all four, so a reader given the 60% has no way to know that one
+policy is most of it and two of them together are under a tenth.
+
+Reproducible: across two runs the shares moved 61.6→62.2, 19.9→20.1, 5.2→4.8, 3.6→3.4.
+
+### The configuration predicts the measurement, to 6.7%
+
+The strongest check available here, and the profiler knows nothing about it. Each policy hashes a
+configured number of bytes, so cost per call should be a straight line: a fixed cost plus a rate per
+byte. Fitted on the four measured durations:
+
+> **57.2 ns fixed + 3.067 ns per byte hashed**
+
+| policy | effective bytes | measured | predicted | error |
+|---|---|---|---|---|
+| `policy:geo` | 24 | 140.1 ns | 130.8 ns | **+6.7%** |
+| `policy:experiment` | 48 | 193.7 ns | 204.4 ns | −5.5% |
+| `policy:quota` | 248 | 819.0 ns | 817.7 ns | +0.2% |
+| `policy:abuse` | 800 | 2510.5 ns | 2510.5 ns | −0.0% |
+
+Two parameters against four measurements, worst residual **6.7%**. The effective byte count is not
+the configured one: bodies run 128–2,048 bytes and a policy hashes `min(depth, body)`, so the
+1,024-byte policy really averages 800. Using the configured figure would have made the fit look
+worse, and that would have been our arithmetic rather than the tool's.
+
+This is the Calcite and Lucene cross-check in a third form. There we compared against another
+profiler; here the workload's own configuration is the second opinion.
+
+### The floor check earned its place, on a real label
+
+> `route`: 7,011,646 calls at under 41.0 ns each, below the 50 ns floor.
+
+Correct, and it is a label a reasonable person would place. Route lookup is a scan of eight short
+strings and it genuinely is that cheap. Under `strict` this would have stopped the run — which is
+the behaviour [ideas.md](ideas.md) item 12 now proposes to downgrade to a warning, and this is a
+second instance of the case that argues for it.
+
+## 5. What the thread-state column says about event loops — the prediction, and it was right
+
+Recorded in this document before the run: *the waiting column will read 0%, because a selector wait
+happens in native code and a thread in native code reports `RUNNABLE`.*
+
+It reads 0.0% on **every** labelled operation, which is unremarkable — the handlers are pure
+computation and genuinely never wait. The finding is in the other 85%:
+
+> labels cover 26.0 s of the 180.00 s of thread-time observed (14.5%); 154.31 s was outside every
+> label
+>
+> **of that unlabelled time, 0.0 ms was a thread not runnable (0.0%)** and 154.31 s was a thread
+> runnable with no label on it
+>
+> threads were on CPU **65.85%** of sampled wall time
+
+Put together: **about 61 seconds of this run was not on a CPU, and the thread-state column reports
+zero milliseconds of waiting.** Not a small discrepancy — total blindness, on the workload shape the
+column was built for.
+
+The mechanism is exactly as predicted. `Thread.getState()` reports `RUNNABLE` for a thread inside a
+native call, and an event loop parked in `epoll_wait`/`WSAPoll` is inside a native call. Java's
+thread state cannot see through the JNI boundary.
+
+**What this settles about the two instruments.** They are not two views of one quantity, they are
+two different quantities, and each is blind where the other sees:
+
+| | catches | misses |
+|---|---|---|
+| **thread state**, per operation | waiting another *thread* caused — a lock, a monitor, a park | native I/O waits; the scheduler preempting you |
+| **duty cycle**, aggregate only | everything that is not on a CPU, including both of those | which operation it belonged to |
+
+Neither is sufficient and neither is redundant, which was argued in phase 3.5 and is now
+demonstrated on foreign code by the strongest possible case: 61 s in one column and 0 ms in the
+other, for the same run.
+
+**What it does not mean.** It is not an argument for extending the state read — there is nothing to
+extend it with, since the JVM does not know either. It is an argument for the report saying which
+kind of waiting it is talking about, and for the duty cycle not being treated as a legacy number now
+that a per-operation column exists.
+
+### And per-operation concurrency, on its first foreign workload
+
+Every handler reads **1.00–1.14 threads** inside it at once, against four event loops. That is the
+right answer and it is worth stating: the loops are independent, each at a different point in the
+pipeline at any instant, so a given handler almost never has two loops in it simultaneously. A
+number near 4 would have meant the loops were marching in lockstep, which would be a finding.
+
+## 6. What comes next
+
+1. **The A/B against the uninstrumented workload.** Not yet run. The Lucene rule applies — compare
+   end-to-end throughput, three ways, and never summed occupancy.
+2. **Whether the 59% self-time leaf is safepoint bias**, from section 2. Still open.
+3. **Coverage is 14.5%**, and most of the rest is Netty's own HTTP codec. Whether labels belong on
+   somebody else's codec is a real question about what this tool is for, and it is the same question
+   the Calcite fork ([ideas.md](ideas.md) item 3) asks from the other end.

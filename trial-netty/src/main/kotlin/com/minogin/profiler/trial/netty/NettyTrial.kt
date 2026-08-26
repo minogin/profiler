@@ -21,6 +21,7 @@ import io.netty.handler.codec.http.HttpMethod
 import io.netty.handler.codec.http.HttpObjectAggregator
 import io.netty.handler.codec.http.HttpServerCodec
 import io.netty.handler.codec.http.HttpVersion
+import com.minogin.profiler.Profiler
 import com.minogin.profiler.trial.analyzeJfr
 import com.minogin.profiler.trial.recordExecutionSamples
 import java.net.InetSocketAddress
@@ -49,12 +50,34 @@ private val POLICIES = arrayOf(
     Triple("policy:experiment", "X-Exp", 48),
 )
 
-class Server(private val threads: Int, val labelled: Boolean) {
+/**
+ * The label ids, resolved once for the whole server.
+ *
+ * Netty builds a fresh pipeline per connection, so sixteen connections give sixteen handler objects
+ * per stage. All of them must share one id: an id per *object* would split one policy across
+ * sixteen labels reading a sixteenth each, and sixteen small rows look like a finding rather than
+ * like a mistake.
+ */
+class Labels(val auth: Int, val route: Int, val render: Int, val policies: IntArray) {
+    companion object {
+        fun register() = Labels(
+            Profiler.register("auth"),
+            Profiler.register("route"),
+            Profiler.register("render"),
+            IntArray(POLICIES.size) { Profiler.register(POLICIES[it].first) },
+        )
+
+        /** The unlabelled configuration: same objects, same branch, no hook. */
+        fun none() = Labels(-1, -1, -1, IntArray(POLICIES.size) { -1 })
+    }
+}
+
+class Server(private val threads: Int, private val labelled: Boolean) {
     private val boss = MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory())
     private val workers = MultiThreadIoEventLoopGroup(threads, NioIoHandler.newFactory())
 
-    /** Every handler instance the pipeline builds, so the trial can label and inspect them. */
-    val policies = ArrayList<PolicyHandler>()
+    /** The labels, or all -1 when this server runs unlabelled. See [Labels]. */
+    private val ids = if (labelled) Labels.register() else Labels.none()
 
     lateinit var address: InetSocketAddress
         private set
@@ -70,14 +93,12 @@ class Server(private val threads: Int, val labelled: Boolean) {
                     p.addLast(HttpServerCodec())
                     p.addLast(HttpObjectAggregator(64 * 1024))
                     p.addLast(ExchangeHandler())
-                    p.addLast(AuthHandler())
-                    p.addLast(RouteHandler())
-                    for ((name, header, depth) in POLICIES) {
-                        val h = PolicyHandler(name, header, depth)
-                        synchronized(policies) { policies.add(h) }
-                        p.addLast(h)
+                    p.addLast(AuthHandler(ids.auth))
+                    p.addLast(RouteHandler(ids.route))
+                    for ((i, policy) in POLICIES.withIndex()) {
+                        p.addLast(PolicyHandler(policy.first, policy.second, policy.third, ids.policies[i]))
                     }
-                    p.addLast(RenderHandler())
+                    p.addLast(RenderHandler(ids.render))
                 }
             })
         val ch = bootstrap.bind(InetSocketAddress("127.0.0.1", 0)).sync().channel()
@@ -267,11 +288,114 @@ fun main(args: Array<String>) {
         return
     }
 
+    if (opt["labels"] != null) {
+        profile(seconds, threads, connections, inFlight)
+        return
+    }
+
     val (served, elapsed) = drive(seconds, threads, connections, inFlight)
     println(
         String.format(
             Locale.ROOT, "\nserved %,d responses in %.2f s — %,.0f req/s, %.1f us per request per loop",
             served, elapsed, served / elapsed, elapsed * 1e6 * threads / served
+        )
+    )
+}
+
+/**
+ * The trial proper: labels on, sampler on, and the report the tool would give a user.
+ *
+ * `strict = false` deliberately. Two of these labels are plausibly under the 50 ns floor — the route
+ * scan and the cheapest policy — and the floor check is fatal by default. On code you own that is
+ * the right default; here it would stop the run before the interesting number was collected, which
+ * is exactly the situation the switch exists for.
+ */
+fun profile(seconds: Int, threads: Int, connections: Int, inFlight: Int) {
+    val server = Server(threads, labelled = true).start()
+    val client = Client(server.address, connections, inFlight).start()
+    try {
+        Thread.sleep(5_000)
+        val from = client.responses.get()
+        Profiler.start(stepMillis = 1.0, strict = false)
+        val t0 = System.nanoTime()
+        Thread.sleep(seconds * 1000L)
+        val elapsed = (System.nanoTime() - t0) / 1e9
+        val served = client.responses.get() - from
+        val report = Profiler.stop()
+        println(
+            String.format(
+                Locale.ROOT, "\nserved %,d responses in %.2f s — %,.0f req/s (%.2f us of loop time each)",
+                served, elapsed, served / elapsed, elapsed * 1e6 * threads / served
+            )
+        )
+        println(report.render())
+        printPolicyFit(report)
+        // The client's own event loops are in this JVM and carry no labels, so they land in the
+        // unlabelled column and drag coverage down. Said out loud rather than left for the reader
+        // to wonder about, since "half the run is outside every label" is otherwise a finding.
+        println(
+            "note: $threads server event loops are labelled; the client's 2 loops and Netty's own " +
+                    "codec work are not, and everything unlabelled is in the coverage line above"
+        )
+    } finally {
+        client.stop()
+        server.stop()
+    }
+}
+
+/**
+ * The third truth: the configuration should predict the measurement.
+ *
+ * Each policy is configured to hash a known number of bytes, so its cost per call ought to be a
+ * straight line — a fixed cost for the header lookup and the call, plus a rate per byte. Nothing in
+ * the profiler knows that, so if the labels' implied durations fall on that line then they are
+ * measuring the thing they claim to and not an artifact of where the labels sit.
+ *
+ * The effective byte count is not the configured one. Bodies here run from 128 to 2,048 bytes and a
+ * policy hashes `min(depth, body)`, so the 1,024-byte policy is capped by the shorter half of them
+ * and really averages 800. Using the configured 1,024 would make the fit look worse than it is and
+ * would be our arithmetic error, not the tool's.
+ */
+private fun printPolicyFit(report: com.minogin.profiler.Report) {
+    val bodies = IntArray(16) { 128 + it * 128 }
+    fun effective(depth: Int) = bodies.sumOf { minOf(depth, it) }.toDouble() / bodies.size
+
+    val points = POLICIES.mapNotNull { (name, _, depth) ->
+        val op = report.operations.firstOrNull { it.name == name && it.calls > 0 } ?: return@mapNotNull null
+        Triple(name, effective(depth), report.occupancyNanosOf(op) / op.calls)
+    }
+    if (points.size < 3) return
+
+    // Ordinary least squares on four points. Two parameters, four measurements, so it can fail.
+    val n = points.size
+    val mx = points.sumOf { it.second } / n
+    val my = points.sumOf { it.third } / n
+    val sxy = points.sumOf { (it.second - mx) * (it.third - my) }
+    val sxx = points.sumOf { (it.second - mx) * (it.second - mx) }
+    val slope = sxy / sxx
+    val intercept = my - slope * mx
+
+    println("\n" + "=".repeat(78))
+    println("CONFIGURATION AGAINST MEASUREMENT — do the four policies fall on a line?")
+    println("=".repeat(78))
+    println(String.format(Locale.ROOT, "  fitted: %.1f ns fixed + %.3f ns per byte hashed", intercept, slope))
+    println(String.format(Locale.ROOT, "  %-20s %10s %12s %12s %9s", "policy", "bytes", "measured", "predicted", "error"))
+    var worst = 0.0
+    for ((name, bytes, measured) in points) {
+        val predicted = intercept + slope * bytes
+        val err = (measured - predicted) / measured * 100
+        if (kotlin.math.abs(err) > kotlin.math.abs(worst)) worst = err
+        println(
+            String.format(
+                Locale.ROOT, "  %-20s %10.0f %10.1f ns %10.1f ns %8.1f%%", name, bytes, measured, predicted, err
+            )
+        )
+    }
+    println(
+        String.format(
+            Locale.ROOT,
+            "  worst residual %.1f%% — two parameters against %d measurements the profiler knew nothing about",
+            worst, n
         )
     )
 }

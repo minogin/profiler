@@ -395,6 +395,7 @@ object Profiler {
         return Report(
             stats, s.counters[NO_OP_INDEX], s.ticks, s.span, duration, s.maxSlots, s.duty(), s.failure,
             imbalances = imbalances.get(), openAtEnd = openSpans(), stateSampled = s.sampleState,
+            idleWaitingHits = s.idleWaitingHits,
         )
     }
 }
@@ -522,6 +523,8 @@ class Report(
     val imbalances: Int = 0,
     /** Whether each hit also recorded its thread's state. Without it the verdicts fall back. */
     val stateSampled: Boolean = false,
+    /** Of [idleHits], those where the thread was not runnable. See Sampler.idleWaitingHits. */
+    val idleWaitingHits: Long = 0,
     /** Threads still inside a hand-placed label when the session ended. */
     val openAtEnd: Int = 0,
 ) {
@@ -836,6 +839,18 @@ class Report(
                 threadTime(labelledNanos), threadTime(observedNanos),
                 labelledHits * 100.0 / (labelledHits + idleHits).coerceAtLeast(1),
                 threadTime(observedNanos - labelledNanos), idleHits
+            )
+        )
+        // What the unlabelled time *was* is the reader's first question and the one they have no
+        // other instrument for. "Most of the run is outside every label" means two opposite things —
+        // work nobody labelled, or threads doing nothing — and only this line separates them.
+        if (stateSampled && idleHits > 0) appendLine(
+            String.format(
+                Locale.ROOT,
+                "  of that unlabelled time, %s was a thread not runnable (%.1f%%) and %s was a thread " +
+                        "runnable with no label on it",
+                threadTime(idleWaitingHits * stepNanos), idleWaitingHits * 100.0 / idleHits,
+                threadTime((idleHits - idleWaitingHits) * stepNanos)
             )
         )
         // The bound belongs beside the sampling rate, not in a footnote: both say how much the
@@ -1171,6 +1186,17 @@ class Sampler(
     val stuckWaitingHits = LongArray(MAX_OPERATIONS)
 
     /**
+     * Of the samples that caught a thread inside no label at all, the ones where it was not
+     * runnable.
+     *
+     * The unlabelled column is the one place a reader has no other instrument for. A large
+     * unlabelled share reads as "the labels miss most of the run", which is alarming, and this says
+     * whether that time was work nobody labelled or a thread doing nothing at all — two findings
+     * with nothing in common.
+     */
+    var idleWaitingHits: Long = 0; private set
+
+    /**
      * Ticks at which at least one thread was inside the operation — its wall-clock footprint,
      * counted once however many threads were in it.
      *
@@ -1272,7 +1298,16 @@ class Sampler(
                 // Carried down to the long-execution test below, so that a hit which is both long
                 // and waiting is counted as such. Knowing an operation waits somewhere is not the
                 // same as knowing its *long* executions are where the waiting is.
+                // Asked for every slot, labelled or not. What a thread does *outside* every label is
+                // the larger half of some runs — 85.5% of thread-time on the Netty trial — and
+                // "waiting or working" is exactly as worth knowing there. A field read on the Thread
+                // object: no handshake, no safepoint. The weak reference is null only if the thread
+                // died and the slot outlived it, in which case there is nothing to ask.
                 var waiting = false
+                if (sampleState) {
+                    val t = s.thread.get()
+                    if (t != null && t.state != State.RUNNABLE) waiting = true
+                }
                 if (c >= 0) {
                     // Once per operation per tick, not once per slot: this counts the operation's
                     // wall-clock footprint, which is the same whether one thread was inside it or
@@ -1281,16 +1316,9 @@ class Sampler(
                         seenAt[c] = ticks
                         activeTicks[c]++
                     }
-                    if (sampleState) {
-                        // A field read on the Thread object — no handshake, no safepoint. The weak
-                        // reference is null only if the thread died and the slot outlived it, in
-                        // which case there is nothing to ask.
-                        val t = s.thread.get()
-                        if (t != null && t.state != State.RUNNABLE) {
-                            waiting = true
-                            waitingHits[c]++
-                        }
-                    }
+                    if (waiting) waitingHits[c]++
+                } else if (waiting) {
+                    idleWaitingHits++
                 }
 
                 val idx = s.index
