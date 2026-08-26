@@ -23,6 +23,40 @@ were. A whole CPU core for the sampler is an accepted cost on that basis.
 Both regimes are in scope: nanosecond operations, and the coarser microsecond-to-millisecond work
 the Calcite trial covered. We do not get to choose what a real target turns out to be.
 
+### How accurate this has to be, and where that budget goes
+
+The deliverable is a ranked list and the action it invites is *look at the top rows*. So the
+question is never "how close is this number" but **"can this error move the ranking, or point at the
+wrong operation"** — and those two failures have opposite budgets.
+
+Calcite makes the case on its own. The headline share came out **46.18%**, then **46.08%**, then
+**46.67%** across three runs of the same configuration, and the finding was *275× when removed*.
+Every one of those numbers produces the same action. Precision was never what made it useful.
+
+| kind of error | example we have measured | tolerable |
+|---|---|---|
+| random noise | ±5% on a share | **yes** — it does not survive into the ranking |
+| uniform bias | every operation reading 15% low | **yes** — it cancels when shares are taken, which is what the bench's shuffle exists to guarantee |
+| bias that scales with something | the timed wrapper charging per call, across two clauses differing 21× in call count | **no** — it swapped the top two |
+| silent misattribution | a label on the scorer but not the factory: 32.2% against a true 48.5% | **no** — this is not an error bar, it is a wrong answer that looks healthy |
+
+The bottom two are not imprecision at all. A leaked or misplaced label does not make a number fuzzy;
+it **invents** attribution, and nothing in the output says so. That is where effort belongs — the
+balance check, the absolute occupancy column, the three-way A/B against an inert wrapper — and not
+in estimators that shave a few percent off a figure whose ranking was never in doubt.
+
+**The one thing this principle does not excuse.** *"It only matters if it changes the order"* cannot
+be asserted without knowing the error: two rows at 20% and 19% flip under a 10% error and two rows at
+46% and 2% do not. The report already computes the number that decides it — `noise`, which is
+`1/√hits` — and does not yet *use* it. The honest form of this principle is not "be less precise" but
+**"do not present an order the data cannot defend"**: where two rows differ by less than their noise,
+say so rather than implying a rank.
+
+**And it does not reach the floor.** Below ~50 ns the risk is not a few percent — C2 can move work
+across the boundaries of adjacent short labels, and the demo lost **95%** of an operation with
+nothing in the numbers indicating it. A silent near-total loss is the misattribution case, not the
+noise case, which is why the floor survives a tolerance this relaxed.
+
 ## The problem
 
 A class of workload that ordinary profilers cannot answer questions about: a few dozen distinct

@@ -326,13 +326,25 @@ step, with no resync. A thread of its own that parks for a second would cost no 
 punctuality; it would cost the guarantee that both cover exactly the same span. Not obviously worth
 it, but worth remembering that the sampler's punctuality was expensive to get.
 
-## 11. Correct the attribution bias using call counts · open
+## 11. Correct the attribution bias using call counts · dropped
 
 The sampler reads high on parents and low on short leaves. With call counts the correction is
 arithmetic rather than a model, and the counts are already collected. Blocked on understanding the
 bias well enough to know what to correct — see the open question in findings.md.
 
-## 12. Make the floor check survive a machine whose clock moves · open
+**Dropped, on the accuracy principle** in
+[profiler.md](profiler.md#how-accurate-this-has-to-be-and-where-that-budget-goes). This bias is
+roughly uniform in direction and largely cancels when shares are taken, so it cannot move a ranking
+or point at the wrong operation — and those are the only two failures worth spending on. The worst
+case we have measured is `tinyStep` at 15% of itself, on an operation holding 3.2% of the run.
+Correcting it would change nobody's next action.
+
+**What would revive it:** evidence that the bias scales with something that differs between
+operations — call count, nesting depth — rather than with size alone. That is the shape that swapped
+Lucene's top two clauses when a *timer* did it, and it would be intolerable here for the same reason.
+The open question in findings.md is worth keeping for that reason and not for this one.
+
+## 12. Make the floor check survive a machine whose clock moves · partly decided
 
 The floor check fires within a second on the argument that a below-floor label is a property of the
 code, "identical on every machine and every rerun". Measured on Lucene, that is false here: this
@@ -341,7 +353,20 @@ duration rises with it — 18.1 ns at two seconds, 54.1 ns at twenty, for the sa
 stopped a *correct* placement citing 27.5 ns against a settled 49.7 ns. Shares over the same range
 moved by under 0.4 points, so only this one column is affected.
 
-Three candidate fixes, cheapest first:
+**The accuracy principle decides this, and it decides against the clever options.** By
+[profiler.md](profiler.md#how-accurate-this-has-to-be-and-where-that-budget-goes), effort belongs
+where an error can move a ranking or point at the wrong operation. A below-floor label does neither —
+it is one row of a list, and the cost of getting it wrong is that we *stop a correct run*, which is
+the loudest failure this tool can produce and the one we have actually observed. So the first move
+is not a better estimator at all: **make it a warning rather than fatal, and keep the advice**, which
+costs nothing and cannot stop anybody's correct placement.
+
+That leaves the estimator work optional rather than blocking, and it should be judged on whether it
+buys anything a warning does not. Options 2 and 4 below remain interesting for their own reasons —
+4 in particular, because "a floor in units of the hook" is a *ratio*, and a ratio is the only form of
+this check that could ever be machine-independent the way the documentation claims.
+
+Candidate fixes, cheapest first:
 
 1. ~~**Require two consecutive windows.**~~ **Falsified by our own data — do not do this.** It was
    written on the assumption that the early estimate is *noisy*. It is not: the counters are
