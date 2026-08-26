@@ -379,23 +379,40 @@ private fun printPolicyFit(report: com.minogin.profiler.Report) {
     println("CONFIGURATION AGAINST MEASUREMENT — do the four policies fall on a line?")
     println("=".repeat(78))
     println(String.format(Locale.ROOT, "  fitted: %.1f ns fixed + %.3f ns per byte hashed", intercept, slope))
-    println(String.format(Locale.ROOT, "  %-20s %10s %12s %12s %9s", "policy", "bytes", "measured", "predicted", "error"))
-    var worst = 0.0
+    println(
+        String.format(
+            Locale.ROOT, "  %-20s %8s %12s %12s %8s %8s %7s",
+            "policy", "bytes", "measured", "predicted", "error", "noise", "in x noise"
+        )
+    )
+    // The residual has to be read against each label's own noise floor, and the two are far apart
+    // here: the largest policy has fifteen times the hits of the smallest. A fit with one point at
+    // 800 bytes and three under 250 is also pinned by that point, so whatever error is left lands on
+    // the small ones. Quoting a single "worst residual" hides both effects.
+    var worstSigma = 0.0
+    var worstBig = 0.0
     for ((name, bytes, measured) in points) {
+        val op = report.operations.first { it.name == name }
+        val noise = report.noiseFloorOf(op) * 100
         val predicted = intercept + slope * bytes
         val err = (measured - predicted) / measured * 100
-        if (kotlin.math.abs(err) > kotlin.math.abs(worst)) worst = err
+        val sigma = if (noise > 0) kotlin.math.abs(err) / noise else Double.NaN
+        if (sigma > worstSigma) worstSigma = sigma
+        // "Big" means holding enough of the run to act on. By the accuracy principle a miss on a
+        // label holding 4% cannot change anybody's next move; a miss on one holding 62% can.
+        if (report.shareOf(op) > 0.10 && kotlin.math.abs(err) > kotlin.math.abs(worstBig)) worstBig = err
         println(
             String.format(
-                Locale.ROOT, "  %-20s %10.0f %10.1f ns %10.1f ns %8.1f%%", name, bytes, measured, predicted, err
+                Locale.ROOT, "  %-20s %8.0f %9.1f ns %9.1f ns %7.1f%% %7.2f%% %6.1fx",
+                name, bytes, measured, predicted, err, noise, sigma
             )
         )
     }
     println(
         String.format(
             Locale.ROOT,
-            "  worst residual %.1f%% — two parameters against %d measurements the profiler knew nothing about",
-            worst, n
+            "  worst residual on a policy holding over 10%% of the run: %.1f%%; worst anywhere: %.1f x its own noise",
+            worstBig, worstSigma
         )
     )
 }

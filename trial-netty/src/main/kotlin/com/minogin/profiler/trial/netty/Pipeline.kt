@@ -38,9 +38,8 @@ class Exchange(val request: FullHttpRequest) {
  * final field on an object that lives for the connection, so it predicts perfectly and the two
  * configurations differ by a hook rather than by a branch.
  */
-private inline fun labelled(opId: Int, body: () -> Unit) {
+private inline fun <T> labelled(opId: Int, body: () -> T): T =
     if (opId >= 0) op(opId) { body() } else body()
-}
 
 /**
  * A policy in the chain — and the reason this trial exists in the shape it does.
@@ -171,8 +170,7 @@ class RouteHandler(@JvmField val opId: Int) : SimpleChannelInboundHandler<Exchan
 class RenderHandler(@JvmField val opId: Int) : SimpleChannelInboundHandler<Exchange>(false) {
 
     override fun channelRead0(ctx: ChannelHandlerContext, ex: Exchange) {
-        var response: DefaultFullHttpResponse? = null
-        labelled(opId) { response = run(ex) }
+        val response = labelled(opId) { run(ex) }
         ex.request.release()
         ctx.writeAndFlush(response)
     }

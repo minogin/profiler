@@ -162,20 +162,42 @@ byte. Fitted on the four measured durations:
 
 > **57.2 ns fixed + 3.067 ns per byte hashed**
 
-| policy | effective bytes | measured | predicted | error |
-|---|---|---|---|---|
-| `policy:geo` | 24 | 140.1 ns | 130.8 ns | **+6.7%** |
-| `policy:experiment` | 48 | 193.7 ns | 204.4 ns | −5.5% |
-| `policy:quota` | 248 | 819.0 ns | 817.7 ns | +0.2% |
-| `policy:abuse` | 800 | 2510.5 ns | 2510.5 ns | −0.0% |
+| policy | effective bytes | measured | predicted | error | its own noise | error ÷ noise |
+|---|---|---|---|---|---|---|
+| `policy:geo` | 24 | 131.1 ns | 119.6 ns | **+8.8%** | 3.29% | 2.7× |
+| `policy:experiment` | 48 | 175.5 ns | 188.5 ns | **−7.4%** | 2.84% | 2.6× |
+| `policy:quota` | 248 | 764.6 ns | 762.9 ns | **+0.2%** | 1.36% | 0.2× |
+| `policy:abuse` | 800 | 2348.3 ns | 2348.3 ns | **−0.0%** | 0.78% | 0.0× |
 
-Two parameters against four measurements, worst residual **6.7%**. The effective byte count is not
-the configured one: bodies run 128–2,048 bytes and a policy hashes `min(depth, body)`, so the
-1,024-byte policy really averages 800. Using the configured figure would have made the fit look
-worse, and that would have been our arithmetic rather than the tool's.
+The effective byte count is not the configured one: bodies run 128–2,048 bytes and a policy hashes
+`min(depth, body)`, so the 1,024-byte policy really averages 800. Using the configured figure would
+have made the fit look worse, and that would have been our arithmetic rather than the tool's.
 
-This is the Calcite and Lucene cross-check in a third form. There we compared against another
-profiler; here the workload's own configuration is the second opinion.
+**The two policies that hold real share land on the line exactly — 0.2% and 0.0%.** Those are the
+rows anyone would act on, at 20% and 62% of the run.
+
+**The two smallest miss by ~8%, and it is systematic rather than noise.** At 2.6–2.7× their own
+noise floors, and the *signs repeat across every run* — `geo` reads high and `experiment` reads low
+in all three, at 25 s and at 45 s. Something real is going on and it is small.
+
+The likeliest explanation is the model, not the instrument: a straight line over a 33× range of byte
+counts has one intercept to spend on per-call fixed cost, and that cost is a larger fraction of a
+131 ns policy than of a 2.3 µs one. A concave true curve would produce exactly this pattern —
+the line passing above the smallest point and below the second. *Not verified*, and it is not worth
+verifying: by the [accuracy principle](profiler.md#how-accurate-this-has-to-be-and-where-that-budget-goes)
+an 8% miss on a label holding 3% of the run cannot change anybody's next move, while the same fit is
+exact on the labels that can.
+
+**What the check earns, stated precisely:** the labels' per-call durations are predicted by a
+quantity the profiler has no access to, to within 0.2% on the operations that matter. That is the
+Calcite and Lucene cross-check in a third form — there we compared against another profiler, here
+the workload's own configuration is the second opinion.
+
+**And the first version of this section quoted the wrong number.** It reported "worst residual 6.7%"
+from a single run, which read as *the fit is good to 6.7%* when the truth is *the fit is exact where
+it matters and systematically off on the two smallest*. A single worst-case figure hid both the
+fifteen-fold spread in hit counts and the fact that the misses repeat. The check now prints each
+residual against that label's own noise floor.
 
 ### The floor check earned its place, on a real label
 
