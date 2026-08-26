@@ -146,6 +146,25 @@ At 1–4 they all fit on performance cores; at 16 every core is occupied so noth
 the scheduler has genuine freedom to shuffle. Less load meant *more* noise, which is the opposite
 of what contention would predict.
 
+**An A/B harness that tears itself down between arms is the dominant source of variance, not the
+machine.** Four attempts at the same three-way comparison on the Netty trial, each fixing one thing:
+
+| harness | result |
+|---|---|
+| rebuild server and client per arm, raw means | inconclusive — 72–88% within-arm spread against an 8.66% effect |
+| …normalised by each round's own mean | **+21%: instrumentation apparently made it faster** |
+| …plus awaiting `shutdownGracefully`, which has a **2 s default quiet period** | sign sane, ordering monotonic, still inconclusive at −10.16% ± 10.42% |
+| **rebuild nothing** — one server, one client, one set of connections, a volatile flag the only thing moving | **−3.97% ± 1.83%, readable** |
+
+The impossible +21% is what made the second harness findable: seven event-loop threads from the
+previous arm were still winding down inside the next arm's measured window. A plausible-looking 5%
+would have been believed.
+
+Within-arm spread is still 60–65% in the working version — the machine did not improve — so the
+lesson is not about this laptop. **The teardown was worth an order of magnitude more variance than
+the thing being measured.** The price of removing it is a volatile read the JIT cannot fold, present
+in every arm and therefore cancelling: a known constant bias traded for a readable answer.
+
 **The clock swings by 2× inside a single run, tracking load.** Traced with
 `Get-Counter '\Processor Information(*)\% Processor Performance'` during a bench run: sustained
 8-thread work at 2.0–2.9 GHz, and whenever load went light all sixteen cores jumped back to

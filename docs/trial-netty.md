@@ -6,8 +6,8 @@ flat out. Netty gives a handful of long-lived event loops carrying many short ta
 is mostly not CPU — which is the first foreign workload where the thread-state column built in
 phase 6 has anything to say, and the first that can show it saying the wrong thing.
 
-Harness: [`trial-netty/`](../trial-netty). Status: **labelled and measured; the A/B against the bare
-workload is still outstanding.**
+Harness: [`trial-netty/`](../trial-netty). Status: **done through step 3 — qualified, labelled, and
+A/B'd against the uninstrumented workload.**
 
 ---
 
@@ -256,10 +256,64 @@ right answer and it is worth stating: the loops are independent, each at a diffe
 pipeline at any instant, so a given handler almost never has two loops in it simultaneously. A
 number near 4 would have meant the loops were marching in lockstep, which would be a finding.
 
-## 6. What comes next
 
-1. **The A/B against the uninstrumented workload.** Not yet run. The Lucene rule applies — compare
-   end-to-end throughput, three ways, and never summed occupancy.
+## 6. The A/B against the bare workload — and it took four attempts
+
+Step 3 of the procedure: *do not let the instrumentation change the workload.* On Lucene a careless
+wrapper made the workload 13.3% slower and moved one clause from seventh to third, with every number
+internally consistent. Only a comparison against the uninstrumented run can catch that.
+
+Three arms, interleaved, order reversed every other round — ABBA rather than ABAB, because a
+monotonic drift aliases straight onto an alternating order.
+
+| arm | vs inert |
+|---|---|
+| inert — the branch, no hook | — |
+| labels, no sampler | **−0.81%** |
+| labels + sampler | **−3.97% ± 1.83%** (1 s.e. over 8 rounds) |
+
+**Readable, at over twice its own standard error** — and this is the first A/B in the project that
+has been. Phase 3's hook comparison and Lucene's were both reported as inconclusive because the
+machine moved by more than the effect.
+
+**What it says.** The hook is under 1% and inside its own noise; almost all of the cost is the
+sampler thread, which spins and therefore takes a core. That is the documented trade and it is
+behaving as documented. Nothing about the pipeline's shape changed: the shares reproduce run to run
+(61.9/19.9/7.6/4.6/4.0 against 62.2/20.1/7.5/4.8/3.4), so this is not Lucene's failure in miniature.
+
+### The three attempts that failed, which are the more useful part
+
+**1. Raw means, server and client rebuilt per arm.** Inconclusive: within-arm spread 72–88% against
+an 8.66% effect. Throughput fell from 164k to 58k req/s across four rounds as the laptop throttled,
+so an arm's average was mostly a statement about *when it ran*.
+
+**2. Normalising each arm by its own round's mean — and this produced an impossible answer.**
+`labels + sampler` came out **21% faster** than inert. Instrumentation cannot speed a program up, so
+the harness was wrong, and it was: `shutdownGracefully()` returns a future with a **default quiet
+period of two seconds**, and nothing awaited it. Each arm was being measured while the previous
+arm's seven event-loop threads were still winding down. The nonsensical sign is what made it
+findable — a plausible-looking 5% would have been believed.
+
+**3. Awaited shutdown, still rebuilt per arm.** Sign sane and the ordering monotonic (0%, −3.2%,
+−10.2%), but **−10.16% ± 10.42%** — still inconclusive. Normalising by the round removes drift that
+affects a whole round, and the remaining scatter was *between arms inside a round*: fresh sockets,
+fresh threads, fresh TCP state every time.
+
+**4. What worked: stop rebuilding anything.** One server, one client, one set of connections, alive
+for the whole comparison, with a volatile flag and the sampler the only things moving between arms.
+Within-arm spread is still 60–65% — the machine has not improved — but the effect now separates at
+±1.83%.
+
+**The lesson, and it generalises past this trial.** The variance that defeated three attempts was not
+the machine; it was **the harness tearing itself down and rebuilding between measurements**. The cost
+is that the inert arm now carries a volatile read the JIT cannot fold, so it is slightly dearer than
+a genuinely bare build — but that read is in all three arms and cancels. Trading a known constant
+bias for an order of magnitude less variance was the whole difference between a number and a shrug.
+
+
+## 7. What comes next
+
+1. **Trial 4.** Netty has answered what it was chosen for.
 2. **Whether the 59% self-time leaf is safepoint bias**, from section 2. Still open.
 3. **Coverage is 14.5%**, and most of the rest is Netty's own HTTP codec. Whether labels belong on
    somebody else's codec is a real question about what this tool is for, and it is the same question

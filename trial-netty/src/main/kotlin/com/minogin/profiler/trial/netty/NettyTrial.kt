@@ -28,6 +28,7 @@ import java.net.InetSocketAddress
 import java.nio.file.Files
 import java.nio.charset.StandardCharsets
 import java.util.Locale
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.random.Random
 
@@ -106,9 +107,17 @@ class Server(private val threads: Int, private val labelled: Boolean) {
         return this
     }
 
+    /**
+     * Awaited, and that is not tidiness.
+     *
+     * `shutdownGracefully()` returns a future and has a default *quiet period of two seconds*, so
+     * without the `sync()` the loops of one A/B arm are still winding down while the next arm is
+     * being measured — seven extra threads competing for cores, which produced an A/B claiming that
+     * instrumentation made the server 21% faster.
+     */
     fun stop() {
-        boss.shutdownGracefully()
-        workers.shutdownGracefully()
+        boss.shutdownGracefully(0, 2, TimeUnit.SECONDS).sync()
+        workers.shutdownGracefully(0, 2, TimeUnit.SECONDS).sync()
     }
 }
 
@@ -150,10 +159,11 @@ class Client(private val target: InetSocketAddress, private val connections: Int
         return this
     }
 
+    /** Awaited, for the reason in [Server.stop]. */
     fun stop() {
         running = false
-        channels.forEach { it.close() }
-        group.shutdownGracefully()
+        channels.forEach { it.close().sync() }
+        group.shutdownGracefully(0, 2, TimeUnit.SECONDS).sync()
     }
 
     private inner class Driver : SimpleChannelInboundHandler<FullHttpResponse>() {
@@ -288,6 +298,11 @@ fun main(args: Array<String>) {
         return
     }
 
+    if (opt["ab"] != null) {
+        runAb(opt["rounds"]?.toInt() ?: 4, seconds, threads, connections, inFlight)
+        return
+    }
+
     if (opt["labels"] != null) {
         profile(seconds, threads, connections, inFlight)
         return
@@ -413,6 +428,116 @@ private fun printPolicyFit(report: com.minogin.profiler.Report) {
             Locale.ROOT,
             "  worst residual on a policy holding over 10%% of the run: %.1f%%; worst anywhere: %.1f x its own noise",
             worstBig, worstSigma
+        )
+    )
+}
+
+/** The three configurations the A/B compares. See [runAb]. */
+private enum class Arm(val label: String, val labels: Boolean, val sampler: Boolean) {
+    INERT("inert (branch, no hook)", labels = false, sampler = false),
+    HOOK("labels, no sampler", labels = true, sampler = false),
+    FULL("labels + sampler", labels = true, sampler = true),
+}
+
+/**
+ * Step 3 of running a trial: **do not let the instrumentation change the workload.**
+ *
+ * On Lucene a careless wrapper made the workload 13.3% slower and moved one clause from seventh to
+ * third — the numbers were internally consistent and described a program the library would never
+ * have run. Nothing in a report can catch that; only a comparison against the uninstrumented
+ * workload can.
+ *
+ * Three arms, because the hook's cost and the sampler thread's cost are different questions and a
+ * two-way comparison answers neither. **Interleaved and with the order reversed every other round**,
+ * which is not fussiness: this laptop's throughput moved by a factor of two inside a single Lucene
+ * comparison, and only interleaving kept that from landing entirely on whichever arm ran last.
+ * ABBA rather than ABAB, because a monotonic drift aliases straight onto an alternating order.
+ *
+ * **What this cannot separate.** The INERT arm still contains the `labelled` branch — a test of a
+ * final `-1` field. Removing it needs a second set of handler classes, and the branch is in every
+ * arm of every comparison this trial actually makes, so it cancels there. It does mean "inert" is
+ * a floor rather than the bare workload.
+ */
+fun runAb(rounds: Int, seconds: Int, threads: Int, connections: Int, inFlight: Int) {
+    val totals = HashMap<Arm, MutableList<Double>>()
+    for (a in Arm.entries) totals[a] = ArrayList()
+
+    println("\n" + "=".repeat(96))
+    println("A/B AGAINST THE BARE WORKLOAD — $rounds rounds of ${seconds}s per arm, order reversed every other round")
+    println("=".repeat(96))
+
+    // One server, one client, one set of connections, alive for the whole comparison. Only
+    // [Switch] and the sampler move between arms.
+    val server = Server(threads, labelled = true).start()
+    val client = Client(server.address, connections, inFlight).start()
+    try {
+        Thread.sleep(8_000)
+        for (round in 0 until rounds) {
+            val order = if (round % 2 == 0) Arm.entries.toList() else Arm.entries.reversed()
+            for (arm in order) {
+                Switch.on = arm.labels
+                // A beat for the flipped branch to settle and for the sampler thread to come and
+                // go, so neither lands inside the measured window.
+                Thread.sleep(700)
+                if (arm.sampler) Profiler.start(stepMillis = 1.0, strict = false)
+                val from = client.responses.get()
+                val t0 = System.nanoTime()
+                Thread.sleep(seconds * 1000L)
+                val rate = (client.responses.get() - from) / ((System.nanoTime() - t0) / 1e9)
+                if (arm.sampler) Profiler.stop()
+                totals[arm]!!.add(rate)
+                println(String.format(Locale.ROOT, "  round %d  %-26s %,10.0f req/s", round + 1, arm.label, rate))
+            }
+        }
+    } finally {
+        client.stop()
+        server.stop()
+    }
+
+    // Raw means are useless here and the first version of this printed them. This laptop's
+    // throughput fell from 164k to 58k req/s across four rounds — a 2.8x collapse — so an arm's
+    // average is mostly a statement about when it happened to run. Normalising each measurement by
+    // its own round's mean removes any drift that affected the whole round, which is nearly all of
+    // it, and leaves the arm-to-arm difference that the comparison is about.
+    val ratios = HashMap<Arm, MutableList<Double>>()
+    for (a in Arm.entries) ratios[a] = ArrayList()
+    for (round in 0 until rounds) {
+        val roundMean = Arm.entries.map { totals[it]!![round] }.average()
+        for (a in Arm.entries) ratios[a]!!.add(totals[a]!![round] / roundMean)
+    }
+
+    val base = ratios[Arm.INERT]!!.average()
+    println("\n  %-26s %12s %12s %10s %10s".format("arm", "mean req/s", "vs round", "vs inert", "raw spread"))
+    for (arm in Arm.entries) {
+        val v = totals[arm]!!
+        val r = ratios[arm]!!.average()
+        println(
+            String.format(
+                Locale.ROOT, "  %-26s %,12.0f %11.3f %9.2f%% %9.1f%%",
+                arm.label, v.average(), r, (r - base) / base * 100, (v.max() - v.min()) / v.average() * 100
+            )
+        )
+    }
+
+    // Even normalised, the comparison is only worth reading if the effect survives the scatter of
+    // the round-by-round ratios. On Lucene the equivalent check said no, and saying so was the
+    // finding rather than a failure to produce one.
+    fun sd(v: List<Double>): Double {
+        val m = v.average()
+        return kotlin.math.sqrt(v.sumOf { (it - m) * (it - m) } / (v.size - 1).coerceAtLeast(1))
+    }
+    val effect = kotlin.math.abs((ratios[Arm.FULL]!!.average() - base) / base * 100)
+    // Standard error of the difference between two arm means, in the same percentage units.
+    val se = kotlin.math.sqrt(
+        sd(ratios[Arm.FULL]!!).let { it * it } / rounds + sd(ratios[Arm.INERT]!!).let { it * it } / rounds
+    ) / base * 100
+    println(
+        String.format(
+            Locale.ROOT,
+            "\n  full against inert: %.2f%% +/- %.2f%% (1 s.e. over %d rounds) — %s",
+            (ratios[Arm.FULL]!!.average() - base) / base * 100, se, rounds,
+            if (effect > 2 * se) "readable, the effect is over twice its own error"
+            else "INCONCLUSIVE: inside twice its own error, so this run does not separate them"
         )
     )
 }

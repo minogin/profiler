@@ -34,12 +34,29 @@ class Exchange(val request: FullHttpRequest) {
  * qualification found a dozen frames between 82% and 99% and none of them meaning anything. Self
  * time per handler is the number that was missing, and wrapping only `run` is what produces it.
  *
- * The `opId >= 0` branch is how the unlabelled configuration is measured against this one. It is a
- * final field on an object that lives for the connection, so it predicts perfectly and the two
- * configurations differ by a hook rather than by a branch.
+ * How the unlabelled configuration is measured against this one is [Switch].
  */
+
+/**
+ * Whether labels are live, flipped between A/B arms without rebuilding anything.
+ *
+ * The A/B originally tore down the server, the client and every socket between arms, and the
+ * arm-to-arm scatter that produced swamped the effect being measured — 90% within-arm spread against
+ * a 10% effect. One server, one client, one set of connections running continuously, with only this
+ * flag moving, removes every source of variance except the machine itself.
+ *
+ * The cost is that `opId >= 0` alone would be a final-field test the JIT can fold away, and this is
+ * a volatile read it cannot. That makes the *inert* arm slightly dearer than a genuinely bare build —
+ * but it is identical in all three arms, so it cancels in every comparison this makes.
+ */
+object Switch {
+    @Volatile
+    @JvmField
+    var on: Boolean = true
+}
+
 private inline fun <T> labelled(opId: Int, body: () -> T): T =
-    if (opId >= 0) op(opId) { body() } else body()
+    if (opId >= 0 && Switch.on) op(opId) { body() } else body()
 
 /**
  * A policy in the chain — and the reason this trial exists in the shape it does.
