@@ -844,6 +844,27 @@ The sampler snapshots every thread at one instant, which is what makes this poss
 that sums time per thread has destroyed the information before you can ask. This is the one thing
 an async-profiler bridge could never provide, since it samples each thread on its own timer signal.
 
+**This phase is worth more than it looks, and the reason came out of settling the tier boundary.**
+Thread state is not one feature among several — paired with per-operation concurrency
+([ideas.md](ideas.md) item 16) it closes **three** of the ways the fine tier fails at once, and both
+halves come from photographs the sampler already takes:
+
+- it answers *waiting or working* per operation, rather than as one aggregate bound over the run;
+- it **detects the bimodal operation** — a label that is 50 ns on the fast path and 100 µs when it
+  hits a lock reports 150 ns and describes nothing, and today nothing signals it, because a 100 µs
+  slow path is a tenth of a tick and invisible to the long-instance detector too. Under sampled
+  state that label shows two thirds of its samples parked, which is not a subtle signal;
+- and with concurrency as the divisor it turns occupancy back into **wall time** —
+  `elapsed = occupancy ÷ mean concurrency while active` — which is the one thing summed occupancy
+  can never be. Worked in [profiler.md](profiler.md#turning-occupancy-back-into-wall-time), where
+  the same 100 thread-seconds of waiting means *6.7 s, break up the convoy* or *59 s, design the
+  contention out* depending only on the divisor.
+
+**The limit to design around:** `RUNNABLE` means *eligible*, not *on a core*. It covers a preempted
+thread — 14–18% on a bench that never blocks — and a thread in a blocking socket read, which the JVM
+cannot see into. `BLOCKED`/`WAITING`/`TIMED_WAITING` are conclusive; `RUNNABLE` is not, and closing
+that gap needs the per-thread duty cycle, [ideas.md](ideas.md) item 10.
+
 **What can be done now:** the occupancy histogram, and the busy-versus-throughput curves across
 `--sweep`, validated against starvation mode's known constant answer.
 

@@ -491,9 +491,21 @@ whole-application coefficient in phase 6; the per-operation version is the same 
 level down and needs nothing phase 6 needs.
 
 **What it costs:** one counter per operation per tick, on the sampler's own arrays — the same shape
-as the long-instance detector's `prev*` arrays, and nothing on the hot path. **What is unsettled:**
-whether it wants a full histogram or just mean and max, and whether it earns a report column or is
-only interesting when it disagrees with the whole-application figure.
+as the long-instance detector's `prev*` arrays, and nothing on the hot path.
+
+**And it is not a curiosity — it is half of the fix for occupancy not being elapsed time.** Recording
+each thread's *state* splits an operation's occupancy into working and waiting, and that alone is not
+enough: a hundred threads waiting one second and one thread waiting a hundred seconds are both a
+hundred thread-seconds of waiting, with real costs a hundredfold apart. Concurrency is the divisor
+that separates them — `elapsed = occupancy ÷ mean concurrency while active` — and on a lock holding
+100 thread-seconds it is the difference between *6.7 seconds, break up the convoy* and *59 seconds,
+design the contention out*. Same total, opposite fix. The derivation and its three surviving limits
+are in [profiler.md](profiler.md#turning-occupancy-back-into-wall-time). So this item and the thread
+state that phase 6 exists for are **halves of one feature**, and neither is much use shipped alone.
+
+**What is unsettled:** whether it wants a full histogram or only the mean — the mean is all the
+divisor above needs, and a histogram is what distinguishes *steadily three busy* from *sawtooth
+spiking to sixteen*, which [plan.md](plan.md) phase 6 already wants for the whole application.
 
 ## 17. The report presents CPU as the truth and occupancy as the approximation · open
 

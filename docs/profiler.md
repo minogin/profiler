@@ -243,17 +243,63 @@ define the boundary or belong to the other tier. The third column is the one tha
 | | what breaks | does it apply to a correctly-sized fine operation? |
 |---|---|---|
 | **A** | no per-execution durations | **Always — and only hurts when the operation is bimodal.** A photograph has no duration, so there are no percentiles, ever. An operation that is 50 ns normally and 100 µs when it hits a lock reports 150 ns, and no execution was ever 150 ns. That operation is two operations wearing one name: the fast path is fine, the slow path is its own coarse label. |
-| **B** | occupancy is not elapsed time | **Always.** A property of the unit, not of the operation. Eight threads working five seconds is forty seconds of occupancy in a five-second run. For computation the sum is real; for waiting it is not, because waiting happens simultaneously. Cannot be fixed — only explained. |
+| **B** | occupancy is not elapsed time | **Always.** A property of the unit, not of the operation. Eight threads working five seconds is forty seconds of occupancy in a five-second run. For computation the sum is real; for waiting it is not, because waiting happens simultaneously. **Solvable, and from photographs we already take** — see below. |
 | **C** | waiting and working look identical | **In two forms.** Machine-wide stalling — preemption and GC — lands on everything uniformly (13.27–17.90% across all twenty bench operations), so it is the run's doing and not the operation's. Genuine contention is real, and the answer is to split the operation, not to re-tier it. |
 | **D₁** | coroutines: the label follows the thread | **Never.** The defect needs a suspension point between the label write and the restore, and a suspension costs a continuation allocation plus a dispatch — hundreds of nanoseconds at best. "Fine-grained" and "suspends inside the operation" are mutually exclusive by construction, so the same-thread assumption is self-enforcing. See [ideas.md](ideas.md) item 8. |
 | **D₂** | virtual threads: the registry explodes | **Yes, today, and it needs no suspension at all.** Every virtual thread appends a slot to a `CopyOnWriteArrayList` — an O(n) copy per thread created — and the sampler walks the list every millisecond. Ordinary 20 ns operations on a million short-lived virtual threads make the tick unbounded. |
 | **E** | resolution floors | **Not a break** — it *is* the lower edge, defined above. |
 | **F** | no structure: no caller, no nesting | **Always, and hurts never.** Atomic means there is nothing under an operation to lose. It is the reason the coarse tier has to exist, not a defect in this one. |
 
-**So the genuine residue is three items**, and only one of them is a defect: **B** needs explaining
-in the report rather than fixing; **C** in its contention form is answered by splitting the
-operation; **D₂** is a registry problem in shipped code with nothing to do with tiers.
+**So the genuine residue is three items**, and two of them turn out to be one feature. **A** and
+**C** are the same case for an operation in this band — see the next section but one — and **B**
+dissolves once the photographs are read for more than a sum. **D₂** is a registry problem in shipped
+code with nothing to do with tiers, and it is the only outright defect on the list.
 
+### Turning occupancy back into wall time
+
+Recording each thread's *state* beside its label splits occupancy into working and waiting, which is
+the obvious half of the fix and is not sufficient on its own. Three different situations produce
+identical waiting occupancy:
+
+| what happened | waiting occupancy | real cost |
+|---|---|---|
+| a hundred threads wait one second, all at once | 100 s | **1 s** |
+| one thread waits a hundred seconds | 100 s | **100 s** |
+| ten threads wait ten seconds each, staggered | 100 s | *in between* |
+
+Thread state answers *what was this thread doing*. The question here is *how many were doing it at
+the same instant* — and each tick already knows that, because the sampler photographs every thread
+in one pass. Kept rather than summed away, it closes the gap arithmetically:
+
+> **elapsed = occupancy ÷ mean concurrency while active**
+
+**Worked, because the two answers are opposite.** A sixty-second run on sixteen threads, and
+`lockAcquire` holding 100 thread-seconds of waiting occupancy:
+
+| | mean concurrency while active | elapsed | the diagnosis |
+|---|---|---|---|
+| **convoy** — fifteen threads pile on at once, in bursts | 15 | **6.7 s** | worth at most 11% of the run; break up the convoy |
+| **drizzle** — persistent mild contention | 1.7 | **59 s** | spans essentially the whole run; design the contention out |
+
+Same occupancy, opposite fix. So **thread state and per-operation concurrency are halves of one
+feature**, and neither is much use alone: the first says which part of the total is fiction, the
+second says by how much. Both come from photographs already being taken. The concurrency half is
+[ideas.md](ideas.md) item 16; the state half is what phase 6 exists for, and it also detects the
+bimodal operation of case **A** and answers case **C** outright — one mechanism, three rows.
+
+**Three limits survive it, and they are not small.**
+
+- **`RUNNABLE` does not mean "on a CPU".** `BLOCKED`, `WAITING` and `TIMED_WAITING` are conclusive;
+  `RUNNABLE` only means *eligible*, and it covers both a thread preempted by the scheduler —
+  measured at 14–18% on a bench that never blocks — and a thread sitting in a blocking socket read,
+  which the JVM cannot see into. Separating on-a-core from preempted still needs the per-thread duty
+  cycle, [ideas.md](ideas.md) item 10.
+- **Elapsed is not latency.** It says the operation had *somebody* inside it for 6.7 seconds. It says
+  nothing about any single execution, so case **A** survives untouched and only splitting the
+  operation answers it.
+- **Elapsed is not a counterfactual.** *"This lock cost 6.7 seconds of wall clock"* is not *"you
+  would be 6.7 seconds faster without it"* — those threads might have been blocked on something else
+  regardless. That is the warning at the foot of every report, and no amount of sampling retires it.
 
 ### Two quantities both called "inclusive"
 
