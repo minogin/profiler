@@ -3,11 +3,23 @@
 Each one has a job, and nothing is written in two places. Start with [tldr.md](tldr.md) if you have
 five minutes, or with [profiler.md](profiler.md) if you want the design.
 
-**Where we are right now:** phases 1, 2, 3, 3.5 and 3.75 are done, and so are two trials — Apache
-Calcite, and Apache Lucene, which was the first concurrent workload we did not write. Next are the
-**remaining trials**, and [plan.md](plan.md#trials-3--the-rest-of-the-list--next) carries the list —
-Netty, a compiler, and two deliberate negative controls — with the criteria and the six steps the
-two trials taught us about running one.
+**Where we are right now.** The fine tier is built and verified, on our own bench and on **three**
+foreign codebases: Apache Calcite, Apache Lucene, and Netty. Phases 1, 2, 3, 3.5 and 3.75 are done;
+phase 6 is half done — thread state and per-operation concurrency exist, the whole-application
+coefficient does not.
+
+**What to do next is [plan.md § What happens next](plan.md#what-happens-next-in-order)**, and it is
+three small fixes, a look at what they turn up, and then the coarse tier. The three are not
+tidying — each is a number the report gets wrong today, and each is now backed by measurement.
+
+**Two things worth knowing before reading anything else**, because they govern the rest:
+
+- **The tier boundary is not a size range.** It comes from what the instrumentation costs, and it
+  lands at *an operation under ~1 µs cannot be coarse*. Neither tier has an upper limit.
+  [profiler.md](profiler.md#where-the-boundary-is).
+- **How accurate this has to be**, which decides what is worth building: an error matters only if it
+  can move the ranking or point at the wrong operation, and random noise and uniform bias can do
+  neither. [profiler.md](profiler.md#how-accurate-this-has-to-be-and-where-that-budget-goes).
 
 | document | what belongs in it | read it when |
 |---|---|---|
@@ -43,4 +55,35 @@ two trials taught us about running one.
 | `src/main/kotlin/com/minogin/profiler/Main.kt` | the harness that runs it all and checks every claim |
 | `trial/` | the Calcite trial, in its own module so its dependencies cannot leak into the profiler |
 | `trial-lucene/` | the Lucene trial — the corpus, the wrappers that place the labels, and four instrumentation configurations to compare |
-| `trial-common/` | shared by both trials and depending on nothing but the JDK: the JFR recording and the collapsed-stack analysis |
+| `trial-netty/` | the Netty trial — the HTTP pipeline, the load generator, and the three-way A/B |
+| `trial-common/` | shared by every trial and depending on nothing but the JDK: the JFR recording and the collapsed-stack analysis |
+
+## Running the three trials
+
+Each is a separate Gradle module and none of them can reach the profiler's own dependencies,
+because the profiler has none.
+
+```bash
+# the bench — the workload whose true answer is known
+./gradlew run --args="--seconds=20"
+./gradlew run --args="--seconds=20 --lock=2000,10"    # with injected blocking
+./gradlew run --args="--seconds=15 --threads=32 --oversubscribe"
+
+# Netty — qualification, the labelled run, and the A/B
+./gradlew :trial-netty:classpathFile
+CP=$(cat trial-netty/build/classpath.txt)
+java -cp "$CP" com.minogin.profiler.trial.netty.NettyTrialKt --qualify --seconds=45
+java -cp "$CP" com.minogin.profiler.trial.netty.NettyTrialKt --labels  --seconds=45
+java -cp "$CP" com.minogin.profiler.trial.netty.NettyTrialKt --ab --rounds=8 --seconds=5
+
+# Lucene — the index is already built under trial-lucene/index
+./gradlew :trial-lucene:classpathFile
+java -cp "$(cat trial-lucene/build/classpath.txt)" \
+     com.minogin.profiler.trial.lucene.LuceneTrialKt --placement LABEL --seconds 45
+```
+
+**Runs on this laptop are not repeatable to better than about 60%.** Throughput falls 2.2× between
+a two-second run and a forty-second one, and an A/B that rebuilds anything between arms is dominated
+by the rebuilding rather than by the effect — see
+[findings.md](findings.md#measurement-technique). Any comparison has to be interleaved, ABBA, and
+against something that does not get torn down.

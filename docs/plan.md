@@ -34,6 +34,113 @@ names in the bench are a synthetic workload, nothing more.
 Stack: Kotlin/JVM, Gradle, no dependencies. Output to the console for now; see phase 8.
 
 ---
+---
+
+## What happens next, in order
+
+Three small fixes first, then a decision point, then the coarse tier. The three are not tidying:
+each one is a number in the report that is currently **wrong or misleading**, and each is now backed
+by measurement rather than by argument. Together they are the accumulated interest on three trials.
+
+### Step 1 — the three small things
+
+**1a. The floor check stops being fatal.** [ideas.md](ideas.md) item 12.
+
+A label below the 50 ns floor halts the session under `strict`. It has now stopped a *correct* run in
+**two consecutive trials**: Lucene, citing 27.5 ns for a label whose settled figure is 49.7 ns, purely
+because this laptop's throughput falls 2.2× with run length; and Netty, flagging `route` at 41 ns —
+which is genuinely below the floor and is a label any reasonable person would place on a scan of
+eight short strings.
+
+By the [accuracy principle](profiler.md#how-accurate-this-has-to-be-and-where-that-budget-goes) a
+below-floor label cannot move a ranking, so the cost of being wrong about it is the loudest failure
+the tool has — stopping a run that was fine. **Downgrade to a warning, keep the message unchanged.**
+The estimator work in item 12 becomes optional rather than blocking.
+
+*Not affected:* the balance check stays fatal. A leaked label invents attribution, which is a
+different category from a label being small.
+
+*Check it with:* the bench, where four of twenty operations sit below the floor on purpose — it must
+warn on all four and finish. And `trial-netty --labels`, which must stop needing `strict = false`.
+
+**1b. The duty cycle per thread.** [ideas.md](ideas.md) item 10.
+
+Two lines of every report divide by the wrong thing today.
+
+The bound — *"at most 81.2 pp of any share is occupancy that was not CPU"* — is computed over **every
+registered thread**, while the shares it bounds are over **labelled samples only**. An idle pool
+thread therefore poisons a warning that is not about it. Measured in starvation mode: 18.83% duty and
+a formally unbounded error, while the three working threads were on CPU 96% of the time and their
+shares were fine.
+
+The fix needs both halves per thread: thread *i*'s stall fraction, which the duty walk already
+computes and discards, and thread *i*'s labelled fraction, which is a per-slot counter the sampler
+writes. The stall that could possibly be inside labelled work is then `Σ min(stall_i, labelled_i)`.
+
+The same counter fixes the **coverage** line, which has the same defect from the other direction: on
+Lucene, 79.2% of unlabelled observations were a thread that was not runnable, so coverage against
+*runnable* occupancy is ~83% rather than the 49.8% printed.
+
+*Needs:* the immutable slot index, which already exists.
+
+*Check it with:* starvation mode (`--active=3 --threads=16`), where the bound must fall from ~81 pp
+to under 1 pp, and the ordinary bench, where nothing should change.
+
+*Verify first, because it decides the shape:* that a thread inside a label is always runnable. The
+bench's `--lock` mode is where to check — the label there sits *outside* the acquisition precisely so
+that a parked thread is still inside the operation, which is the counter-example if there is one.
+
+**1c. The report stops presenting CPU as the truth.** [ideas.md](ideas.md) item 17.
+
+*"share is of labelled samples and is occupancy, not CPU"* reads as an apology, and it is backwards
+for most of what anyone profiles. Occupancy counts waiting in full, which is the right behaviour for
+the latency question. The duty cycle exists not because CPU is the goal but because **summed
+occupancy is only additive when it is CPU** — a hundred threads parked one second on one lock is a
+hundred thread-seconds of occupancy and one second of real cost.
+
+So the line should say what it guards against — *this total may be counting the same wait many
+times* — rather than implying a CPU measurement was the objective and was missed. Same two sentences
+of output as 1b, so do them together.
+
+*Check it with:* reading it. No measurement involved; this one is wording.
+
+### Step 2 — a look at what those three turn up
+
+Deliberately a pause rather than a phase. 1b in particular changes two numbers in every report, and
+the trials' recorded figures were computed against the old denominators. Nothing is expected to
+break, but "nothing is expected to break" is exactly when this project has been wrong before.
+
+### Step 3 — phase 4, the coarse tier
+
+Unless step 2 turns something up. The argument for going here rather than to a fourth trial:
+
+- **It is the missing half.** The tool measures thread-time and cannot say how long one request
+  took. [profiler.md](profiler.md) lists *"answer where exactly should we look, and why"* as
+  requirement 3 and the gap is recorded there as deliberate.
+- **The trials have converged.** Calcite taught the tool `enter`/`exit`; Lucene taught that
+  misplacement is the danger and that the lexical form was back; Netty needed nothing new and its
+  friction list is mostly *"the host decides"*. A fourth returns less than the third did.
+- **Phase 5 needs it**, and phase 5 is what the supply-chain traversal this project came from
+  actually requires — nanosecond operations crossing coroutine suspensions.
+
+**The first task is bench work, not tool work:** promote some bench operations to coarse, so there is
+a known truth to cross-tabulate against. Same discipline as every phase here — build the truth
+before the instrument.
+
+### Not in this plan, and why
+
+- **Trials 4+** — the compiler and the two negative controls. Still worth doing, and now for the
+  write-up rather than for the build. Kept in the table above.
+- **The virtual-thread registry** ([ideas.md](ideas.md) item 8, second half). The only outright
+  defect in shipped code: every virtual thread appends a slot to a `CopyOnWriteArrayList`, which is
+  an O(n) copy per thread created, and the sampler walks the list every millisecond. It bites no
+  workload we can currently point at — neither trial creates virtual threads and coroutines run on
+  ordinary carrier threads — so it is a **release blocker rather than today's work**. Measured cost
+  at the 1024-slot ceiling: the walk is 291 µs of a 1 ms tick, and it was 195 µs before thread-state
+  sampling was added.
+- **The on-demand stack sampler** ([ideas.md](ideas.md) item 14). Affordable and proven to work; four
+  design questions unanswered. Diagnostics rather than correctness.
+
 
 ## Architecture — two tiers
 
