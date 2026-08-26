@@ -227,6 +227,38 @@ chose in advance. If the cost is somewhere nobody suspected, the flame graph wil
 labels will file it under whichever label happened to be set. The Calcite profile's JDK-heavy self
 time was unactionable, but it was also *true*, and it is the kind of truth labels cannot produce.
 
+
+**A stack can carry identity we said it could not, when the frames nest — and we overstated this
+twice.** The Netty trial's headline is that four policy handlers share one class, so
+`PolicyHandler.run` is a single frame at 60.30% covering four costs that differ by 40×. True of an
+ordinary flame graph, and it is what the tool was pointed at. But Netty's pipeline *nests* — each
+handler invokes the next inside its own frame — so a recursion-aware reading of the same collapsed
+stacks, counting how many `PolicyHandler` frames are present, **does** separate them:
+
+| chain position | by nesting depth | our labels |
+|---|---|---|
+| 1 `policy:geo` | 1.72% | 3.72% |
+| 2 `policy:quota` | 10.60% | 22.18% |
+| 3 `policy:abuse` | **56.24%** | **68.76%** |
+| 4 `policy:experiment` | **31.43%** | **5.35%** |
+
+It identifies the expensive policy correctly and ranks the first three correctly. That is a real
+capability and this document had claimed the stack had nothing at all.
+
+**What it gets wrong is still disqualifying, and worth being precise about.** Nesting depth yields
+*inclusive-from-that-position*: everything downstream of the last policy — the renderer, the response
+write, Netty's whole outbound path — is inside four policy frames and is billed to
+`policy:experiment`. It reads 31.43% for the **cheapest** policy in the chain, which holds 5.35%. A
+reader acting on it would go and optimise a 48-byte hash loop. And the three uncontaminated
+positions are still ~1.7× out in ratio, unexplained.
+
+**The general lesson, which is the useful part.** Whether a stack carries the domain's identity is
+not a property of the *tool* but of the *host's control flow*. Calcite dispatched twenty rules
+through one inherited method — nothing recoverable. Lucene's four clauses were four objects of one
+class reached identically — nothing recoverable. Netty nests, so position is depth and depth is in
+the stack. Before claiming a stack cannot answer something, check whether the host's shape has put
+the answer there anyway.
+
 **And the share they alone can speak for is not small — though smaller than we first said.** On
 Lucene, 47.8% of occupancy was outside every label, and the first version of this entry read that as
 "the labels explain half the run and a flame graph owns the rest". Measured afterwards, that was

@@ -64,14 +64,57 @@ A pipeline is a chain, so **each handler's inclusive time contains every handler
 numbers are not merely uninformative, they are not even subtractable in the usual way: `AuthHandler`
 at 83.44% is mostly the four policies and the renderer downstream of it.
 
-### The four policies are one number
+### The four policies are one number — with a qualification, below
 
 > `PolicyHandler.run` — **60.30%**
 
-That is all four policies together, and it is the single most important number in this section. The
+That is all four policies together as an ordinary flame graph reads it. The
 domain has four policies with costs that differ by design — 24, 48, 256 and 1,024 bytes hashed — and
 the stack has one frame for the lot. Same shape as Lucene's four `TermQuery` clauses sharing
 `TermScorer`, arrived at from a completely different direction.
+
+
+### But a recursion-aware reading *can* partly separate them — checked, because it would weaken this
+
+Netty's pipeline **nests**: each handler calls `ctx.fireChannelRead` inside its own frame, so the
+fourth policy runs with four `PolicyHandler` frames on the stack and the first with one. Counting
+occurrences per collapsed stack is a reading an ordinary flame graph does not do but a careful
+analyst could, and it has to be tried rather than assumed.
+
+**It works, and it is not nothing.** 8,641 of 10,570 samples carry a `PolicyHandler` frame, and they
+sort cleanly by depth (two frames per policy — Kotlin's generic bridge method — so 2/4/6/8 is
+chain positions 1/2/3/4):
+
+| chain position | policy | flame graph by nesting | our labels |
+|---|---|---|---|
+| 1 | `policy:geo` | 1.72% | 3.72% |
+| 2 | `policy:quota` | 10.60% | 22.18% |
+| 3 | `policy:abuse` | **56.24%** | **68.76%** |
+| 4 | `policy:experiment` | **31.43%** | **5.35%** |
+
+*(both columns normalised over the four policies, since the denominators differ)*
+
+**So the claim "a flame graph gives one number for four policies" is too strong, and this document
+made it.** With recursion-aware analysis it gives four numbers, gets the expensive one right, and
+gets the ranking of the first three right.
+
+**Where it fails, and it fails hard.** Counting nesting depth gives *inclusive-from-that-position*,
+not self time. Nothing sits below policies 1–3 except the next policy, so those three come out
+roughly self — but everything downstream of policy 4 (the renderer, the response write, Netty's
+whole outbound path) is inside four policy frames and lands on `policy:experiment`. It reads
+**31.43%** for the **cheapest policy in the chain**, which really holds 5.35%. A reader would go and
+optimise a 48-byte hash.
+
+The three clean positions also disagree by about 1.7× in ratio — JFR over-weights the largest and
+under-weights the small ones. Not explained. A counted `int` loop has its safepoint polls elided by
+HotSpot, so a stack sampler cannot interrupt inside one, and all four policies are counted `int`
+loops — that is the obvious suspect and it is **not** established here.
+
+**The honest verdict.** This is a weaker case for the tool than Lucene's, where four `TermQuery`
+clauses shared a frame with no positional difference at all and the stack genuinely had nothing.
+Here the stack has *something*, and the something is right about the biggest cost and badly wrong
+about the last one. Recorded in [case.md](case.md) under where the other tools do better than we
+first claimed.
 
 ### Self time is somebody else's bounds check
 
@@ -311,10 +354,51 @@ a genuinely bare build — but that read is in all three arms and cancels. Tradi
 bias for an order of magnitude less variance was the whole difference between a number and a shrug.
 
 
-## 7. What comes next
+
+## 7. The friction list — what this trial says about the tool
+
+Step 6 of the procedure, and it is the deliverable that gets dropped when the finding goes well.
+Phase 3.75 was built entirely out of Calcite's version of this list.
+
+**1. Nothing needed. That is the finding.** Calcite forced a fifteen-line helper and drove phase
+3.75's `enter`/`exit`. Lucene needed careful wrapper delegation. Netty needed **`Profiler.register`
+and `op(id) { }`**, and nothing else — because the handler bodies are ours. Third data point, and it
+says the placement problem is a property of the *host's* extension points, not of the tool. A
+library that hands you a method to implement is the easy case and it is also common.
+
+**2. One label per *configured instance*, and the API gives no help getting it right.** Netty builds
+a fresh pipeline per connection, so sixteen connections make sixteen `PolicyHandler` objects per
+policy. The id belongs to the policy and all sixteen must share it. Getting this wrong gives sixteen
+labels reading a sixteenth each — which does not look like a bug, it looks like a finding. Nothing
+in the tool could have caught it. Same class of hazard as Lucene's misplaced label: **plausible and
+silent.**
+
+**3. `strict` had to be off, for the second trial running.** `route` is a scan of eight short strings
+at 41 ns — genuinely below the floor, correctly flagged, and a label any reasonable person would
+place. Under the default it stops the run. Two trials in a row have needed the switch off, which is
+the evidence [ideas.md](ideas.md) item 12 now rests on.
+
+**4. The unlabelled fraction needed explaining, and the report could not.** Coverage is 14.5% here.
+That reads as *the labels miss most of the run* and it is a shape a first-time user will meet
+immediately: on an I/O server most thread-time is not the application's code. The line breaking
+unlabelled time into runnable and not-runnable was added *during* this trial because the number was
+otherwise unreadable.
+
+**5. There is no independent profiler to check against here, and that is new.** Calcite and Lucene
+were both checked against JFR's inclusive shares. On Netty the inclusive view is a spine and the
+self-time view does not contain our handlers at all, so **neither is comparable**. The check that
+replaced it — fitting the labels against the workload's own configuration — is arguably stronger,
+but it only exists because we wrote the workload. **On a target we had not written there would have
+been nothing to check against**, and that is a real gap in the method rather than in this trial.
+[ideas.md](ideas.md) item 15 is about exactly this and is now better motivated.
+
+
+## 8. What comes next
 
 1. **Trial 4.** Netty has answered what it was chosen for.
-2. **Whether the 59% self-time leaf is safepoint bias**, from section 2. Still open.
+2. **Whether the 59% self-time leaf is safepoint bias**, from section 2 — now with a second reason
+   to care: the nesting check disagrees with the labels by ~1.7x on the three clean positions, and
+   elided safepoint polls in counted `int` loops is the obvious suspect for both. Still open.
 3. **Coverage is 14.5%**, and most of the rest is Netty's own HTTP codec. Whether labels belong on
    somebody else's codec is a real question about what this tool is for, and it is the same question
    the Calcite fork ([ideas.md](ideas.md) item 3) asks from the other end.

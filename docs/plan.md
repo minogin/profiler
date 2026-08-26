@@ -19,7 +19,7 @@ words, is [tldr.md](tldr.md).
 | 3.5 | What a share is worth — bounding the error, not classifying operations | **done** |
 | 3.75 | Placement — enter/exit, the balance check, report polish | **done** |
 | — | Trial 2 — Lucene: concurrent, and identity by instance rather than by class | **done** |
-| — | Trial 3 — Netty: few event loops, many tasks, time that is mostly not CPU | **qualified, in progress** |
+| — | Trial 3 — Netty: few event loops, many tasks, time that is mostly not CPU | **done** |
 | — | Trials 4+ — a compiler, two negative controls | after Netty |
 | 4 | The coarse tier — contexts, spans, cross-tabulation | after the trials |
 | 5 | Crossing threads — propagation, and per-operation parallelism | not started |

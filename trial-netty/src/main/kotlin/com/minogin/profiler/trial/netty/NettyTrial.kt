@@ -261,7 +261,9 @@ fun qualify(seconds: Int, threads: Int, connections: Int, inFlight: Int) {
     )
     // Deep enough to reach our own handlers: Netty puts twenty frames of its own above them, so a
     // top-25 table stops before the pipeline the trial is about.
-    analyzeJfr(jfr, top = 45, collapsedOut = null)
+    val collapsed = Files.createTempFile("netty-collapsed", ".txt")
+    analyzeJfr(jfr, top = 45, collapsedOut = collapsed)
+    printNestingCheck(collapsed)
 
     // The question this trial exists to answer, asked of the flame graph directly. Every policy is
     // an instance of one class, so a stack can only ever produce one number for the four of them.
@@ -540,4 +542,65 @@ fun runAb(rounds: Int, seconds: Int, threads: Int, connections: Int, inFlight: I
             else "INCONCLUSIVE: inside twice its own error, so this run does not separate them"
         )
     )
+}
+
+/**
+ * Could a flame graph separate the four policies after all, by how deeply they nest?
+ *
+ * This is the check that could weaken the trial's headline, so it is worth running rather than
+ * assuming. Netty's pipeline **nests**: each handler calls `ctx.fireChannelRead`, which invokes the
+ * next handler *inside* the current frame. So the fourth policy runs with four `PolicyHandler`
+ * frames on the stack and the first with one, and a recursion-aware reading of the collapsed stacks
+ * could in principle tell them apart — which would mean the identity is in the stack after all, just
+ * not where an ordinary flame graph looks.
+ *
+ * Counting occurrences per collapsed stack is exactly that reading, done as favourably to the flame
+ * graph as it can be done.
+ */
+private fun printNestingCheck(collapsed: java.nio.file.Path) {
+    val byDepth = HashMap<Int, Long>()
+    var withPolicy = 0L
+    var total = 0L
+    Files.newBufferedReader(collapsed).use { r ->
+        while (true) {
+            val line = r.readLine() ?: break
+            val cut = line.lastIndexOf(' ')
+            if (cut < 0) continue
+            val count = line.substring(cut + 1).trim().toLongOrNull() ?: continue
+            total += count
+            // How many PolicyHandler frames are on this stack: 1 means the first policy in the
+            // chain was running, 4 means the fourth, since each nests inside the last.
+            var n = 0
+            var i = line.indexOf("PolicyHandler.channelRead0")
+            while (i >= 0) {
+                n++
+                i = line.indexOf("PolicyHandler.channelRead0", i + 1)
+            }
+            if (n > 0) {
+                withPolicy += count
+                byDepth.merge(n, count, Long::plus)
+            }
+        }
+    }
+    println()
+    println("=".repeat(78))
+    println("COULD A FLAME GRAPH SEPARATE THE POLICIES BY NESTING DEPTH?")
+    println("=".repeat(78))
+    println(
+        String.format(
+            Locale.ROOT, "  %,d of %,d samples have a PolicyHandler frame (%.1f%%)",
+            withPolicy, total, withPolicy * 100.0 / total.coerceAtLeast(1)
+        )
+    )
+    println(String.format(Locale.ROOT, "  %-24s %10s %9s", "PolicyHandler frames", "samples", "share"))
+    for (d in byDepth.keys.sorted()) {
+        val c = byDepth[d]!!
+        println(
+            String.format(
+                Locale.ROOT, "  %-24d %,10d %8.2f%%   (chain position %d)",
+                d, c, c * 100.0 / withPolicy.coerceAtLeast(1), d
+            )
+        )
+    }
+    Files.deleteIfExists(collapsed)
 }
