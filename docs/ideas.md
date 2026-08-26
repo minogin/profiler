@@ -272,8 +272,13 @@ operation id. Have it read the **call counter for that id** in the same tick, an
 | same | same | **unchanged** | *one* instance spanning ≥ 1 ms — 50,000× longer than a 20 ns operation should be |
 
 That is the whole test. A single 20 ns instance has a 1-in-50,000 chance of being caught by one
-sample, so an instance that survives two consecutive ticks is not a fine operation, whatever it was
-labelled. The counter increment already exists on the hot path; the sampler reads one extra word.
+sample, so an instance that survives two consecutive ticks is **not the size its label claims** —
+which is a different statement from "not a fine operation", and the wording here used to be the
+second. The [tier boundary](profiler.md#where-the-boundary-is) puts no upper limit on the fine tier,
+and Calcite settled it in practice: labels of hundreds of microseconds, sampled, agreeing with JFR
+to about a percentage point. What the detector finds is a label whose *description* is wrong, and
+the useful consequence is that coarse is now **available** to it — not that fine has stopped working.
+The counter increment already exists on the hot path; the sampler reads one extra word.
 Entry and exit are untouched, which is the constraint that matters.
 
 **What it cannot tell you alone.** An unchanged counter means "stuck in one instance", which
@@ -470,6 +475,54 @@ not own has the same exposure and none of the harness. Two thoughts, neither wor
 recipe (record JFR over the same window, collapse the stacks, compare inclusive shares against the
 label shares) shipped as part of the README rather than as trial code; or a mode that records both
 at once and prints them side by side, which is more use and considerably more work.
+
+## 16. Per-operation concurrency, which we already collect and throw away · open
+
+Each tick photographs every thread at one instant, so it already knows *how many* threads were
+inside operation X at that moment. Today that is summed into occupancy and the distribution is
+discarded. Kept instead, it gives per operation: *2.7 threads inside on average; one thread 18% of
+the time, eight threads 4% of the time.*
+
+**No stack profiler can produce this, and the reason is structural.** async-profiler, JFR and
+everything else sample each thread on its own timer signal, so they never hold all threads at one
+instant — the information is destroyed before the question can be asked. Our sampler walks every
+slot in one pass, so it has it for free. [plan.md](plan.md) already says this about the
+whole-application coefficient in phase 6; the per-operation version is the same observation one
+level down and needs nothing phase 6 needs.
+
+**What it costs:** one counter per operation per tick, on the sampler's own arrays — the same shape
+as the long-instance detector's `prev*` arrays, and nothing on the hot path. **What is unsettled:**
+whether it wants a full histogram or just mean and max, and whether it earns a report column or is
+only interesting when it disagrees with the whole-application figure.
+
+## 17. The report presents CPU as the truth and occupancy as the approximation · open
+
+*A framing defect, not a measurement one. Nothing here is wrong; it reads as though the wrong
+quantity is the goal.*
+
+The duty line says *"threads were on CPU 18.8% of sampled wall time — at most 81.2 pp of any share
+is occupancy that was not CPU"*, and the column footer says *"share is of labelled samples and is
+occupancy, not CPU"*. Both read as an apology: CPU is the real number and occupancy is what we
+managed to get.
+
+That is backwards for most of what anyone profiles. Three quantities are in play and only the first
+two are ever wanted:
+
+| quantity | a 200 ms request that computes for 5 ms and waits for a database | answers |
+|---|---|---|
+| wall time | 200 ms | why is this slow for the user |
+| CPU | 5 ms | why is the machine saturated |
+| **occupancy — what we measure** | 200 ms | — |
+
+Occupancy counts waiting *in full*, which is the right behaviour for the latency question. So the
+reason the duty cycle exists is not that CPU is the goal. It is that **summed occupancy is only
+additive when it is CPU**: a hundred threads parked one second on one lock is a hundred seconds of
+occupancy and one second of real cost, because waiting is simultaneous and cycles are not.
+
+So the line should say what it is actually guarding against — *this total may be counting the same
+wait many times* — rather than implying a CPU measurement was the objective and was missed. Also
+open: the same line's denominators are wrong, which is item 10, and the two are worth fixing in one
+pass since they are the same two sentences of output.
 
 ---
 

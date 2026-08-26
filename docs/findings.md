@@ -996,6 +996,18 @@ rule of three — and belongs in front of the reader.
 
 ## Open questions
 
+**What a coarse label will cost per execution — only two thirds of it is measured.** The tier
+boundary in [profiler.md](profiler.md#where-the-boundary-is) is derived from ~40 ns per coarse
+execution, of which **21.5 ns is measured** — fitted from the Lucene timed-wrapper comparison, which
+is two `nanoTime` calls plus an accumulate — and the rest is an assumed cost for allocating the
+context object, which nothing here has measured. The boundary moves with it: at 30 ns the coarse
+floor is 600 ns rather than 800, at 60 ns it is 1.2 µs. Worth measuring before any threshold is
+hard-coded, and the bench already has the shape needed to do it, since `--labels` and `--sampler`
+are separate switches and a third would follow the same pattern. Two things also unaccounted for and
+harder: the allocation's effect on *other* code through GC pressure, and the likelihood that the
+extra body prevents C2 inlining, which is not additive at all — the demo has already shown C2 moving
+work across label boundaries by 95%.
+
 **The floor check is not machine-independent, and it stopped a correct placement.** Measured above:
 implied per-call duration on this laptop rises 3× between a two-second and a twenty-second run,
 purely from throttling, so `strict` halted a Lucene placement whose settled number is above the

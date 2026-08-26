@@ -12,7 +12,7 @@ two trials taught us about running one.
 | document | what belongs in it | read it when |
 |---|---|---|
 | [tldr.md](tldr.md) | the whole project in plain words, no jargon | you want to know what this is |
-| [profiler.md](profiler.md) | the design and the prior art | you want to know how it works and why it is shaped this way |
+| [profiler.md](profiler.md) | the design and the prior art — and the **tier boundary**: which operations can be coarse, what the fine tier measures, and where it breaks | you want to know how it works and why it is shaped this way |
 | [plan.md](plan.md) | work we committed to, phase by phase, rewritten as each closes to say what was actually built | you want to know where we are |
 | [findings.md](findings.md) | only things we measured, each with the measurement that produced it | you want to know what is true, and why we believe it |
 | [case.md](case.md) | observations of existing tools failing at something, and where they are better than us | you want to know why this exists at all |

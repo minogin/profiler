@@ -188,9 +188,16 @@ thread-local slot and measured by sampling. That answers *which operation is hot
 
 The tool being built has a second tier above it. **Coarse operations** are logical units of work —
 expanding a frontier, applying a filter set, serving a query — thousands of executions rather than
-billions, milliseconds rather than nanoseconds, and crossing thread boundaries freely. Those get a
-real context object: allocated, propagated across hand-offs, timestamped at both ends. At a
-millisecond an allocation and two clock reads are free; at twenty nanoseconds they are impossible.
+billions, and crossing thread boundaries freely. Those get a real context object: allocated,
+propagated across hand-offs, timestamped at both ends.
+
+**The boundary is roughly one microsecond**, and it comes from what that context costs — about
+40 ns per execution against 2 ns for a fine label. Below a microsecond the instrument would be a
+visible fraction of the operation, so fine is the only tier that works; that is its reason to exist.
+Above a microsecond both tiers work and it becomes a choice. Neither has an upper limit — Calcite's
+planner rules are hundreds of microseconds each and the fine tier measured them correctly. The
+derivation and the cases the rule cannot cover are in
+[docs/profiler.md](docs/profiler.md#where-the-boundary-is).
 
 The two meet at the slot, which carries the current fine operation *and* the current coarse
 context. So every sample records the pair, and the result is not just a list of hot operations:

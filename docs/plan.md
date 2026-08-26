@@ -39,14 +39,20 @@ Stack: Kotlin/JVM, Gradle, no dependencies. Output to the console for now; see p
 The tool measures two different kinds of thing, and they cannot share a mechanism.
 
 **Fine — physical operations.** A hash probe, an edge scan, one filter condition. Billions of
-executions, tens of nanoseconds each, atomic in the sense that they call nothing interesting.
-Identified by an integer in a thread-local slot and measured by sampling. No identity, no
-allocation, no timestamps — at these durations a clock read costs more than the operation.
+executions, atomic in the sense that they call nothing interesting. Identified by an integer in a
+thread-local slot and measured by sampling. No identity, no allocation, no timestamps.
 
 **Coarse — logical operations.** Expanding a frontier, applying a filter set, serving a query.
-Thousands of executions, milliseconds each, freely crossing thread boundaries. Each execution gets
-a real context object: allocated, propagated across hand-offs, timestamped at both ends. At these
-durations an allocation and two `nanoTime` calls are free.
+Thousands of executions rather than billions, freely crossing thread boundaries. Each execution gets
+a real context object: allocated, propagated across hand-offs, timestamped at both ends.
+
+**Where the boundary is, and it is not a size range.** It comes from what the instrumentation costs
+per execution — ~40 ns for coarse against ~2 ns for fine — and it lands at **d ≥ max(800 ns, 4 µs ×
+share)**, so in practice: *an operation under ~1 µs cannot be coarse, and that is the fine tier's
+entire reason to exist.* Neither tier has an upper limit — Calcite's rule labels were hundreds of
+microseconds and the fine tier measured them correctly. The derivation, the two conditions it comes
+from, the exclusions that are not about size, and what the rule cannot bound are all in
+[profiler.md](profiler.md#where-the-boundary-is), which is where the tier definitions live.
 
 **They meet at the slot**, which carries both the current fine operation id and a reference to the
 current coarse context. Every sample records the pair, so the fine breakdown can be cross-tabulated
@@ -210,7 +216,11 @@ deciding *which* operation was waiting, rather than bounding how much waiting th
 thread's state sampled beside its label. That is phase 6.
 
 **The decision that shapes this phase: bound the error, do not classify the operations.** The
-tempting design is a rule for which operations are allowed to be fine. That rule cannot be written.
+tempting design is a rule for which operations are allowed to be fine — *on the grounds of whether
+they block*. That rule cannot be written, and it should not be confused with the tier boundary in
+[profiler.md](profiler.md#where-the-boundary-is), which is a different rule about a different
+quantity: that one is decided by what the instrumentation costs, which is known in advance, while
+this one would be decided by what the run does, which is not.
 Nothing is guaranteed non-blocking — any allocation can meet a GC pause, any access can page-fault,
 any thread can be descheduled between two instructions — so "could this block?" marks everything
 coarse and answers nothing. Worse, contention is a property of the *run* and not of the code: a
@@ -307,7 +317,12 @@ untouched** — the counter increment already exists and the sampler reads one e
 
 Split the sampler's per-operation counter in two, *fresh* and *stuck*, so one pass yields both an
 occupancy share and a running share, and the report can say per operation: *340 instances lasted
-over a tick — this is not a fine operation, consider a coarse label.*
+over a tick — this label is not the size it claims, and coarse is now affordable for it.* Not
+*"this is not a fine operation"*, which is how this read before the
+[tier boundary](profiler.md#where-the-boundary-is) was settled: the fine tier has no upper limit,
+and a long label is measured perfectly well by it — Calcite's were, to within a point of JFR.
+What being long changes is that coarse becomes **available**, offering per-execution statistics
+that fine can never give.
 
 **Where the previous tick's pair is kept matters.** Not on the `OpSlot`: the sampler writing to that
 object would invalidate the owner's cache line on every tick, which is precisely the false sharing

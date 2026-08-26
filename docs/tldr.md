@@ -56,11 +56,23 @@ things they cannot do:
 
 |  | **fine** | **coarse** |
 |---|---|---|
-| size | 50 ns – 1 ms | milliseconds |
+| size | **50 ns and up, no upper limit** | **~1 µs and up** |
 | example | a hash probe, one filter condition | serving a query, planning a statement |
 | how it is measured | an integer in a slot, sampled | a real object, allocated and timestamped |
 | what you get | share of time, and counts | per-execution duration, percentiles, parallelism |
+| cost per execution | ~2 ns | ~40 ns |
 | status | **built and verified** | phase 4, not started |
+
+**The two overlap, and the sizes above are not a dividing line.** Below about a microsecond you have
+no choice: timestamping an operation that short costs more than the operation, so fine is the only
+thing that works — that is the whole reason the fine tier exists. Above a microsecond **both work**,
+and the question changes from *how long is it* to *what do I want*. Coarse tells you more. Fine is
+twenty times cheaper, and its error does not grow with how often the operation is called, which a
+stopwatch's does — that is what made a competing tool rank the wrong Lucene clause first.
+
+Nothing is too *long* to be fine. We measured Apache Calcite's planner rules that way — hundreds of
+microseconds each, well into coarse territory — and the numbers agreed with an independent profiler
+to about one percentage point, and found a 275× speedup.
 
 Below ~50 ns, do not label the operation at all — label the loop around a hundred of them and
 divide. Three reasons, all measured: the instrument is a visible fraction of the work, the sampler

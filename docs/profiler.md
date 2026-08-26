@@ -115,16 +115,145 @@ hand-off — and you cannot allocate one per twenty-nanosecond operation execute
 So the two cannot share a mechanism, and the tool has two tiers.
 
 **Fine — physical operations.** A hash probe, one filter condition. Billions of executions, tens of
-nanoseconds, calling nothing interesting. An integer in a thread slot, measured by sampling. No
+nanoseconds each, calling nothing interesting. An integer in a thread slot, measured by sampling. No
 identity, no allocation, no timestamps. Self time is all they have, and since they are atomic, self
 time *is* their inclusive time.
 
-**Coarse — logical operations.** Expanding a frontier, applying a filter set. Thousands of
-executions, milliseconds each, crossing threads freely. A context object with a type, a parent
-reference and timestamps at both ends. At these durations a clock read costs nothing.
+**Coarse — logical operations.** Expanding a frontier, applying a filter set, serving a query. A
+context object with a type, a parent reference and timestamps at both ends, propagated across
+hand-offs. Thousands of executions rather than billions, and each long enough that an allocation and
+two clock reads are lost in the noise.
 
 **They meet at the slot**, which carries the fine operation id *and* a reference to the current
 coarse context. Every sample records the pair.
+
+### Where the boundary is
+
+Stating the tiers as size ranges — "tens of nanoseconds" against "milliseconds" — is how this
+document read for a long time, and it is wrong in both directions. The boundary is not a size. It
+comes from what each mechanism costs per execution:
+
+| tier | instrumentation | cost per execution |
+|---|---|---|
+| fine | two opaque stores | **1.7–2.3 ns**, measured in phase 3 |
+| coarse | two `nanoTime` plus an accumulate | **21.5 ns**, fitted from the Lucene timed-wrapper run |
+| | …plus one allocation for the context | **not measured** — see the open question |
+
+Taking coarse at ~40 ns pending that measurement, an operation may be coarse when **both** of these
+hold. They protect different things and neither implies the other:
+
+| # | condition | protects |
+|---|---|---|
+| 1 | `40 ns × calls ≤ 1% of the run` | **the program** — that you are measuring what you started with |
+| 2 | `40 ns ≤ 5% of the operation's own duration` → **d ≥ 800 ns** | **the number** — that it describes the code and not the instrument |
+
+Condition 1 alone is not enough, and the counter-example is small enough to be easy to miss: a 40 ns
+operation called rarely passes it comfortably, and is then reported at 80 ns. The program is
+undisturbed and the measurement is 100% wrong.
+
+Written in terms of the operation's share of the run, the two collapse into one line:
+
+> **d ≥ max(800 ns, 4 µs × share)**
+
+| operation holds | must be at least |
+|---|---|
+| 1% of the run | 800 ns |
+| 20% | 800 ns |
+| 50% | 2 µs |
+| 100% | 4 µs |
+
+**Condition 1 only binds above about 20% share.** Everywhere else the 800 ns floor decides, so in
+practice the rule is: **an operation under ~1 µs cannot be coarse — and that is the fine tier's
+entire reason to exist.**
+
+**Neither tier has an upper limit, and this is the part that surprises.** Calcite's rule labels were
+hundreds of microseconds — coarse-sized by any reading — and were measured with the *fine* tier,
+agreed with JFR to about a percentage point, and produced the 275× finding. Above 1 µs both tiers
+work, and the question stops being *how long is it* and becomes *do I need per-instance data*.
+Coarse tells you more; fine is 20× cheaper and, unlike a timer, its error is not proportional to
+call count.
+
+**Fine's own floor is 50 ns**, and it comes from measurement rather than from the hook's price:
+below 45 ns the sampler reads 4.5–9.1% low, and C2 moves work across label boundaries
+undetectably. Under 50 ns, label the enclosing loop with `op(id, times = n)` and divide.
+
+**Two exclusions that have nothing to do with size.** Coarse needs a begin and an end with the
+context flowing between them, and third-party code does not always offer one — a *placement* limit,
+not a tier limit. And a loop body labelled `times = n` has no pair of instants to timestamp, so
+batch labels are fine-only by construction.
+
+### Negligible operations
+
+An operation the sampler cannot see is one under roughly a thousand samples, which is about a second
+of occupancy, which in a hundred-second run across eight threads is **under 0.15% of the work**. It
+cannot be where the time went. We do not chase these, and a tool that tried would spend its
+credibility on false positives.
+
+**But cost and consequence are different numbers.** A 500 ns operation that takes a global lock a
+thousand times a second is 0.05% of the run and invisible — and if each acquisition parks fifteen
+threads for 300 µs, it *causes* four and a half seconds of waiting per second of runtime. The
+requirement this puts on the tool is not to find the operation. It is that **the waiting must never
+be invisible**, which is the same demand the report's closing counterfactual warning already makes
+from the other direction.
+
+### What the rule cannot do, and the check that covers it
+
+The rule bounds added **work**. What breaks a parallel program is added **critical path** — a sum
+against a max, and the two are unrelated. Forty nanoseconds added to eight hundred thread-seconds of
+work is nothing; forty nanoseconds added to a 40 ns barrier section doubles it, and every thread
+joining that barrier waits. Worse, those waiting threads are labelled too, so their occupancy rises:
+instrumenting one operation makes **other** operations look expensive, and the report points at the
+innocent ones.
+
+The tool knows call counts and durations. It cannot know the critical path, so no static condition
+can bound this. **The tier rule is necessary and not sufficient**, and its companion is procedural:
+A/B the run three ways — bare, instrumented-but-inert, instrumented-and-labelled — comparing
+**end-to-end throughput**, never summed occupancy, which is a sum and hides exactly this failure. It
+has already caught one real instance: a careless Lucene wrapper, 13.3% slower, with one clause
+moving from seventh to third.
+
+### What the fine tier measures
+
+The mechanism does two things. The hook **counts**, and the sampler **photographs** every thread at
+one instant every millisecond. Every number below is derived from a count and a stack of
+photographs, and everything the tier cannot do follows from the same two sentences.
+
+| from | metric | what it is |
+|---|---|---|
+| counting — exact | **calls** | not estimated; the hook increments |
+| photographs | **occupancy** | photos × step — summed thread-time |
+| | **share** | its slice of all labelled photos |
+| | **noise** | `1/√hits`, how wrong chance alone makes the share |
+| | **long executions** | occupancy inside executions that outlived a tick |
+| both | **implied per call** | occupancy ÷ calls |
+
+**Concurrency costs nothing extra.** When three threads are inside an operation at one instant, that
+photograph contributes three. Lucene ran eight workers and needed no new machinery for it.
+
+**And one metric is available that we do not yet take.** Each photograph says *how many* threads were
+inside operation X at that instant, so the run yields a per-operation concurrency distribution. No
+stack profiler can produce it — they sample each thread on its own timer and never hold all threads
+at one instant. See [ideas.md](ideas.md) item 16.
+
+### Where the fine tier breaks
+
+Sized correctly — 50 ns to 1 µs, or larger by choice — most of the ways sampling can fail either
+define the boundary or belong to the other tier. The third column is the one that matters:
+
+| | what breaks | does it apply to a correctly-sized fine operation? |
+|---|---|---|
+| **A** | no per-execution durations | **Always — and only hurts when the operation is bimodal.** A photograph has no duration, so there are no percentiles, ever. An operation that is 50 ns normally and 100 µs when it hits a lock reports 150 ns, and no execution was ever 150 ns. That operation is two operations wearing one name: the fast path is fine, the slow path is its own coarse label. |
+| **B** | occupancy is not elapsed time | **Always.** A property of the unit, not of the operation. Eight threads working five seconds is forty seconds of occupancy in a five-second run. For computation the sum is real; for waiting it is not, because waiting happens simultaneously. Cannot be fixed — only explained. |
+| **C** | waiting and working look identical | **In two forms.** Machine-wide stalling — preemption and GC — lands on everything uniformly (13.27–17.90% across all twenty bench operations), so it is the run's doing and not the operation's. Genuine contention is real, and the answer is to split the operation, not to re-tier it. |
+| **D₁** | coroutines: the label follows the thread | **Never.** The defect needs a suspension point between the label write and the restore, and a suspension costs a continuation allocation plus a dispatch — hundreds of nanoseconds at best. "Fine-grained" and "suspends inside the operation" are mutually exclusive by construction, so the same-thread assumption is self-enforcing. See [ideas.md](ideas.md) item 8. |
+| **D₂** | virtual threads: the registry explodes | **Yes, today, and it needs no suspension at all.** Every virtual thread appends a slot to a `CopyOnWriteArrayList` — an O(n) copy per thread created — and the sampler walks the list every millisecond. Ordinary 20 ns operations on a million short-lived virtual threads make the tick unbounded. |
+| **E** | resolution floors | **Not a break** — it *is* the lower edge, defined above. |
+| **F** | no structure: no caller, no nesting | **Always, and hurts never.** Atomic means there is nothing under an operation to lose. It is the reason the coarse tier has to exist, not a defect in this one. |
+
+**So the genuine residue is three items**, and only one of them is a defect: **B** needs explaining
+in the report rather than fixing; **C** in its contention form is answered by splitting the
+operation; **D₂** is a registry problem in shipped code with nothing to do with tiers.
+
 
 ### Two quantities both called "inclusive"
 
