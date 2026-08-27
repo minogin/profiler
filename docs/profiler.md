@@ -291,14 +291,15 @@ define the boundary or belong to the other tier. The third column is the one tha
 | **B** | occupancy is not elapsed time | **Always.** A property of the unit, not of the operation. Eight threads working five seconds is forty seconds of occupancy in a five-second run. For computation the sum is real; for waiting it is not, because waiting happens simultaneously. **Solvable, and from photographs we already take** — see below. |
 | **C** | waiting and working look identical | **In two forms.** Machine-wide stalling — preemption and GC — lands on everything uniformly (13.27–17.90% across all twenty bench operations), so it is the run's doing and not the operation's. Genuine contention is real, and the answer is to split the operation, not to re-tier it. |
 | **D₁** | coroutines: the label follows the thread | **Never.** The defect needs a suspension point between the label write and the restore, and a suspension costs a continuation allocation plus a dispatch — hundreds of nanoseconds at best. "Fine-grained" and "suspends inside the operation" are mutually exclusive by construction, so the same-thread assumption is self-enforcing. See [ideas.md](ideas.md) item 8. |
-| **D₂** | virtual threads: the registry explodes | **Yes, today, and it needs no suspension at all.** Every virtual thread appends a slot to a `CopyOnWriteArrayList` — an O(n) copy per thread created — and the sampler walks the list every millisecond. Ordinary 20 ns operations on a million short-lived virtual threads make the tick unbounded. |
+| **D₂** | virtual threads: the registry explodes | **Was yes; fixed.** Every thread used to append its slot to a `CopyOnWriteArrayList` — an O(n) copy per thread created, O(n²) over a run — and the sampler walked a list as long as the live thread count, every millisecond, with no ceiling. The registry is a fixed array indexed by slot index now: registration and release are one store, and the walk is bounded by peak *simultaneous* threads. Measured: 12,000 threads created leaves a walk of 800 entries, being the peak concurrency, and doubling the thread count doubles the registration cost rather than quadrupling it. The cost is a real one — a thread past the ceiling is no longer sampled at all, where it used to be sampled and merely untracked — and the report says so loudly. |
 | **E** | resolution floors | **Not a break** — it *is* the lower edge, defined above. |
 | **F** | no structure: no caller, no nesting | **Always, and hurts never.** Atomic means there is nothing under an operation to lose. It is the reason the coarse tier has to exist, not a defect in this one. |
 
-**So the genuine residue is three items**, and two of them turn out to be one feature. **A** and
-**C** are the same case for an operation in this band — see the next section but one — and **B**
-dissolves once the photographs are read for more than a sum. **D₂** is a registry problem in shipped
-code with nothing to do with tiers, and it is the only outright defect on the list.
+**So the genuine residue is two items**, and they turn out to be one feature. **A** and **C** are the
+same case for an operation in this band — see the next section but one — and **B** dissolves once the
+photographs are read for more than a sum. **D₂** was the one outright defect on the list, and it was
+a registry problem with nothing to do with tiers; it is fixed, and what it leaves behind is a stated
+blind spot above the slot ceiling rather than an unbounded walk.
 
 ### Turning occupancy back into wall time
 

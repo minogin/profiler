@@ -3,7 +3,6 @@ package com.minogin.profiler
 import java.lang.invoke.MethodHandles
 import java.lang.invoke.VarHandle
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.min
 
@@ -24,12 +23,17 @@ const val MAX_OPERATIONS = 256
 const val NO_OP_INDEX = MAX_OPERATIONS
 
 /**
- * How many threads the long-instance detector can track at once.
+ * How many threads the sampler can watch at once.
  *
- * Only a ceiling on the sampler's parallel arrays — 16 KB for the lot — and indexes are recycled
- * when threads die, so this is a limit on *simultaneous* registered threads and not on how many a
- * process may create. A thread past the ceiling is still sampled and still counted; it is only
- * invisible to the detector, and the report says so rather than quietly dropping it.
+ * A ceiling on the sampler's parallel arrays — 16 KB for the lot — and indexes are recycled when
+ * threads die, so this limits *simultaneous* registered threads and not how many a process may
+ * create. A pool of 32 that churns for a week never approaches it.
+ *
+ * **A thread past the ceiling is not sampled at all**, and the report says how many there were.
+ * That is a change: it used to be sampled and merely invisible to the long-execution detector,
+ * which meant the walk had no upper bound and a workload that made threads in bulk could stall the
+ * sampler outright. A bounded walk with a stated blind spot beats an unbounded one that corrupts
+ * every number in the report — see the `D₂` row in profiler.md.
  */
 const val MAX_SLOTS = 1024
 
@@ -215,7 +219,49 @@ fun OpSlot.countOpaque(id: Int): Long = OpSlot.COUNTS.getOpaque(counts, id + OpS
  * the time the sampler starts and no thread appears mid-run.
  */
 object Profiler {
-    private val allSlots = CopyOnWriteArrayList<OpSlot>()
+    /**
+     * The walk list, as a fixed array indexed by slot index rather than a growable list.
+     *
+     * **This is the fix for the one outright defect the design doc carried** — `D₂` in
+     * [profiler.md]. It used to be a `CopyOnWriteArrayList`, which copies the whole array on every
+     * add and every remove: a process that creates threads in bulk paid O(n) per thread and O(n²)
+     * over the run, and the sampler then walked a list whose length was the number of live threads,
+     * every millisecond, with no ceiling on it. Virtual threads make both of those unbounded — a
+     * million short-lived ones is a million array copies and a tick that cannot finish — and
+     * "threads, virtual threads, and coroutines" is requirement 2, not an edge case. It was deferred
+     * only because no trial here creates them, which is a gap in the trials rather than evidence
+     * about the defect.
+     *
+     * An `AtomicReferenceArray` gives the same safe publication the copy-on-write list did — each
+     * element is a volatile read and write — while registration and release become a single store.
+     * The walk is then bounded by [MAX_SLOTS] rather than by how many threads the process has made,
+     * and in practice by [ceiling], which is how far the indexes have ever reached.
+     *
+     * **What it costs, and it is a real cost:** a thread that arrives past the ceiling has no index
+     * and so is no longer in the walk at all. It used to be sampled and merely invisible to the
+     * long-execution detector. Now it is invisible to both, and the report says how many such
+     * threads there were — see [Report.untrackedSlots]. That is a bounded, stated degradation in
+     * place of an unbounded walk, and an unbounded walk corrupts every number rather than one.
+     */
+    private val slotByIndex = java.util.concurrent.atomic.AtomicReferenceArray<OpSlot?>(MAX_SLOTS)
+
+    /**
+     * One past the highest slot index ever handed out, so the walk skips the tail it has never
+     * used. Only ever rises, and it is bounded by [MAX_SLOTS]: on a bench with eight workers the
+     * sampler reads nine entries per tick, not 1024.
+     */
+    private val ceiling = AtomicInteger(0)
+
+    /** How far the walk has to go. See [ceiling]. */
+    internal fun slotCeiling(): Int = ceiling.get()
+
+    /** The slot at [i], or null if that index is free right now. See [slotByIndex]. */
+    internal fun slotAt(i: Int): OpSlot? = slotByIndex.get(i)
+
+    /** Runs [action] over every live slot. Allocation-free, so the sampler may call it per tick. */
+    internal inline fun forEachSlot(action: (OpSlot) -> Unit) {
+        for (i in 0 until slotCeiling()) action(slotAt(i) ?: continue)
+    }
 
     /**
      * Slot indexes in use, and the ones given back by threads that have died.
@@ -232,8 +278,14 @@ object Profiler {
         freeIndexes.poll() ?: nextIndex.getAndIncrement().let { if (it < MAX_SLOTS) it else -1 }
 
     private val local: ThreadLocal<OpSlot> = ThreadLocal.withInitial {
-        val s = OpSlot(takeIndex())
-        allSlots.add(s)
+        val idx = takeIndex()
+        val s = OpSlot(idx)
+        if (idx >= 0) {
+            slotByIndex.set(idx, s)
+            // Raised after the slot is published, never before, so the sampler cannot read a null
+            // inside the range it has been told to walk.
+            ceiling.getAndUpdate { if (idx < it) it else idx + 1 }
+        }
         s
     }
 
@@ -359,7 +411,11 @@ object Profiler {
     private var untrackedAtStart = 0
 
     /** Threads still inside a hand-placed label right now, which at the end of a session is a leak. */
-    fun openSpans(): Int = allSlots.count { it.depth > 0 }
+    fun openSpans(): Int {
+        var n = 0
+        forEachSlot { if (it.depth > 0) n++ }
+        return n
+    }
 
     /**
      * Drops the calling thread's slot. A thread that has finished must not stay in the walk list:
@@ -381,7 +437,7 @@ object Profiler {
      */
     fun release() {
         val s = local.get()
-        allSlots.remove(s)
+        if (s.index >= 0) slotByIndex.set(s.index, null)
         synchronized(retiredCounts) {
             for (id in 0 until MAX_OPERATIONS) retiredCounts[id] += s.countOf(id)
         }
@@ -395,11 +451,19 @@ object Profiler {
     fun untrackedSlots(): Int = (nextIndex.get() - MAX_SLOTS).coerceAtLeast(0)
 
     /** Every live registered slot. Read by the sampler. */
-    fun slots(): List<OpSlot> = allSlots
+    /**
+     * The live slots, as a snapshot. Allocates, so it is for callers outside the tick loop — the
+     * sampler and the duty walk use [forEachSlot], which does not.
+     */
+    fun slots(): List<OpSlot> = buildList { forEachSlot { add(it) } }
 
     /** Total calls of an operation: live threads plus those that have already exited. */
     fun callsOf(id: Int): Long =
-        synchronized(retiredCounts) { retiredCounts[id] } + allSlots.sumOf { it.countOf(id) }
+        synchronized(retiredCounts) { retiredCounts[id] }.let { retired ->
+            var live = 0L
+            forEachSlot { live += it.countOf(id) }
+            retired + live
+        }
 
     /**
      * Starts sampling. One sampler at a time.

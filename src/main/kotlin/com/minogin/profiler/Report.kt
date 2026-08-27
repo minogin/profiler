@@ -608,7 +608,8 @@ class Report(
             appendLine("  ! " + tooSmallMessage(op.name, op.calls, impliedUpperNanosOf(op)))
         }
         if (untrackedSlots > 0) {
-            appendLine("    (${untrackedSlots} threads arrived past the $MAX_SLOTS-slot ceiling and are not checked)")
+            appendLine("    ! $untrackedSlots threads arrived past the $MAX_SLOTS-slot ceiling and were NOT SAMPLED —")
+            appendLine("      their occupancy is missing from every number above, including the denominators")
         }
         // A leaked label does not look like an error. It looks like a finding: one operation
         // quietly accumulating everybody else's samples, with a plausible number beside it.

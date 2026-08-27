@@ -609,6 +609,34 @@ at 100 stacks/s against −0.34% at 10,000, which is incoherent. ABBA phasing fi
 
 ## The sampler
 
+**The registry is bounded by peak concurrency, not by how many threads ever existed.** It used to be
+a `CopyOnWriteArrayList` — an O(n) array copy on every registration and every release, so O(n²) over
+a run, and a walk as long as the live thread count every millisecond with no ceiling on it. That was
+`D₂`, the one outright defect the design doc carried. It is a fixed array indexed by slot index now.
+
+| measured | result |
+|---|---|
+| create and release 4,000 threads, then 8,000 | 369 ms → 663 ms, **ratio 1.80** — linear; the copy-on-write version would be ~4× |
+| 400 then 800 simultaneous threads registering | 15 ms → 26 ms, **ratio 1.72** |
+| walk length after 12,000 threads had come and gone | **800 entries** — the peak simultaneous count, not the total |
+| walk cost, 4 live slots | **243.5 ns per slot**, against 246.7 before the change |
+
+**A first attempt at it cost 2.7× the walk, and the bench caught it before the clock did.** The walk
+was written as an `inline` lambda over the slot array, which is idiomatic and wrong here: the body
+is the whole sampling loop, and inlining it into an already-large `run()` pushed the tick from 1.0
+to 2.7 µs. That is 0.27% of a tick and would have been easy to wave through — but the *shares* moved
+with it, from 0.048 pp of divergence to **1.207 pp**, past the 0.5 pp tolerance and into `THE TWO
+TRUTHS DISAGREE`. A less punctual sampler is a less accurate one, and the bench measures that
+directly where a stopwatch on the walk would have called 1.7 µs noise. A plain indexed loop restored
+both numbers.
+
+**What it costs, stated rather than hidden:** a thread arriving past the 1024-slot ceiling is no
+longer sampled at all, where before it was sampled and merely invisible to the long-execution
+detector. The report now says so in two loud lines, because that time is missing from every
+denominator. A bounded walk with a declared blind spot beats an unbounded walk that silently
+corrupts every number — but it is a trade, not a free win. The ceiling also never falls: a workload
+that briefly peaks at 800 threads keeps walking 800 entries for the rest of the run.
+
 **Parking cannot hold a millisecond step under load.** Measured at a 1 ms request with 8 workers
 on 16 cores:
 

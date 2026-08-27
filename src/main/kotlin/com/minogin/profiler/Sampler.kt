@@ -250,7 +250,6 @@ class Sampler(
     }
 
     override fun run() {
-        val slots = Profiler.slots()
         // Before the first tick, so that no call is counted whose sample could not have been taken.
         for (id in 0 until MAX_OPERATIONS) callsAtStart[id] = Profiler.callsOf(id)
         var next = System.nanoTime() + nextInterval()
@@ -263,7 +262,13 @@ class Sampler(
             val now = System.nanoTime()
 
             val walkStart = System.nanoTime()
-            for (s in slots) {
+            var live = 0
+            // A plain indexed loop and not forEachSlot: this body is large, and inlining it into an
+            // already-large run() costs more than the lambda saves - measured at 2.7x the walk.
+            val ceiling = Profiler.slotCeiling()
+            for (i in 0 until ceiling) {
+                val s = Profiler.slotAt(i) ?: continue
+                live++
                 val c = s.getOpaque()
                 counters[if (c < 0) NO_OP_INDEX else c]++
 
@@ -294,7 +299,7 @@ class Sampler(
                 }
 
                 val idx = s.index
-                if (idx < 0) continue           // past the ceiling: sampled, but not tracked
+                if (idx < 0) continue           // cannot happen: only indexed slots are in the walk
                 // A recycled index starts clean. See [prevThreadId].
                 if (prevThreadId[idx] != s.threadId) {
                     prevThreadId[idx] = s.threadId
@@ -337,11 +342,11 @@ class Sampler(
                 prevCount[idx] = n
             }
             walkNanos += System.nanoTime() - walkStart
-            walkVisits += slots.size
-            if (slots.size > maxSlots) maxSlots = slots.size
+            walkVisits += live
+            if (live > maxSlots) maxSlots = live
             ticks++
             // Self-throttling: these return immediately on all but one tick in a thousand.
-            duty.tick(now, slots)
+            duty.tick(now)
 
             if (prev == 0L) {
                 first = now
@@ -363,7 +368,7 @@ class Sampler(
         }
         // The tail of the run belongs to the measurement as much as the middle does. Taken here
         // rather than in shutdown() so that it happens on this thread, before the slots go.
-        duty.finish(System.nanoTime(), slots)
+        duty.finish(System.nanoTime())
     }
 
     /**

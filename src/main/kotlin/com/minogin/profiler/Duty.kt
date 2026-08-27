@@ -143,9 +143,9 @@ class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
     private val floorNanos = max(windowNanos / 10, max(resolution, 0) * 10)
 
     /** Called every tick; takes a sample only once the window has elapsed. */
-    fun tick(now: Long, slots: List<OpSlot>) {
+    fun tick(now: Long) {
         if (!available || now < nextAt) return
-        sample(now, slots)
+        sample(now)
         nextAt = now + windowNanos
     }
 
@@ -153,26 +153,26 @@ class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
      * A final sample, so the last partial window is not silently dropped. Refused when too little
      * time has passed to be worth reading, which is the rule the windows themselves follow.
      */
-    fun finish(now: Long, slots: List<OpSlot>) {
+    fun finish(now: Long) {
         if (!available || prevWall == 0L || now - prevWall < floorNanos) return
-        sample(now, slots)
+        sample(now)
     }
 
-    private fun sample(now: Long, slots: List<OpSlot>) {
+    private fun sample(now: Long) {
         // What this walk costs the sampler, measured rather than assumed: it runs on the sampling
         // thread, and a sampler that holds a 1 ms step is not something to spend without counting.
         val entered = System.nanoTime()
-        val next = HashMap<Long, Long>(slots.size * 2)
+        val next = HashMap<Long, Long>(Profiler.slotCeiling() * 2 + 8)
         var cpu = 0L
         var counted = 0
-        for (s in slots) {
+        Profiler.forEachSlot { s ->
             val c = ThreadCpuClock.cpuNanos(s.threadId)
             // -1 means the thread died between the walk and the read. It contributes to neither
             // side: a thread with no CPU baseline would otherwise add wall time and no CPU, which
             // is precisely the direction that would invent a stall that never happened.
-            if (c < 0) continue
+            if (c < 0) return@forEachSlot
             next[s.threadId] = c
-            val p = prevCpu[s.threadId] ?: continue
+            val p = prevCpu[s.threadId] ?: return@forEachSlot
             val d = c - p
             if (d < 0) anomalies++ else {
                 cpu += d

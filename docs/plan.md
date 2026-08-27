@@ -207,13 +207,14 @@ before the instrument.
 
 - **Trials 4+** — the compiler and the two negative controls. Still worth doing, and now for the
   write-up rather than for the build. Kept in the table above.
-- **The virtual-thread registry** ([ideas.md](ideas.md) item 8, second half). The only outright
-  defect in shipped code: every virtual thread appends a slot to a `CopyOnWriteArrayList`, which is
-  an O(n) copy per thread created, and the sampler walks the list every millisecond. It bites no
-  workload we can currently point at — neither trial creates virtual threads and coroutines run on
-  ordinary carrier threads — so it is a **release blocker rather than today's work**. Measured cost
-  at the 1024-slot ceiling: the walk is 291 µs of a 1 ms tick, and it was 195 µs before thread-state
-  sampling was added.
+- ~~**The virtual-thread registry**~~ — **done**, and the reason it stopped being deferrable is the
+  reason it was deferred. It was put off because *"it bites no workload we can currently point at —
+  neither trial creates virtual threads"*, which is a statement about our trials and not about the
+  defect: "threads, **virtual threads**, and coroutines" is requirement 2 in
+  [profiler.md](profiler.md), so the workload that hits it is one the tool is *for*. The registry is
+  a fixed array indexed by slot index now — registration and release are a single store, and the
+  walk is bounded by peak simultaneous threads rather than by how many the process ever made. See
+  [findings.md](findings.md#the-sampler).
 - **The on-demand stack sampler** ([ideas.md](ideas.md) item 14). Affordable and proven to work; four
   design questions unanswered. Diagnostics rather than correctness.
 

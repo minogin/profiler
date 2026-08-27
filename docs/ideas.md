@@ -151,7 +151,7 @@ percentage. And a session reset, so a harness can measure phases separately.
 **What it does not need**, and this is the point: no agent, no windowing, no always-on story, no
 cross-process aggregation.
 
-## 8. Suspected defect: the label follows the thread, not the task · open
+## 8. Suspected defect: the label follows the thread, not the task · registry half fixed
 
 *Reasoning from the source, not yet reproduced. A test is the first thing to write.* Two hazards
 that look like one problem and are not — they hit different tiers, in opposite ways, and want
