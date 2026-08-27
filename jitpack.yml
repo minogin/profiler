@@ -1,0 +1,4 @@
+# JitPack builds from the git tag. Its default JDK is older than the toolchain Gradle asks for, and
+# without this the build fails and the artifact the README advertises never appears.
+jdk:
+  - openjdk21

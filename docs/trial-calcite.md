@@ -374,7 +374,7 @@ java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt \
      --ab labels --tables 4 --associate true --mergejoin false --rounds 40
 ```
 
-Machine: Intel Core Ultra 7 255H, 16 cores, JDK 26, Windows 11. The same caveats as the bench
+Machine: Intel Core Ultra 7 255H, 16 cores, JDK 26, Windows 11. The library itself targets JDK 21. The same caveats as the bench
 apply — the clock swings by 2× inside a run and heat soak accumulates across runs.
 
 ### Every flag

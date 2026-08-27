@@ -18,8 +18,17 @@ dependencies {
     testImplementation(kotlin("test"))
 }
 
+// Java 21, not the JDK this happens to be developed on.
+//
+// The toolchain was 26, which compiled the library to class file version 70 — runnable only on a
+// JDK 26 that almost nobody has. A profiler nobody can put on the classpath is not released. 21 is
+// the current LTS and it is also the floor this code genuinely needs: `Thread.threadId()` arrived in
+// 19, and everything else here — VarHandles, thread state, ThreadMXBean — is far older.
+//
+// Compiling *against* 21 rather than targeting it from a newer JDK, so that an API added after 21
+// cannot slip in and fail at a user's run time instead of our compile time.
 kotlin {
-    jvmToolchain(26)
+    jvmToolchain(21)
 }
 
 // The library takes no dependencies at all, and the published POM has to keep saying so. The bench
