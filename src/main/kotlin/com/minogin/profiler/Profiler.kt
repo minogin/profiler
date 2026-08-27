@@ -174,11 +174,11 @@ class OpSlot(
 
     /** Hand-placed labels that overflowed the stack, so exit could not restore what came before. */
     @JvmField
-    var overflows: Long = 0
+    internal var overflows: Long = 0
 
     fun countOf(id: Int): Long = counts[id + COUNT_PAD]
 
-    fun resetCounts() = counts.fill(0L)
+    internal fun resetCounts() = counts.fill(0L)
 
     companion object {
         /** 16 longs — 128 bytes — of padding at each end of the counter array. */
@@ -325,7 +325,7 @@ object Profiler {
      * caller to do — and it used to mean the *next* `stop()` walked `0 until 257` across arrays of
      * 256 and died with an index error a long way from the cause.
      */
-    fun registeredCount(): Int = min(nextId.get(), MAX_OPERATIONS)
+    internal fun registeredCount(): Int = min(nextId.get(), MAX_OPERATIONS)
 
     /** The calling thread's slot, registering it on first call. */
     fun slot(): OpSlot = local.get()
@@ -410,8 +410,11 @@ object Profiler {
     /** [untrackedSlots] as it stood when the current session began. See [Report.untrackedSlots]. */
     private var untrackedAtStart = 0
 
+    /** [reclaimedSlots] as it stood when the current session began. */
+    private var reclaimedAtStart = 0
+
     /** Threads still inside a hand-placed label right now, which at the end of a session is a leak. */
-    fun openSpans(): Int {
+    internal fun openSpans(): Int {
         var n = 0
         forEachSlot { if (it.depth > 0) n++ }
         return n
@@ -447,8 +450,48 @@ object Profiler {
         local.remove()
     }
 
+    /** Threads that died without calling [release] and had to be reclaimed. See [reclaimDeadSlots]. */
+    private val reclaimed = AtomicInteger(0)
+
+    internal fun reclaimedSlots(): Int = reclaimed.get()
+
+    /**
+     * Reclaims the slots of threads that exited without calling [release].
+     *
+     * `release()` is the precise way and stays the documented one, but it is the kind of thing a
+     * user forgets exactly once and then cannot see: the slot stays in the walk reading `NO_OP`
+     * forever, so a dead thread is counted as an *idle* one and quietly inflates the denominator
+     * every share is taken over. That is the silent-misattribution failure the accuracy principle
+     * says to spend effort on, arriving through an API contract rather than through a label.
+     *
+     * The slot already holds its thread weakly, so a cleared reference means the thread is gone and
+     * has been collected — no handshake, no thread scan, and it cannot resurrect. Reclaiming is then
+     * the same three steps as [release] in the same order: leave the walk first, fold the counts
+     * second, hand the index back last, so a concurrent [callsOf] undercounts for two instructions
+     * rather than double-counting.
+     *
+     * Called once a second from the sampler, never per tick — this walks the whole ceiling and
+     * touches a weak reference per slot, which is not something to spend on a 1 ms budget.
+     *
+     * It is a safety net and not a substitute: reclamation waits on a garbage collection, so a
+     * process that never collects never reclaims. The report says how many it caught, because a
+     * user who is silently rescued learns nothing.
+     */
+    internal fun reclaimDeadSlots() {
+        for (i in 0 until slotCeiling()) {
+            val s = slotByIndex.get(i) ?: continue
+            if (s.thread.get() != null) continue
+            if (!slotByIndex.compareAndSet(i, s, null)) continue
+            synchronized(retiredCounts) {
+                for (id in 0 until MAX_OPERATIONS) retiredCounts[id] += s.countOf(id)
+            }
+            freeIndexes.add(i)
+            reclaimed.incrementAndGet()
+        }
+    }
+
     /** Slots that arrived after the ceiling and are therefore invisible to the detector. */
-    fun untrackedSlots(): Int = (nextIndex.get() - MAX_SLOTS).coerceAtLeast(0)
+    internal fun untrackedSlots(): Int = (nextIndex.get() - MAX_SLOTS).coerceAtLeast(0)
 
     /** Every live registered slot. Read by the sampler. */
     /**
@@ -458,7 +501,7 @@ object Profiler {
     fun slots(): List<OpSlot> = buildList { forEachSlot { add(it) } }
 
     /** Total calls of an operation: live threads plus those that have already exited. */
-    fun callsOf(id: Int): Long =
+    internal fun callsOf(id: Int): Long =
         synchronized(retiredCounts) { retiredCounts[id] }.let { retired ->
             var live = 0L
             forEachSlot { live += it.countOf(id) }
@@ -482,6 +525,7 @@ object Profiler {
         startedAt = System.nanoTime()
         imbalancesAtStart = imbalances.get()
         untrackedAtStart = untrackedSlots()
+        reclaimedAtStart = reclaimedSlots()
         sampler = Sampler((stepMillis * 1_000_000).toLong(), wait, jitter, strict = strict, sampleState = sampleState)
             .also { it.start() }
     }
@@ -505,6 +549,7 @@ object Profiler {
             stats, s.counters[NO_OP_INDEX], s.ticks, s.span, duration, s.maxSlots, s.duty(), s.failure,
             imbalances = imbalances.get() - imbalancesAtStart, openAtEnd = openSpans(), stateSampled = s.sampleState,
             untrackedSlots = (untrackedSlots() - untrackedAtStart).coerceAtLeast(0),
+            reclaimedSlots = (reclaimedSlots() - reclaimedAtStart).coerceAtLeast(0),
             idleWaitingHits = s.idleWaitingHits,
         )
     }

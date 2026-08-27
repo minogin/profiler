@@ -14,7 +14,7 @@ import kotlin.math.min
  * window it is measured over is worse than no number at all, so the resolution is *measured* at
  * startup and the duty cycle reports itself unavailable where the clock cannot support the window.
  */
-object ThreadCpuClock {
+internal object ThreadCpuClock {
     private val bean = ManagementFactory.getThreadMXBean()
 
     val supported: Boolean = bean.isThreadCpuTimeSupported
@@ -89,7 +89,7 @@ object ThreadCpuClock {
  * next negative. Across the run they cancel, and the aggregate is accurate to about one granule
  * per thread over the whole span however ragged the per-window figures look.
  */
-class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
+internal class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
 
     /** Previous reading per thread id. Rebuilt each window, so dead threads drop out by themselves. */
     private var prevCpu = HashMap<Long, Long>()
@@ -363,7 +363,7 @@ internal fun labelledDuty(
 }
 
 /** What the duty measurement came to, and the bound it puts on every share in the report. */
-class DutyReport(
+class DutyReport internal constructor(
     /**
      * The fraction of *labelled* occupancy that was CPU, worst case. NaN when it could not be
      * computed, and the aggregate [duty] then stands in — which is the old, pessimistic behaviour

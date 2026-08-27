@@ -3,9 +3,47 @@
 A profiler for operations too short to profile — finding out which of twenty nanosecond-scale
 operations eats your time, by sampling labels instead of measuring durations.
 
-The goal is a library you drop into an application. What is here today is the method and the
-evidence that it works: a synthetic workload whose true answer is known independently, so the
-sampler's answer can be checked against it rather than believed.
+**v0.1.0** — Apache-2.0, one dependency (the Kotlin stdlib), verified on a synthetic workload whose
+true answer is known independently and on three foreign codebases: Apache Calcite, Apache Lucene and
+Netty.
+
+```kotlin
+repositories { maven("https://jitpack.io") }
+dependencies { implementation("com.github.minogin:profiler:v0.1.0") }
+```
+
+### What it does, and what it does not
+
+It is **0.1** because the method is measured and the public API has not yet met anybody else's code.
+The API may move; the numbers should not.
+
+**It answers:** of the operations I labelled, which is eating the time — as a ranked list of shares
+over thread-time, with call counts, an implied per-call duration, how much of each was spent waiting
+rather than working, its wall-clock footprint, how many threads were inside it at once, and **a
+measured bound on how wrong the shares can be**. It reaches operations of tens of nanoseconds, which
+is the regime stack profilers cannot see into, and it has no upper limit — Calcite's labels were
+millisecond-sized and it handled them to within a percentage point of JFR.
+
+**It does not answer:**
+
+- **How long did one *execution* take.** There are no per-execution durations and so no percentiles,
+  ever. Sampling gives you a share of time, not a distribution of latencies. An operation that is
+  50 ns normally and 100 µs when it hits a lock reports the average of the two and no execution was
+  ever that.
+- **How long did one *request* take**, or where it went across a thread hand-off. That is the coarse
+  tier, and it is not built. This measures thread-time.
+- **What would I save by removing it.** A share is where time went, not what deleting it buys. In
+  the Calcite trial an operation holding 46% was worth **275×** when removed, because it was creating
+  work for everything else. The report says so at the foot of every run.
+
+**Untested, and so unclaimed:** coroutines and virtual threads. The design argues the fine tier is
+structurally safe with coroutines and the registry is now bounded for virtual threads, but no trial
+here creates either, so neither is a measured claim. Treat them as unknown.
+
+**Two sharp edges**, both of which the report now tells you about rather than leaving you to find:
+call `Profiler.release()` when a thread exits (there is a safety net, but it waits on a garbage
+collection), and on event loops whose waiting is native — Netty, Vert.x, anything reactive — the
+error bound is unavailable, and the report says so instead of printing a number it cannot justify.
 
 ## The problem
 

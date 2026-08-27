@@ -86,7 +86,7 @@ fun threadTime(nanos: Double): String = when {
 }
 
 /** One operation's line in a [Report]. */
-class OperationStat(
+class OperationStat internal constructor(
     val id: Int,
     val name: String,
     val hits: Long,
@@ -125,7 +125,7 @@ class OperationStat(
  * reported separately as [idleHits] rather than folded into the denominator — mixing them in would
  * make every share depend on how much uninstrumented code happened to be running.
  */
-class Report(
+class Report internal constructor(
     val operations: List<OperationStat>,
     val idleHits: Long,
     val ticks: Long,
@@ -158,6 +158,14 @@ class Report(
      * claims to be about.
      */
     val untrackedSlots: Int = 0,
+    /**
+     * Threads that exited without calling `Profiler.release()` and had to be reclaimed.
+     *
+     * Reported rather than silently absorbed. A user who is quietly rescued learns nothing, and the
+     * rescue depends on a garbage collection - in a process that does not collect, the slots stay in
+     * the walk reading empty and every share is taken over a denominator inflated by dead threads.
+     */
+    val reclaimedSlots: Int = 0,
 ) {
     /** False when a fatal finding stopped the session. See the severity ladder in plan.md. */
     val ok: Boolean get() = failure == null
@@ -606,6 +614,11 @@ class Report(
         // consecutive trials. Every offender is named; the reader decides.
         for (op in tooSmall()) {
             appendLine("  ! " + tooSmallMessage(op.name, op.calls, impliedUpperNanosOf(op)))
+        }
+        if (reclaimedSlots > 0) {
+            appendLine("    ! $reclaimedSlots threads exited without Profiler.release() and were reclaimed —")
+            appendLine("      call it when a thread finishes; until a slot is reclaimed it reads as an idle")
+            appendLine("      thread and inflates the denominator every share above is taken over")
         }
         if (untrackedSlots > 0) {
             appendLine("    ! $untrackedSlots threads arrived past the $MAX_SLOTS-slot ceiling and were NOT SAMPLED —")

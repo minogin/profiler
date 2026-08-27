@@ -33,7 +33,7 @@ enum class WaitStrategy {
  *
  * Counters are plain longs: this thread is their only writer.
  */
-class Sampler(
+internal class Sampler(
     private val stepNanos: Long,
     private val wait: WaitStrategy = WaitStrategy.SPIN,
     private val jitterFraction: Double = 0.25,
@@ -76,6 +76,9 @@ class Sampler(
      */
     private val duty = DutyCycle(dutyWindowNanos)
 
+    /** When to next look for slots whose thread died without releasing. See Profiler.reclaimDeadSlots. */
+    private var nextReclaim = Long.MIN_VALUE
+
     // Ticking on an exact beat can lock onto a workload that has a rhythm of its own near the
     // same period — the wagon-wheel effect, where more samples do not help because every sample
     // catches the same phase. Scattering the interval makes that impossible. The jitter is
@@ -87,16 +90,16 @@ class Sampler(
         else stepNanos + ((rnd.nextDouble() * 2 - 1) * jitterFraction * stepNanos).toLong()
 
     /** Hits per operation; the last entry counts slots that held no operation. */
-    val counters = LongArray(MAX_OPERATIONS + 1)
+    internal val counters = LongArray(MAX_OPERATIONS + 1)
 
     /**
      * Of those hits, the ones that caught an execution which had already been running at the
      * previous tick — see [stuckHits] and the arrays below.
      */
-    val stuckHits = LongArray(MAX_OPERATIONS)
+    internal val stuckHits = LongArray(MAX_OPERATIONS)
 
     /** How many distinct executions lasted across a tick: one per unbroken run of stuck samples. */
-    val stuckInstances = LongArray(MAX_OPERATIONS)
+    internal val stuckInstances = LongArray(MAX_OPERATIONS)
 
     /**
      * Of those hits, the ones where the owning thread was **not** runnable — parked, blocked, or
@@ -108,7 +111,7 @@ class Sampler(
      * waiting that some *other thread* caused, which is the kind that does not add up across
      * threads. Separating on-a-core from preempted needs the per-thread duty cycle.
      */
-    val waitingHits = LongArray(MAX_OPERATIONS)
+    internal val waitingHits = LongArray(MAX_OPERATIONS)
 
     /**
      * Hits that were both stuck and waiting — a long execution caught with its thread parked.
@@ -119,7 +122,7 @@ class Sampler(
      * verdict had to charge the whole run's off-CPU budget against every operation separately and
      * could only ever say "cannot say which".
      */
-    val stuckWaitingHits = LongArray(MAX_OPERATIONS)
+    internal val stuckWaitingHits = LongArray(MAX_OPERATIONS)
 
     /**
      * Of the samples that caught a thread inside no label at all, the ones where it was not
@@ -143,7 +146,7 @@ class Sampler(
      * separates them, and on a contended lock that is the difference between *break up the convoy*
      * and *design the contention out*. See profiler.md, "Turning occupancy back into wall time".
      */
-    val activeTicks = LongArray(MAX_OPERATIONS)
+    internal val activeTicks = LongArray(MAX_OPERATIONS)
 
     /**
      * The tick at which each operation was last seen, so [activeTicks] counts ticks and not slots.
@@ -160,8 +163,8 @@ class Sampler(
      * immutable for the life of the slot and it is the only thing the sampler and the duty walk
      * can both use to mean *the same thread*.
      */
-    val slotHits = LongArray(MAX_SLOTS)
-    val slotLabelled = LongArray(MAX_SLOTS)
+    internal val slotHits = LongArray(MAX_SLOTS)
+    internal val slotLabelled = LongArray(MAX_SLOTS)
 
     /**
      * Of those, the ones that caught the thread not runnable — all of them, and the labelled ones.
@@ -173,8 +176,8 @@ class Sampler(
      * these two counters are the only thing needed to use it. Zero when [sampleState] is off, and
      * the bound falls back to the assumption.
      */
-    val slotWaiting = LongArray(MAX_SLOTS)
-    val slotLabelledWaiting = LongArray(MAX_SLOTS)
+    internal val slotWaiting = LongArray(MAX_SLOTS)
+    internal val slotLabelledWaiting = LongArray(MAX_SLOTS)
 
     /**
      * What the last tick found in each slot, kept on this side of the fence.
@@ -242,7 +245,7 @@ class Sampler(
     private val callsAtStart = LongArray(MAX_OPERATIONS)
 
     /** Calls made since this session began. See [callsAtStart]. */
-    fun sessionCalls(id: Int): Long = (Profiler.callsOf(id) - callsAtStart[id]).coerceAtLeast(0)
+    internal fun sessionCalls(id: Int): Long = (Profiler.callsOf(id) - callsAtStart[id]).coerceAtLeast(0)
 
     init {
         isDaemon = true
@@ -347,6 +350,10 @@ class Sampler(
             ticks++
             // Self-throttling: these return immediately on all but one tick in a thousand.
             duty.tick(now)
+            if (now >= nextReclaim) {
+                Profiler.reclaimDeadSlots()
+                nextReclaim = now + RECLAIM_NANOS
+            }
 
             if (prev == 0L) {
                 first = now
@@ -381,14 +388,14 @@ class Sampler(
      *
      * Stops sampling rather than the application: this is somebody else's process.
      */
-    fun fail(reason: String) {
+    internal fun fail(reason: String) {
         if (failure != null) return
         failure = reason
         running = false
     }
 
     /** How much of the occupancy this session sampled was CPU. See [DutyCycle]. */
-    fun duty(): DutyReport =
+    internal fun duty(): DutyReport =
         duty.report(slotHits, slotLabelled, slotWaiting, slotLabelledWaiting, sampleState)
 
     private fun waitUntil(deadline: Long) {
@@ -418,13 +425,18 @@ class Sampler(
         }
     }
 
-    fun shutdown() {
+    internal fun shutdown() {
         running = false
         LockSupport.unpark(this)
         join()
     }
 
     /** Total samples taken: one per slot per tick. */
-    fun totalSamples(): Long = counters.sum()
+    internal fun totalSamples(): Long = counters.sum()
+
+    private companion object {
+        /** Once a second: this walks the whole ceiling, so it is not a per-tick cost. */
+        const val RECLAIM_NANOS = 1_000_000_000L
+    }
 
 }

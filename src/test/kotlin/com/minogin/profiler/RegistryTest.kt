@@ -273,6 +273,35 @@ class RegistryTest {
         return seen
     }
 
+    /**
+     * A thread that exits without calling `release()` is reclaimed anyway, and reported.
+     *
+     * The safety net for the one API contract a user cannot see themselves breaking: a slot left
+     * behind reads `NO_OP` for the rest of the process, so a *dead* thread is counted as an *idle*
+     * one and quietly inflates the denominator every share is taken over. The slot holds its thread
+     * weakly, so a cleared reference is proof the thread is gone.
+     *
+     * The `System.gc()` is the honest part of this test: reclamation waits on a collection, so this
+     * is a safety net and not a substitute for `release()`. A hint is all `gc()` is, so the loop
+     * gives it several chances before giving up rather than depending on one call.
+     */
+    @Test
+    fun `a thread that forgets to release is reclaimed and reported`() {
+        val before = Profiler.reclaimedSlots()
+        val t = Thread({ Profiler.slot() }, "forgets-to-release")
+        t.start()
+        t.join()
+
+        var reclaimed = 0
+        repeat(20) {
+            if (reclaimed > 0) return@repeat
+            System.gc()
+            Profiler.reclaimDeadSlots()
+            reclaimed = Profiler.reclaimedSlots() - before
+        }
+        assertTrue(reclaimed >= 1, "a dead thread's slot was never reclaimed")
+    }
+
     /** Two live threads never share an index, which is what makes the per-thread arrays meaningful. */
     @Test
     fun `live threads get different indexes`() {

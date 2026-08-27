@@ -24,7 +24,7 @@ words, is [tldr.md](tldr.md).
 | 4 | The coarse tier — contexts, spans, cross-tabulation | after the trials |
 | 5 | Crossing threads — propagation, and per-operation parallelism | not started |
 | 6 | Thread state and the whole-application parallelism coefficient | **partly done** |
-| 7 | Library surface — annotations, agent, results API | not started |
+| 7 | Library surface — annotations, agent, results API | **v0.1.0 released**; annotations and the agent not started |
 | 8 | JFR output | not started |
 
 **What this is for.** A general-purpose tool, released open source, for auditing the performance of
