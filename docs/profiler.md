@@ -17,8 +17,13 @@ were. A whole CPU core for the sampler is an accepted cost on that basis.
 2. **Collect a parallelisation profile** — threads, virtual threads, and coroutines. This is a
    product requirement, not a nice-to-have: coroutines breaking attribution is one of the two
    reasons the incumbent failed on the project this came from. See [case.md](case.md).
-3. **Answer "where exactly should we look, and why".** Note that today the report answers *where* —
-   shares and call counts — and not *why*. That gap is deliberate to record rather than paper over.
+3. **Answer "where exactly should we look, and why".** The report has since grown some of the *why*:
+   a long execution is now told apart into *waiting on another thread* and *working for a
+   millisecond*, which want opposite responses, and `elapsed` beside `occupancy` says whether a
+   hundred thread-seconds is a convoy or a drizzle. What is still missing is the *why* that matters
+   most — **what removing the operation would save**. Calcite's 46% share was worth 275× because the
+   rule was creating work for everything else, and no share can say that. Recorded rather than
+   papered over: it is the warning at the foot of every report and [ideas.md](ideas.md) item 1.
 
 Both regimes are in scope: nanosecond operations, and the coarser microsecond-to-millisecond work
 the Calcite trial covered. We do not get to choose what a real target turns out to be.
@@ -259,15 +264,21 @@ photographs, and everything the tier cannot do follows from the same two sentenc
 | | **share** | its slice of all labelled photos |
 | | **noise** | `1/√hits`, how wrong chance alone makes the share |
 | | **long executions** | occupancy inside executions that outlived a tick |
+| | **waiting** | photos where the thread was not runnable — parked, blocked, waiting |
+| | **elapsed** | ticks with at least one thread inside × step: the operation's wall-clock footprint |
+| | **threads** | occupancy ÷ elapsed — how many were inside at once, averaged over the ticks it ran |
 | both | **implied per call** | occupancy ÷ calls |
 
 **Concurrency costs nothing extra.** When three threads are inside an operation at one instant, that
 photograph contributes three. Lucene ran eight workers and needed no new machinery for it.
 
-**And one metric is available that we do not yet take.** Each photograph says *how many* threads were
-inside operation X at that instant, so the run yields a per-operation concurrency distribution. No
-stack profiler can produce it — they sample each thread on its own timer and never hold all threads
-at one instant. See [ideas.md](ideas.md) item 16.
+**The mean is taken; the distribution is not.** Each photograph says *how many* threads were inside
+operation X at that instant, and the report keeps the average of that — the `threads` column, which
+is what turns occupancy back into elapsed time below. What is still discarded is the *shape*:
+*"one thread 18% of the time, eight threads 4% of the time"* distinguishes steady contention from a
+sawtooth, and those want different fixes. No stack profiler can produce either — they sample each
+thread on its own timer and never hold all threads at one instant. See [ideas.md](ideas.md) item 16
+for the histogram, which is the half still outstanding.
 
 ### Where the fine tier breaks
 
@@ -317,17 +328,34 @@ in one pass. Kept rather than summed away, it closes the gap arithmetically:
 
 Same occupancy, opposite fix. So **thread state and per-operation concurrency are halves of one
 feature**, and neither is much use alone: the first says which part of the total is fiction, the
-second says by how much. Both come from photographs already being taken. The concurrency half is
-[ideas.md](ideas.md) item 16; the state half is what phase 6 exists for, and it also detects the
-bimodal operation of case **A** and answers case **C** outright — one mechanism, three rows.
+second says by how much. Both come from photographs already being taken, and **both are built** —
+the `waiting`, `elapsed` and `threads` columns are the three of them. It also detects the bimodal
+operation of case **A** and answers case **C** outright: one mechanism, three rows. What phase 6
+still owes is the whole-application coefficient, and what item 16 still owes is the histogram behind
+the mean.
 
 **Three limits survive it, and they are not small.**
 
 - **`RUNNABLE` does not mean "on a CPU".** `BLOCKED`, `WAITING` and `TIMED_WAITING` are conclusive;
   `RUNNABLE` only means *eligible*, and it covers both a thread preempted by the scheduler —
   measured at 14–18% on a bench that never blocks — and a thread sitting in a blocking socket read,
-  which the JVM cannot see into. Separating on-a-core from preempted still needs the per-thread duty
-  cycle, [ideas.md](ideas.md) item 10.
+  which the JVM cannot see into.
+
+  The per-thread duty cycle is built now and it does not close this, because it cannot: the CPU
+  clock knows how much of a thread was off the core and the state read knows where the *visible*
+  part of that went, and the difference between them — `f − w` — is exactly the union of "preempted"
+  and "native", with nothing to tell them apart. What the two instruments together do buy is a
+  bound, per thread and therefore over the labelled samples the shares are taken over: the visible
+  waiting inside a label is measured rather than assumed, and only the residue is charged worst
+  case. On Lucene's thread pool that is 1.4 of 31.3 points and the bound comes to 1.57 pp.
+
+  **And where the residue is larger than the labels, there is no bound at all.** Netty's event loops
+  sit in `epoll_wait`, which is off the CPU and reads `RUNNABLE`, so **0.0 ms** of their unlabelled
+  time is visible as waiting; 34.4% invisible off-CPU against labels covering 13.9% means the worst
+  case swallows every labelled sample. The report says so in words rather than printing a number,
+  and the fix belongs to the placement — a label around the waiting, not only around the work. See
+  [findings.md](findings.md#the-duty-cycle), and [ideas.md](ideas.md) item 19 for what might narrow
+  it.
 - **Elapsed is not latency.** It says the operation had *somebody* inside it for 6.7 seconds. It says
   nothing about any single execution, so case **A** survives untouched and only splitting the
   operation answers it.
@@ -442,6 +470,12 @@ is already in the data.
 **What to record besides the label:** the thread's state — executing an operation, spinning in the
 dispatcher looking for work, parked with nothing to do, blocked on a lock. Without state the
 analysis does not go anywhere.
+
+**That half is recorded now**, per sample and per operation, and it is what the `waiting` column and
+the per-thread duty bound are built on. The coefficient itself is still not computed: what exists is
+concurrency *per operation* — `occupancy ÷ elapsed`, one number per label — and what phase 6 owes is
+the same reading taken across the whole application, which is the quantity that came out at ~3 on
+the workload this project started from.
 
 **What falls out immediately:** a histogram of how often 1, 2, 3, … N threads were busy. Its mean
 is the empirical coefficient. The shape is more interesting than the mean:
