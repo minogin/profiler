@@ -581,6 +581,39 @@ The fix is the shape `callsAtStart` already uses: snapshot at `start()`, subtrac
 `openAtEnd` is fine as it is, being a count of live slots rather than an accumulator. Not done with
 1a because 1a was about which rung of the ladder a finding sits on, not about what a session is.
 
+## 19. Narrow the duty bound where the state read is blind · open
+
+*From Step 2. The bound is sound in every regime and useless in one, and the missing evidence may
+already be collected.*
+
+An event loop is off the CPU inside `epoll_wait` and reads `RUNNABLE`, so the state column cannot
+see it and the duty bound has to assume all of it was inside the labels. On Netty that is 34.4% of
+thread-time assumed against labels covering 13.9%, and the bound collapses. The report says so
+rather than pretending, but "we cannot tell you" is not the end of the question.
+
+**What might narrow it, cheapest first.**
+
+1. **The long-execution detector already disagrees.** Netty's labelled operations sit at 0.00–0.01%
+   of occupancy inside executions that outlived a tick, and `decode` reads 2.4 µs implied per call.
+   An operation that never spans a tick cannot contain a millisecond of `epoll_wait`. That is not
+   yet a bound — many short waits are not excluded — but it is evidence pointing the opposite way
+   from the assumption, and the two are printed in the same report without ever being compared.
+2. **Ask which labels are open when the thread is off the CPU.** The sampler knows the slot's
+   current operation at every tick and it knows the thread state; what it cannot see is the
+   *invisible* off-CPU, by definition. A cheap proxy: an operation whose implied per-call duration
+   is far above its configured or expected size is where the waiting went. Requires an expectation,
+   which the fine tier does not have for foreign code.
+3. **Let the user label the wait.** The honest answer may be that the fix belongs to the placement,
+   not to the instrument: a label around the selector loop turns invisible off-CPU into labelled
+   occupancy, and the bound becomes tight for everything else. The report already recommends this.
+   Whether the coarse tier makes it natural is a phase 4 question.
+
+**The general shape of the problem** is that we have three instruments for off-CPU time — the CPU
+clock (sees everything, per thread, no attribution), the state read (attributes per sample, blind to
+native waits and preemption) and the long-execution detector (attributes per sample, floor of one
+tick) — and the report presents them side by side without ever making them argue. See also item 15,
+cross-checking as a first-class feature.
+
 ---
 
 ## Promoted to plan.md

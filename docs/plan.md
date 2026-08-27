@@ -150,11 +150,41 @@ of output as 1b, so do them together.
 
 *Check it with:* reading it. No measurement involved; this one is wording.
 
-### Step 2 — a look at what those three turn up
+### Step 2 — a look at what those three turn up · **done, and it turned something up**
 
 Deliberately a pause rather than a phase. 1b in particular changes two numbers in every report, and
-the trials' recorded figures were computed against the old denominators. Nothing is expected to
-break, but "nothing is expected to break" is exactly when this project has been wrong before.
+the trials' recorded figures were computed against the old denominators. Nothing was expected to
+break, and "nothing is expected to break" is exactly when this project has been wrong before — which
+is what happened.
+
+**The bound as specified was vacuous on a thread pool.** `min(stall, labelled)` is sound, and on
+Lucene it turned a true ~98% into a printed **47.35%** and a 100 pp error on shares that were fine.
+A pool thread parks between tasks and works inside a label, so both terms are large and the formula
+assumes the parking happened inside the label. Every bench mode passed because no bench thread has
+both visible waiting and labelled time on it; only a pool does. The fix uses the state column, which
+was already in the report saying **0.0% waiting** on every labelled operation — see
+[findings.md](findings.md#the-duty-cycle). Bound on Lucene: **1.57 pp**.
+
+**And there is a regime where nothing can be said, which the report now says out loud.** Netty's
+event loops sit in `epoll_wait`, which is off the CPU and reads `RUNNABLE`, so **0.0 ms** of their
+154.98 s of unlabelled time is visible as waiting. With 34.4% invisible off-CPU against labels
+covering 13.9% of those threads, the worst case swallows every labelled sample. Printing 0.00% and
+100 pp there would read as a measurement; the report explains instead, and names the fix — a label
+around the waiting, not only around the work.
+
+**What each trial said**, all four against the final code:
+
+| trial | shape | result |
+|---|---|---|
+| Calcite | one thread, 100% labelled | 94.64% aggregate = 94.64% labelled, by construction |
+| Lucene | pool threads that park between queries | 98.46%, bound 1.57 pp; coverage 59.3% → **84.5%** |
+| Netty | event loops, native waiting | correctly declares itself unbounded, and says why |
+| bench ×3 | see findings.md | unchanged, and provably so — the refinement is a no-op where `w = 0` |
+
+**Also done here:** `trial-netty` no longer passes `strict = false`. That was there for the floor
+check, and 1a removed the reason; its labels are lexical `op(id) { }` and cannot leak. It runs strict
+now and finishes. Calcite was already strict, which makes it the one trial exercising the new fatal
+rung on foreign code — its span stack came back balanced after every plan.
 
 ### Step 3 — phase 4, the coarse tier
 

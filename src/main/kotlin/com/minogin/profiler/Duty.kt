@@ -218,18 +218,39 @@ class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
      * `lockedUpdate`'s 71,839 hits caught a thread that was not runnable, so "labelled therefore
      * running" is false and the cheap version of this fix is not available.
      *
-     * What is available is an interval. For thread *i* with stall fraction `f` and labelled
-     * fraction `l`, the stall that could possibly have been inside labelled work is
-     * `min(f, l) × occupancy` — you cannot have more stall inside labels than you have stall, nor
-     * more than you have labels. Summed, that is the worst case, and the idle threads that broke
-     * the old number fall out on their own: `min(1.0, 0.0) = 0`.
+     * What is available is an interval, and how tight it is depends on whether thread state was
+     * sampled. For thread *i*, as fractions of that thread's own occupancy:
      *
-     * @param slotHits every sample taken at that slot, labelled or not.
-     * @param slotLabelled those of them that were inside some operation.
+     * - `f` — off the CPU altogether, from the clock. Everything below has to fit inside it.
+     * - `l` — inside some label.
+     * - `w` — caught not runnable, and `wl` the part of that which was also inside a label. Both
+     *   measured per sample rather than inferred.
+     *
+     * **Without state**, all that can be said is `min(f, l)`: no more stall inside labels than
+     * there is stall, and no more than there are labels. Sound, and on a thread pool useless —
+     * a pool thread parks between tasks and works inside a label, so both terms are large and the
+     * bound assumes the parking happened inside the label. Measured on Lucene: a true ~98% printed
+     * as 47.35%, and a 100 pp error on shares that were fine.
+     *
+     * **With state** the visible half is not an assumption at all. `wl` *is* the waiting that was
+     * inside a label. What is left over, `f − w`, is off-CPU the state read cannot see — a
+     * preempted thread and a thread in a native call both read `RUNNABLE` — and that part still has
+     * to be assumed worst case, all of it inside labels. So `min(l, wl + max(0, f − w))`.
+     *
+     * Still an upper bound, and on Lucene a tight one: 29.9 of the 31.3 points of off-CPU there
+     * were observably not runnable, leaving 1.4 to assume the worst about.
      */
-    private fun labelledDuty(slotHits: LongArray, slotLabelled: LongArray): Double {
+    private fun labelledDuty(
+        slotHits: LongArray,
+        slotLabelled: LongArray,
+        slotWaiting: LongArray,
+        slotLabelledWaiting: LongArray,
+        stateSampled: Boolean,
+    ): Triple<Double, Double, Double> {
         var labelled = 0.0
         var stall = 0.0
+        var invisible = 0.0
+        var total = 0.0
         for (i in 0 until MAX_SLOTS) {
             val hits = slotHits[i]
             val wall = wallByIndex[i]
@@ -239,13 +260,40 @@ class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
             // wall or a hair under zero, and a fraction outside 0..1 is quantisation and not news.
             val f = min(1.0, max(0.0, 1.0 - cpuByIndex[i].toDouble() / wall))
             labelled += slotLabelled[i]
-            stall += min(f, l) * hits
+            total += hits
+            stall += if (!stateSampled) min(f, l) * hits
+            else {
+                val w = slotWaiting[i].toDouble() / hits
+                val wl = slotLabelledWaiting[i].toDouble() / hits
+                // Off the CPU while reading RUNNABLE: the scheduler, or a native call the JVM
+                // cannot see into. Tracked because it is the term that can make the bound useless,
+                // and a reader who is told that is in a different position from one who is not.
+                invisible += max(0.0, f - w) * hits
+                // Capped by `f` as well, so that using the state read can never produce a *worse*
+                // bound than ignoring it. Not runnable implies not on the CPU, so `wl` is a subset
+                // of `f` by definition and the cap binds only when the two instruments disagree —
+                // the clock moves in 15.6 ms steps and the state read does not, so they will.
+                min(l, min(f, wl + max(0.0, f - w))) * hits
+            }
         }
-        return if (labelled <= 0.0) Double.NaN else (labelled - stall) / labelled
+        if (labelled <= 0.0 || total <= 0.0) return Triple(Double.NaN, Double.NaN, Double.NaN)
+        return Triple((labelled - stall) / labelled, invisible / total, labelled / total)
     }
 
-    fun report(slotHits: LongArray, slotLabelled: LongArray): DutyReport = DutyReport(
-        labelledDuty = if (available) labelledDuty(slotHits, slotLabelled) else Double.NaN,
+    fun report(
+        slotHits: LongArray,
+        slotLabelled: LongArray,
+        slotWaiting: LongArray,
+        slotLabelledWaiting: LongArray,
+        stateSampled: Boolean,
+    ): DutyReport = run {
+        val (d, invisible, labelled) =
+            if (available) labelledDuty(slotHits, slotLabelled, slotWaiting, slotLabelledWaiting, stateSampled)
+            else Triple(Double.NaN, Double.NaN, Double.NaN)
+        DutyReport(
+        labelledDuty = d,
+        invisibleOffCpu = invisible,
+        labelledFraction = labelled,
         reason = reason,
         resolutionNanos = resolution,
         windowNanos = windowNanos,
@@ -257,7 +305,8 @@ class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
         maxWindowDuty = maxDuty,
         anomalies = anomalies,
         maxSampleNanos = maxSampleNanos,
-    )
+        )
+    }
 
     companion object {
         /**
@@ -283,6 +332,17 @@ class DutyReport(
      * rather than a wrong one. See [DutyCycle.labelledDuty].
      */
     val labelledDuty: Double,
+    /**
+     * Occupancy that was off the CPU while the thread read `RUNNABLE`, as a fraction of all of it.
+     *
+     * The scheduler preempting a thread, and a thread inside a native call the JVM cannot see into.
+     * This is the part of the stall that has to be assumed worst case, and when it is larger than
+     * the labelled fraction the bound collapses to "all of the labelled time could have been
+     * waiting" — which is true, useless, and worth saying in words instead of as a number.
+     */
+    val invisibleOffCpu: Double,
+    /** Sampled occupancy that was inside some label, over the threads the bound could be taken on. */
+    val labelledFraction: Double,
     val reason: String?,
     val resolutionNanos: Long,
     val windowNanos: Long,
@@ -311,6 +371,18 @@ class DutyReport(
      * [duty], because there the whole process is the subject and an idle thread belongs in it.
      */
     val shareDuty: Double get() = if (labelledDuty.isNaN()) duty else labelledDuty
+
+    /**
+     * True when the bound has run out of evidence rather than found something.
+     *
+     * The invisible off-CPU has to be assumed to be inside the labels, and when there is more of it
+     * than there is labelled time, that assumption swallows the whole of it: the bound comes out at
+     * "every labelled sample could have been a wait". Netty is the case — four event-loop threads,
+     * labels over 14.4% of their time, and `epoll_wait` off the CPU while reading `RUNNABLE`.
+     */
+    val unbounded: Boolean
+        get() = !labelledDuty.isNaN() && !invisibleOffCpu.isNaN() &&
+                labelledDuty <= 0.0 && invisibleOffCpu > 0.0
 
     /**
      * The worst a share can be wrong by, in percentage points, if every stall there was landed on
@@ -355,6 +427,24 @@ class DutyReport(
         // beside the aggregate rather than instead of it: the gap between the two lines is how much
         // of the process was idle, which is worth seeing and used to be silently charged to the
         // shares. Starvation mode is the extreme — 18.83% aggregate against 96% inside the labels.
+        if (unbounded) {
+            // Printing 0.00% and 100 pp here would read as a measurement, and a reader would
+            // rightly distrust a report whose shares are probably fine. The bound has not found
+            // anything; it has run out of evidence, and that is a different sentence. It also
+            // names the fix, which is a label around the waiting rather than only around the work.
+            out += String.format(
+                Locale.ROOT,
+                "  nothing here bounds the shares: %.1f%% of thread-time was off the CPU while the thread",
+                invisibleOffCpu * 100
+            )
+            out += "  still read runnable — a native call, an event loop in a poll, or the scheduler — and"
+            out += String.format(
+                Locale.ROOT,
+                "  labels cover %.1f%% of these threads, so the worst case is that all of it was inside them",
+                labelledFraction * 100
+            )
+            return out
+        }
         if (!labelledDuty.isNaN()) out += String.format(
             Locale.ROOT,
             "  inside labelled work it was %.2f%%, and that is what bounds the shares", labelledDuty * 100

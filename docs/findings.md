@@ -146,6 +146,16 @@ At 1–4 they all fit on performance cores; at 16 every core is occupied so noth
 the scheduler has genuine freedom to shuffle. Less load meant *more* noise, which is the opposite
 of what contention would predict.
 
+**The bench stops calibrating at all once the machine is heat-soaked.** After about twenty
+consecutive 20–45 second runs in one session, the iteration-count fit stopped converging on six
+attempts in a row, failing on a different operation each time — `traverse` by 3.23%, `tinyStep` by
+9.51%, then 6.02%, `visitNeighbor` by 3.92%, `maintain` by 6.00%, `tinyStep` by 7.69% — against a
+tolerance of about 3%. Earlier in the same session the identical command passed. Nothing was wrong
+with the bench and nothing had been changed in it: the fit runs single-threaded straight after a
+multi-threaded warm-up, and on a hot laptop the clock it fits against is no longer the clock the
+warm-up left behind. Worth knowing before diagnosing a fit failure as a code defect, and worth
+budgeting for: a session that needs N bench measurements should not plan on N runs.
+
 **The same label is below the floor or above it depending on how many threads are running.** Two
 20-second runs of the same binary on the same laptop, differing only in `--threads`:
 
@@ -651,8 +661,11 @@ so a parked thread lowered the duty cycle without appearing in a single share it
 
 Per thread, the stall that could possibly be inside labelled work is `min(stall, labelled) ×
 occupancy` — you cannot have more stall inside labels than you have stall, nor more than you have
-labels. Summed over threads and divided by labelled occupancy, that is the number the shares are now
-bounded by. Three 20-second runs, one for each thing that can go wrong:
+labels. **That version is sound and, on a thread pool, useless** — see the Lucene entry below, which
+is what the trials caught. What the tool computes is the refinement described there. On the bench
+the two are identical, because they differ only for a thread that has both visible waiting and
+labelled time on it and no bench mode has one. Three 20-second runs, one for each thing that can go
+wrong:
 
 | bench mode | aggregate duty | inside labelled work | bound | what the workers' own stopwatches say |
 |---|---|---|---|---|
@@ -677,11 +690,49 @@ The starvation bound landed at 3.16 pp rather than the "under 1 pp" the plan pre
 prediction was simply wrong arithmetic: the working threads were already known to be on CPU ~96%,
 and `(1 − 0.96) / 0.96` is 4.2 pp, not 1. The measurement agrees with what was already recorded.
 
+**`min(stall, labelled)` is vacuous on a thread pool, and the state read fixes it.** A pool thread
+parks between tasks and works inside a label, so *both* terms are large and the bound assumes the
+parking happened inside the label. Lucene:
+
+| | naive `min(stall, labelled)` | with the state read | truth |
+|---|---|---|---|
+| duty inside labelled work | 47.35% | **98.46%** | ~98% |
+| bound on every share | **100.00 pp** — clamped, useless | **1.57 pp** | — |
+
+The evidence being thrown away was already in the report: every labelled operation reads **0.0%
+waiting**, and 121 s of the 164 s of unlabelled time was a thread not runnable. So essentially none
+of the off-CPU time was inside a label, and the arithmetic says so without any inference —
+aggregate off-CPU is 31.3% of 405 s, of which 29.9 points are the observed not-runnable time,
+leaving 1.4 to assume the worst about.
+
+So the bound is taken per thread as `min(l, min(f, wl + max(0, f − w)))`, where `f` is off-CPU from
+the clock, `l` is the labelled fraction, `w` is the fraction caught not runnable and `wl` the part
+of that which was also labelled. `wl` is measured rather than assumed; only `f − w` — off-CPU that
+still read `RUNNABLE` — is charged worst case to the labels. The outer `min(f, …)` makes "never
+worse than ignoring the state read" a property of the code rather than of the data, since the two
+instruments have different resolutions and will disagree in the last digits.
+
+**Where that still leaves nothing to say: an event loop.** Netty, 4 threads, 45 s:
+
+- **0.0 ms** of the 154.98 s of unlabelled time read as not runnable. `epoll_wait` is off the CPU
+  and `RUNNABLE`, which is [the column's known blind spot](#the-column-is-blind-to-native-waiting-and-an-event-loop-is-native-waiting)
+  arriving in the duty bound.
+- So `f − w` is the whole 34.4% of off-CPU, against labels covering 13.9% of those threads — the
+  worst case swallows every labelled sample and the bound comes out at "all of it could be waiting".
+
+That is true and useless, and the report now says it in words rather than printing 0.00% and 100 pp
+as though they were measurements: *"nothing here bounds the shares: 34.4% of thread-time was off the
+CPU while the thread still read runnable — a native call, an event loop in a poll, or the
+scheduler — and labels cover 13.9% of these threads"*. It also names the fix, which is a label
+around the waiting and not only around the work.
+
 **Coverage had the same defect from the other end.** *"Labels cover 49.8% of thread-time"* reads as
-a placement failure when 79.2% of the unlabelled samples were a thread that was not runnable at all.
+a placement failure when most of the unlabelled samples were a thread that was not runnable at all.
 Coverage is now also reported over runnable occupancy alone — with *both* sides restricted, since a
 label can be held across a wait and leaving that in the numerator while removing it from the
-denominator is the same mismatch pointing the other way.
+denominator is the same mismatch pointing the other way. Measured on Lucene: **59.3% → 84.5%**. The
+line is suppressed when it agrees with the plain figure, which is every single-threaded or
+never-waiting workload — Calcite prints 100.0% once, not twice.
 
 ## The long-instance detector
 

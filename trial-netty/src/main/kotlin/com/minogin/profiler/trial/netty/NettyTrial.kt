@@ -322,10 +322,11 @@ fun main(args: Array<String>) {
 /**
  * The trial proper: labels on, sampler on, and the report the tool would give a user.
  *
- * `strict = false` deliberately. Two of these labels are plausibly under the 50 ns floor — the route
- * scan and the cheapest policy — and the floor check is fatal by default. On code you own that is
- * the right default; here it would stop the run before the interesting number was collected, which
- * is exactly the situation the switch exists for.
+ * Strict, and it used to have to be off. Two of these labels are plausibly under the 50 ns floor —
+ * the route scan and the cheapest policy — and that used to stop the run before the interesting
+ * number was collected. It was one of the two trials that made the case for demoting the floor
+ * check to a warning; now it names them and carries on. What strict still stops is a leaked label,
+ * and every label here is a lexical `op(id) { }` that cannot leak.
  */
 fun profile(seconds: Int, threads: Int, connections: Int, inFlight: Int) {
     val server = Server(threads, labelled = true).start()
@@ -333,7 +334,7 @@ fun profile(seconds: Int, threads: Int, connections: Int, inFlight: Int) {
     try {
         Thread.sleep(5_000)
         val from = client.responses.get()
-        Profiler.start(stepMillis = 1.0, strict = false)
+        Profiler.start(stepMillis = 1.0)
         val t0 = System.nanoTime()
         Thread.sleep(seconds * 1000L)
         val elapsed = (System.nanoTime() - t0) / 1e9

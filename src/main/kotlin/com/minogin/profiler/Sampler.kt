@@ -7,6 +7,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.LockSupport
+import kotlin.math.abs
 import kotlin.math.min
 import kotlin.math.sqrt
 
@@ -904,7 +905,12 @@ class Report(
         // The coverage figure a reader should act on. The one above divides by every sample taken,
         // so a pool of idle threads reads as missing labels; this one asks the question only of
         // time when a thread was running, on both sides of the division.
-        if (!runnableCoverage.isNaN()) appendLine(
+        //
+        // Printed only when it differs. On a workload where nothing waits the two are the same
+        // number twice, and a line that restates the line above it is worse than no line: it costs
+        // the reader a second of "what is different about this one" for nothing.
+        val plainCoverage = labelledHits.toDouble() / (labelledHits + idleHits).coerceAtLeast(1)
+        if (!runnableCoverage.isNaN() && abs(runnableCoverage - plainCoverage) >= COVERAGE_GAP) appendLine(
             String.format(
                 Locale.ROOT,
                 "  of the thread-time that was runnable at all, labels cover %s of %s (%.1f%%)",
@@ -952,7 +958,8 @@ class Report(
                                 (if (called.size > 4) ", …" else ""))
             )
         }
-        appendLine("share is of labelled samples and is occupancy, not CPU — the duty cycle above bounds the gap")
+        appendLine("share is of labelled samples and is occupancy: waiting counts in full, which is what the")
+        appendLine("  latency question wants — the duty cycle above bounds how much of it was waiting")
         appendLine("occupancy is hits x step as thread-time: absolute, so unlike share it does not move when a")
         appendLine("  label is added, moved or removed — which makes it the column to compare between two runs")
         appendLine("waiting is the share of those samples whose thread was parked, blocked or waiting; a thread")
@@ -1050,6 +1057,12 @@ class Report(
          * C2 will shuffle work across the boundaries of adjacent short labels altogether.
          */
         const val FLOOR_NANOS = 50.0
+
+        /**
+         * How far coverage-over-runnable must sit from plain coverage before it is worth a line of
+         * its own. Below this the two are the same number twice — see where it is used.
+         */
+        const val COVERAGE_GAP = 0.005
 
         /** How wide the report's rules and column layout are. */
         const val WIDTH = 126
@@ -1302,6 +1315,19 @@ class Sampler(
     val slotHits = LongArray(MAX_SLOTS)
     val slotLabelled = LongArray(MAX_SLOTS)
 
+    /**
+     * Of those, the ones that caught the thread not runnable — all of them, and the labelled ones.
+     *
+     * These are what stop the bound being vacuous on a thread pool. A pool thread parks between
+     * tasks and works inside a label, so its stall fraction and its labelled fraction are both
+     * large and `min` of the two assumes the parking happened inside the label. On Lucene that
+     * turned a true ~98% into a printed 47%. The state read already says where the waiting was;
+     * these two counters are the only thing needed to use it. Zero when [sampleState] is off, and
+     * the bound falls back to the assumption.
+     */
+    val slotWaiting = LongArray(MAX_SLOTS)
+    val slotLabelledWaiting = LongArray(MAX_SLOTS)
+
     private val prevOp = IntArray(MAX_SLOTS) { NO_OP }
     private val prevCount = LongArray(MAX_SLOTS)
     private val prevStuck = BooleanArray(MAX_SLOTS)
@@ -1403,6 +1429,10 @@ class Sampler(
                 // sampling thread, nothing on the hot path.
                 slotHits[idx]++
                 if (c >= 0) slotLabelled[idx]++
+                if (waiting) {
+                    slotWaiting[idx]++
+                    if (c >= 0) slotLabelledWaiting[idx]++
+                }
                 if (c < 0) {
                     prevOp[idx] = NO_OP
                     prevStuck[idx] = false
@@ -1474,7 +1504,8 @@ class Sampler(
     }
 
     /** How much of the occupancy this session sampled was CPU. See [DutyCycle]. */
-    fun duty(): DutyReport = duty.report(slotHits, slotLabelled)
+    fun duty(): DutyReport =
+        duty.report(slotHits, slotLabelled, slotWaiting, slotLabelledWaiting, sampleState)
 
     private fun waitUntil(deadline: Long) {
         when (wait) {
