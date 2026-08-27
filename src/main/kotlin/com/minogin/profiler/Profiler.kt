@@ -325,8 +325,25 @@ object Profiler {
         return false
     }
 
-    /** Labels left open at a point the caller said should be quiescent. See [expectBalanced]. */
+    /**
+     * Labels left open at a point the caller said should be quiescent. See [expectBalanced].
+     *
+     * For the life of the process, because [expectBalanced] is a check a caller may make with no
+     * session running at all. What a [Report] carries is this minus [imbalancesAtStart], for the
+     * same reason `Sampler.callsAtStart` exists: every number in a report is about one session.
+     */
     private val imbalances = AtomicInteger(0)
+
+    /**
+     * [imbalances] as it stood when the current session began.
+     *
+     * Without it a second session in the same process reports the first one's leaks as well as its
+     * own, and prints *"N labels were still open at a point the caller said should be quiescent"*
+     * about a session in which nothing leaked — which is exactly the failure the message warns
+     * about, arriving through the warning itself. Live in the Netty A/B, which starts and stops a
+     * session once per arm per round in one JVM.
+     */
+    private var imbalancesAtStart = 0
 
     /** Threads still inside a hand-placed label right now, which at the end of a session is a leak. */
     fun openSpans(): Int = allSlots.count { it.depth > 0 }
@@ -377,6 +394,7 @@ object Profiler {
     ) {
         check(sampler == null) { "already sampling" }
         startedAt = System.nanoTime()
+        imbalancesAtStart = imbalances.get()
         sampler = Sampler((stepMillis * 1_000_000).toLong(), wait, jitter, strict = strict, sampleState = sampleState)
             .also { it.start() }
     }
@@ -398,7 +416,7 @@ object Profiler {
         // operation quietly accumulating everybody else's samples — looks exactly like a finding.
         return Report(
             stats, s.counters[NO_OP_INDEX], s.ticks, s.span, duration, s.maxSlots, s.duty(), s.failure,
-            imbalances = imbalances.get(), openAtEnd = openSpans(), stateSampled = s.sampleState,
+            imbalances = imbalances.get() - imbalancesAtStart, openAtEnd = openSpans(), stateSampled = s.sampleState,
             idleWaitingHits = s.idleWaitingHits,
         )
     }

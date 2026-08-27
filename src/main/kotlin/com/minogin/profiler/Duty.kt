@@ -211,34 +211,9 @@ class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
     }
 
     /**
-     * How much of *labelled* occupancy was CPU — the number the report's shares are bounded by.
-     *
-     * A bound and not a measurement, and it has to be: a thread can be parked *inside* a label. The
-     * bench's `--lock` mode puts the label outside the acquisition on purpose and 52,422 of
-     * `lockedUpdate`'s 71,839 hits caught a thread that was not runnable, so "labelled therefore
-     * running" is false and the cheap version of this fix is not available.
-     *
-     * What is available is an interval, and how tight it is depends on whether thread state was
-     * sampled. For thread *i*, as fractions of that thread's own occupancy:
-     *
-     * - `f` — off the CPU altogether, from the clock. Everything below has to fit inside it.
-     * - `l` — inside some label.
-     * - `w` — caught not runnable, and `wl` the part of that which was also inside a label. Both
-     *   measured per sample rather than inferred.
-     *
-     * **Without state**, all that can be said is `min(f, l)`: no more stall inside labels than
-     * there is stall, and no more than there are labels. Sound, and on a thread pool useless —
-     * a pool thread parks between tasks and works inside a label, so both terms are large and the
-     * bound assumes the parking happened inside the label. Measured on Lucene: a true ~98% printed
-     * as 47.35%, and a 100 pp error on shares that were fine.
-     *
-     * **With state** the visible half is not an assumption at all. `wl` *is* the waiting that was
-     * inside a label. What is left over, `f − w`, is off-CPU the state read cannot see — a
-     * preempted thread and a thread in a native call both read `RUNNABLE` — and that part still has
-     * to be assumed worst case, all of it inside labels. So `min(l, wl + max(0, f − w))`.
-     *
-     * Still an upper bound, and on Lucene a tight one: 29.9 of the 31.3 points of off-CPU there
-     * were observably not runnable, leaving 1.4 to assume the worst about.
+     * Everything the sampler collected, plus the bound on every share that [labelledDuty] works out
+     * from it. The arithmetic lives there and not here, so that it can be checked without starting
+     * a sampler — which is how the vacuous-on-a-thread-pool version of it was eventually caught.
      */
     fun report(
         slotHits: LongArray,
@@ -374,7 +349,17 @@ internal fun labelledDuty(
         }
     }
     if (labelled <= 0.0 || total <= 0.0) return LabelledDuty(Double.NaN, Double.NaN, Double.NaN)
-    return LabelledDuty((labelled - stall) / labelled, invisible / total, labelled / total)
+    // Clamped for the same reason `f` is, one loop up, and it was missed for one loop longer.
+    // `labelled` accumulates exact counts while `stall` reaches the same quantity through a divide
+    // and a multiply — `min(…, l) * hits` where `l = slotLabelled / hits` — so when `l` is the
+    // binding term and is a fraction no double holds exactly, `stall` can exceed `labelled` by a
+    // ULP and the duty comes out a hair below zero. Netty's 0.139 does it. Unclamped, the report
+    // printed "at most -764160581304320300.00 pp of any share".
+    return LabelledDuty(
+        ((labelled - stall) / labelled).coerceIn(0.0, 1.0),
+        invisible / total,
+        labelled / total,
+    )
 }
 
 /** What the duty measurement came to, and the bound it puts on every share in the report. */
@@ -382,7 +367,7 @@ class DutyReport(
     /**
      * The fraction of *labelled* occupancy that was CPU, worst case. NaN when it could not be
      * computed, and the aggregate [duty] then stands in — which is the old, pessimistic behaviour
-     * rather than a wrong one. See [DutyCycle.labelledDuty].
+     * rather than a wrong one. See [labelledDuty].
      */
     val labelledDuty: Double,
     /**

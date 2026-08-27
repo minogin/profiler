@@ -146,6 +146,30 @@ At 1–4 they all fit on performance cores; at 16 every core is occupied so noth
 the scheduler has genuine freedom to shuffle. Less load meant *more* noise, which is the opposite
 of what contention would predict.
 
+**A property test that could not fail, and the bug it was written for.** `labelledDuty` accumulates
+`labelled` from exact counts and `stall` through a divide and a multiply — `min(…, l) × hits` where
+`l = slotLabelled / hits` — so when `l` binds and is a fraction no double holds exactly, `stall`
+exceeds `labelled` by one ULP and the duty comes out a hair *below zero*. Netty's 0.139 does it. The
+report then printed **`at most -764160581304320300.00 pp of any share`**.
+
+`DutyBoundTest`'s "the result is always a fraction" asserts exactly the violated property and passed
+anyway: all three of its cases had a labelled fraction of exactly 0 or exactly 1, so `l` was
+integer-exact and multiplying it back returned what it started from. **A property test is only worth
+the inputs it is given**, and the input that mattered here is an ordinary-looking `0.139`. Found by
+code review, not by the suite.
+
+Two things made it invisible in practice rather than harmless: `DutyReport.unbounded` caught the
+degenerate case, and it requires `invisibleOffCpu > 0`, which is only ever accumulated on the
+state-sampled path — so `--state=off` was enough to put the negative number on screen.
+
+**The imbalance count was a per-process counter in a per-session report**, and it was live rather
+than latent: the Netty A/B starts and stops a session once per arm per round in one JVM, so it had
+been printing leaks inherited from earlier arms — *"N labels were still open at a point the caller
+said should be quiescent"* about a session in which nothing leaked. Exactly the failure that
+warning exists to prevent, arriving through the warning itself. Now snapshot at `start()` and
+subtracted at `stop()`, the shape `callsAtStart` has used since the same bug was found in call
+counts.
+
 **The numbers in this file are now test expectations.** `src/test/kotlin` encodes the duty bound's
 five regimes, both sides of the floor check's 0.35 ns boundary, and the long-execution floor,
 against the figures recorded here — so a change that moves one of them fails a build in three

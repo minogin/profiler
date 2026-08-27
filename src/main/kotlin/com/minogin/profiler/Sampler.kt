@@ -168,7 +168,7 @@ class Sampler(
      * Per thread, every sample taken at its slot and those of them that were inside some operation.
      *
      * Paired with the duty cycle's per-thread CPU fractions to bound the error on the shares — see
-     * [DutyCycle.labelledDuty]. Indexed by slot index, which is why that index exists: it is
+     * [labelledDuty]. Indexed by slot index, which is why that index exists: it is
      * immutable for the life of the slot and it is the only thing the sampler and the duty walk
      * can both use to mean *the same thread*.
      */

@@ -564,7 +564,7 @@ wait many times* — rather than implying a CPU measurement was the objective an
 open: the same line's denominators are wrong, which is item 10, and the two are worth fixing in one
 pass since they are the same two sentences of output.
 
-## 18. The imbalance count is per process, and everything beside it is per session · open
+## 18. The imbalance count is per process, and everything beside it is per session · fixed
 
 *Noticed while writing the leak check for 1a, which had to expect the wrong number to pass.*
 
@@ -577,7 +577,9 @@ only because it made an upper bound come out *below* the truth, which is arithme
 This one has no such tell. It fails quietly, in the direction of over-reporting, and only in a
 process that profiles twice — which our harnesses do and a library's users certainly will.
 
-The fix is the shape `callsAtStart` already uses: snapshot at `start()`, subtract at `stop()`.
+**Fixed** — and it was live, not latent: the Netty A/B runs a session per arm per round in one JVM,
+so it had been reporting earlier arms' leaks. Found by code review. The fix is the shape
+`callsAtStart` already uses: snapshot at `start()`, subtract at `stop()`.
 `openAtEnd` is fine as it is, being a count of live slots rather than an accumulator. Not done with
 1a because 1a was about which rung of the ladder a finding sits on, not about what a session is.
 

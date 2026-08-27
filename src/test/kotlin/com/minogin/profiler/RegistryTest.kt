@@ -4,7 +4,6 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
-import kotlin.test.assertNotEquals
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -185,6 +184,32 @@ class RegistryTest {
         val lenient = Profiler.stop()
         assertNull(lenient.failure, "a leak stopped a non-strict session")
         assertTrue(lenient.ok)
+        assertEquals(1, lenient.imbalances, "the second session inherited the first session's leak")
+    }
+
+    /**
+     * A session reports its own leaks and nobody else's.
+     *
+     * Every other number in a `Report` is per session, and deliberately so: `callsAtStart` exists
+     * because call counts that spanned the warm-up were inflating implied durations by a tenth, and
+     * that mismatch was found only because it made an upper bound come out *below* the truth, which
+     * is arithmetically impossible. The imbalance count had no such tell. It failed quietly, in the
+     * direction of over-reporting, and only in a process that profiles twice — which the Netty A/B
+     * does, once per arm per round, so it has been printing leaks inherited from earlier arms.
+     */
+    @Test
+    fun `a clean session does not inherit an earlier session's leaks`() {
+        val id = Profiler.register("test:inherited")
+
+        Profiler.start(stepMillis = 1.0, strict = false)
+        onOwnThread { Profiler.enter(id); Profiler.expectBalanced() }
+        assertEquals(1, Profiler.stop().imbalances, "the leak was not counted at all")
+
+        Profiler.start(stepMillis = 1.0, strict = false)
+        onOwnThread { op(id) { } }
+        val clean = Profiler.stop()
+        assertEquals(0, clean.imbalances, "a session with no leak reported ${clean.imbalances}")
+        assertFalse(clean.render().contains("still open at a point"), "a clean report warned about a leak")
     }
 
     /** An `exit` with no `enter` names nothing rather than reading off the end of the name table. */
@@ -218,34 +243,69 @@ class RegistryTest {
     }
 
     /**
-     * A released index is handed to the next thread that arrives.
+     * Runs [n] threads that all hold a slot at once, then all release, and returns their indexes.
      *
-     * Recorded here because the duty cycle's per-thread arrays are indexed by it, and a reused
-     * index blends two threads' figures. That is a known and accepted inaccuracy — this test is
-     * what makes it a *known* one rather than a surprise to whoever reads the arrays next.
+     * Latches rather than a spin on a captured `var`. A Kotlin `var` captured by a lambda compiles
+     * to a `Ref.IntRef` whose field is plain and non-volatile, and `onSpinWait` is not a fence and
+     * forces no reload — so a spin on one is a loop the JIT may hoist the load out of, and a test
+     * that hangs the build with no timeout. The first version of this did exactly that.
      */
-    @Test
-    fun `a released index is reused`() {
-        var first = -1
-        onOwnThread { first = Profiler.slot().index; Profiler.release() }
-        var second = -1
-        onOwnThread { second = Profiler.slot().index; Profiler.release() }
-        assertTrue(first >= 0 && second >= 0, "the registry was full")
-        assertEquals(first, second, "a freed slot index was not handed on")
+    private fun roundOfIndexes(n: Int): List<Int> {
+        val indexes = java.util.concurrent.ConcurrentLinkedQueue<Int>()
+        val acquired = java.util.concurrent.CountDownLatch(n)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val threads = List(n) {
+            Thread({
+                indexes += Profiler.slot().index
+                acquired.countDown()
+                release.await()
+                Profiler.release()
+            }, "registry-round-$it")
+        }
+        threads.forEach { it.start() }
+        assertTrue(
+            acquired.await(10, java.util.concurrent.TimeUnit.SECONDS),
+            "threads did not register a slot within ten seconds"
+        )
+        val seen = indexes.toList()
+        release.countDown()
+        threads.forEach { it.join() }
+        return seen
     }
 
     /** Two live threads never share an index, which is what makes the per-thread arrays meaningful. */
     @Test
-    fun `two live threads get different indexes`() {
-        var a = -1
-        var b = -1
-        val gate = java.util.concurrent.CountDownLatch(1)
-        val one = Thread { a = Profiler.slot().index; gate.await(); Profiler.release() }
-        val two = Thread { b = Profiler.slot().index; gate.await(); Profiler.release() }
-        one.start(); two.start()
-        while (a < 0 || b < 0) Thread.onSpinWait()
-        assertNotEquals(a, b, "two live threads shared a slot index")
-        gate.countDown()
-        one.join(); two.join()
+    fun `live threads get different indexes`() {
+        val seen = roundOfIndexes(4)
+        assertEquals(4, seen.toSet().size, "live threads shared a slot index: $seen")
+        assertTrue(seen.all { it >= 0 }, "the registry was full: $seen")
+    }
+
+    /**
+     * A registry that only ever grows is a leak, and freed indexes are what stop it growing.
+     *
+     * Asserted as *no growth across rounds* rather than as "the next thread gets the index the last
+     * one freed". The obvious version of that is order-dependent and passes by luck: `freeIndexes`
+     * is a FIFO queue shared by the whole JVM, so with two entries already in it, one thread polls
+     * the head and returns its own index to the tail, the next thread polls the second entry, and
+     * the equality fails — pointing at the registry when the fault is in the test. What survives
+     * whatever else is queued is that the high-water mark does not move.
+     *
+     * The reuse itself is worth knowing about for a second reason: the duty cycle's per-thread
+     * arrays are indexed by this, so a reused index blends two threads' figures. Known, accepted,
+     * and written down here rather than left as a surprise to whoever reads those arrays next.
+     */
+    @Test
+    fun `the registry reuses indexes instead of growing`() {
+        val first = roundOfIndexes(4)
+        val ceiling = first.max()
+        repeat(3) { round ->
+            val again = roundOfIndexes(4)
+            assertEquals(4, again.toSet().size, "live threads shared a slot index in round $round")
+            assertTrue(
+                again.max() <= ceiling,
+                "the registry grew in round $round: ${again.max()} against a ceiling of $ceiling"
+            )
+        }
     }
 }

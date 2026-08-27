@@ -97,18 +97,50 @@ class DutyBoundTest {
         }
     }
 
-    /** Whatever the inputs, a duty is a fraction. A bound outside 0..1 is a broken formula. */
+    /**
+     * Whatever the inputs, a duty is a fraction. A bound outside 0..1 is a broken formula.
+     *
+     * **This test was written once and could not fail.** Every case it had used a labelled fraction
+     * of exactly 0 or exactly 1, so `l = slotLabelled / hits` was integer-exact and multiplying it
+     * back up by `hits` returned exactly what it started from. The sum that has to stay ordered —
+     * `stall <= labelled` — is accumulated one way exactly and the other way through a division and
+     * a multiplication, so it is only ever a fraction like `0.139` that can round the wrong way and
+     * push the duty a ULP below zero. Which is reachable, prints
+     * `at most -764160581304320300.00 pp`, and is precisely the Netty regime.
+     */
     @Test
     fun `the result is always a fraction`() {
         val odd = listOf(
             Thread(labelled = 1.0, offCpu = 1.0, notRunnable = 1.0, labelledNotRunnable = 1.0),
             Thread(labelled = 0.5, offCpu = 0.0),
             Thread(labelled = 1.0, offCpu = 0.999),
+            // Labelled fractions that no double can hold exactly, which is the only shape that
+            // breaks the ordering. 0.139 is Netty's; the rest are neighbours of it.
+            Thread(labelled = 0.139, offCpu = 0.34401),
+            Thread(labelled = 0.07, offCpu = 0.9),
+            Thread(labelled = 0.3, offCpu = 0.7, notRunnable = 0.1, labelledNotRunnable = 0.05),
         )
         for (t in odd) {
-            val d = bound(t).duty
-            assertTrue(d in 0.0..1.0, "duty $d is not a fraction")
+            for (state in listOf(true, false)) {
+                val d = bound(t, state = state).duty
+                assertTrue(d in 0.0..1.0, "duty $d is not a fraction (state=$state, l=${t.labelled})")
+            }
         }
+    }
+
+    /**
+     * The degenerate Netty case with the state read switched off.
+     *
+     * Worth its own test because this is the combination that got the negative bound into a printed
+     * report: `unbounded` needs `invisibleOffCpu > 0`, and that term is only ever accumulated on the
+     * state-sampled path — so with `--state=off` nothing catches a duty that has gone below zero and
+     * the report prints a percentage with eighteen digits in it.
+     */
+    @Test
+    fun `the degenerate case is still a fraction without the state read`() {
+        val r = bound(*Array(4) { Thread(labelled = 0.139, offCpu = 0.344) }, state = false)
+        assertTrue(r.duty >= 0.0, "duty went below zero: ${r.duty}")
+        assertTrue(pp(r.duty) in 0.0..100.0, "bound ${pp(r.duty)} pp is not a percentage")
     }
 
     /** With no labelled samples anywhere there is nothing to bound, and NaN says so. */
