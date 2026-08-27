@@ -540,7 +540,7 @@ private fun checkLeakStopsTheSession(): Boolean {
     println("--- Leak check: does a label left open stop the session? ---")
     var ok = true
 
-    for ((round, strict) in listOf(true, false).withIndex()) {
+    for (strict in listOf(true, false)) {
         Profiler.start(stepMillis = 1.0, strict = strict)
         // On a thread of its own. The leak lives in one slot, and this thread's slot has to be
         // clean going into the second half or it would inherit the first half's mess.
@@ -557,10 +557,12 @@ private fun checkLeakStopsTheSession(): Boolean {
 
         val stopped = report.failure != null
         val named = report.failure?.contains("leakedOnPurpose") == true
-        // Cumulative, not per session: the imbalance counter runs for the life of the process,
-        // unlike the call counts, which the sampler rebases at every start. Expected here rather
-        // than corrected, because correcting it is not this change — see ideas.md.
-        val counted = report.imbalances == round + 1
+        // One leak, one session, one count. This read `round + 1` while the counter ran for the
+        // life of the process, and kept reading it for twenty minutes after that stopped being
+        // true — long enough for every run to print THE LADDER IS BROKEN. Nothing caught it,
+        // because the assertions also live in RegistryTest and the suite was green while this mode
+        // was not: a check that only runs when somebody types the flag only runs that often.
+        val counted = report.imbalances == 1
         val good = stopped == strict && (!strict || named) && counted
         if (!good) ok = false
         println(
@@ -771,17 +773,3 @@ private fun warmUp(bench: Bench): Boolean {
  */
 internal var FIT_CLOCK: Double = Double.NaN
 
-/**
- * The sampled waiting share against the workers' own stopwatches — a second truth for the one
- * quantity this bench can inject on purpose.
- *
- * Every thread waiting for the contended lock times its own wait with `nanoTime` and adds it to
- * `lockWaitNanos`; the sampler independently counts hits where the slot held `lockedUpdate` and
- * the owning thread was not runnable. The two share nothing — one is a stopwatch on the waiting
- * thread, the other is a state read from a different thread a millisecond at a time — so agreement
- * is evidence and disagreement is a defect in one of them.
- *
- * The tolerance is loose on purpose. Sampling error alone at these hit counts is a few tenths of a
- * percent, and the two windows are not identical: the workers' figure covers the whole run while
- * the sampler covers only the ticks it took.
- */

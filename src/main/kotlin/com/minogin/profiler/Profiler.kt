@@ -5,6 +5,7 @@ import java.lang.invoke.VarHandle
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.min
 
 /** Slot value meaning "this thread is not inside any instrumented operation right now". */
 const val NO_OP = -1
@@ -261,9 +262,18 @@ object Profiler {
         id
     }
 
-    fun nameOf(id: Int): String = names[id] ?: "op#$id"
+    fun nameOf(id: Int): String = if (id in 0 until MAX_OPERATIONS) names[id] ?: "op#$id" else "op#$id"
 
-    fun registeredCount(): Int = nextId.get()
+    /**
+     * How many operations have been registered, never more than there is room for.
+     *
+     * Clamped because [register] increments before it checks, so the 257th registration leaves the
+     * counter at 257 on its way out through an exception. That exception is an
+     * `IllegalStateException` with a clear message, so catching it is a reasonable thing for a
+     * caller to do — and it used to mean the *next* `stop()` walked `0 until 257` across arrays of
+     * 256 and died with an index error a long way from the cause.
+     */
+    fun registeredCount(): Int = min(nextId.get(), MAX_OPERATIONS)
 
     /** The calling thread's slot, registering it on first call. */
     fun slot(): OpSlot = local.get()
@@ -345,6 +355,9 @@ object Profiler {
      */
     private var imbalancesAtStart = 0
 
+    /** [untrackedSlots] as it stood when the current session began. See [Report.untrackedSlots]. */
+    private var untrackedAtStart = 0
+
     /** Threads still inside a hand-placed label right now, which at the end of a session is a leak. */
     fun openSpans(): Int = allSlots.count { it.depth > 0 }
 
@@ -354,15 +367,24 @@ object Profiler {
      * work — counting a dead thread as an idle one. A registry that only ever grows is also a
      * plain leak in anything long-lived with a thread pool that recycles.
      *
-     * Its call counts are folded into the retired totals first, or a pool that recycles threads
-     * would silently lose everything the retired ones did.
+     * Its call counts are folded into the retired totals, or a pool that recycles threads would
+     * silently lose everything the retired ones did — but *after* the slot leaves the walk list,
+     * not before. [callsOf] sums the retired totals and the live slots, so a reader landing between
+     * the two lines sees this thread's calls in both halves and counts them twice. That inflates
+     * calls, deflates the implied duration and the bound built on it, and can push a perfectly good
+     * label under the floor and print an accusation — the exact failure mode this project has
+     * already met once, where a rate's numerator and denominator counted different windows.
+     *
+     * Both orders race; only this one races in a safe direction. Losing the counts for the length
+     * of one read makes an operation look *longer* than it is, which cannot manufacture an
+     * accusation, and the window is two instructions wide either way.
      */
     fun release() {
         val s = local.get()
+        allSlots.remove(s)
         synchronized(retiredCounts) {
             for (id in 0 until MAX_OPERATIONS) retiredCounts[id] += s.countOf(id)
         }
-        allSlots.remove(s)
         // Removed from the walk list first, so the sampler cannot be reading this slot at the
         // moment its index is handed to somebody else.
         if (s.index >= 0) freeIndexes.add(s.index)
@@ -395,6 +417,7 @@ object Profiler {
         check(sampler == null) { "already sampling" }
         startedAt = System.nanoTime()
         imbalancesAtStart = imbalances.get()
+        untrackedAtStart = untrackedSlots()
         sampler = Sampler((stepMillis * 1_000_000).toLong(), wait, jitter, strict = strict, sampleState = sampleState)
             .also { it.start() }
     }
@@ -417,6 +440,7 @@ object Profiler {
         return Report(
             stats, s.counters[NO_OP_INDEX], s.ticks, s.span, duration, s.maxSlots, s.duty(), s.failure,
             imbalances = imbalances.get() - imbalancesAtStart, openAtEnd = openSpans(), stateSampled = s.sampleState,
+            untrackedSlots = (untrackedSlots() - untrackedAtStart).coerceAtLeast(0),
             idleWaitingHits = s.idleWaitingHits,
         )
     }

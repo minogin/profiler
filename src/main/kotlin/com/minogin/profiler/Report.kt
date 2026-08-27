@@ -147,6 +147,17 @@ class Report(
     val idleWaitingHits: Long = 0,
     /** Threads still inside a hand-placed label when the session ended. */
     val openAtEnd: Int = 0,
+    /**
+     * Threads that arrived past the slot ceiling and are invisible to the long-execution detector.
+     *
+     * Captured at `stop()` rather than read from [Profiler] at render time, which is what it used
+     * to do — and that had the two faults this project has now met twice. It is a process-lifetime
+     * counter that never decreases, so in a process that profiles repeatedly every later report
+     * warned about threads that arrived during an earlier session; and reading live global state
+     * while rendering means a report can describe thread churn that happened *after* the session it
+     * claims to be about.
+     */
+    val untrackedSlots: Int = 0,
 ) {
     /** False when a fatal finding stopped the session. See the severity ladder in plan.md. */
     val ok: Boolean get() = failure == null
@@ -596,8 +607,8 @@ class Report(
         for (op in tooSmall()) {
             appendLine("  ! " + tooSmallMessage(op.name, op.calls, impliedUpperNanosOf(op)))
         }
-        if (Profiler.untrackedSlots() > 0) {
-            appendLine("    (${Profiler.untrackedSlots()} threads arrived past the $MAX_SLOTS-slot ceiling and are not checked)")
+        if (untrackedSlots > 0) {
+            appendLine("    (${untrackedSlots} threads arrived past the $MAX_SLOTS-slot ceiling and are not checked)")
         }
         // A leaked label does not look like an error. It looks like a finding: one operation
         // quietly accumulating everybody else's samples, with a plausible number beside it.

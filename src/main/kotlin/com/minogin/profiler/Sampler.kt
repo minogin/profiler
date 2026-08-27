@@ -153,18 +153,6 @@ class Sampler(
     private val seenAt = LongArray(MAX_OPERATIONS) { -1L }
 
     /**
-     * What the last tick found in each slot, kept on this side of the fence.
-     *
-     * The test is two words against two words. If a slot holds the same operation as last tick
-     * *and* that thread's entry counter for it has not moved, then nobody entered the operation in
-     * between, so this is not a new execution — it is the same one, still running, and it has now
-     * lasted at least a whole tick. For an operation whose label claims tens of nanoseconds that is
-     * four orders of magnitude out.
-     *
-     * A counter that went *backwards* means the index was recycled to a new thread, which is
-     * treated as a fresh execution — the one case where the answer would otherwise be nonsense.
-     */
-    /**
      * Per thread, every sample taken at its slot and those of them that were inside some operation.
      *
      * Paired with the duty cycle's per-thread CPU fractions to bound the error on the shares — see
@@ -188,9 +176,33 @@ class Sampler(
     val slotWaiting = LongArray(MAX_SLOTS)
     val slotLabelledWaiting = LongArray(MAX_SLOTS)
 
+    /**
+     * What the last tick found in each slot, kept on this side of the fence.
+     *
+     * The test is two words against two words. If a slot holds the same operation as last tick
+     * *and* that thread's entry counter for it has not moved, then nobody entered the operation in
+     * between, so this is not a new execution — it is the same one, still running, and it has now
+     * lasted at least a whole tick. For an operation whose label claims tens of nanoseconds that is
+     * four orders of magnitude out.
+     */
     private val prevOp = IntArray(MAX_SLOTS) { NO_OP }
     private val prevCount = LongArray(MAX_SLOTS)
     private val prevStuck = BooleanArray(MAX_SLOTS)
+
+    /**
+     * Which thread each index belonged to last tick, so a recycled one starts clean.
+     *
+     * An index outlives the thread that held it — `release()` hands it to the next arrival — and
+     * the three arrays above would otherwise carry a dead thread's last tick into a live thread's
+     * first. The documentation used to claim a counter going backwards caught that. It does not:
+     * the test is inequality, and the new thread's counter for the old operation only has to *pass
+     * through* the old value at a tick boundary to be read as one execution still running. Rare,
+     * and worst on exactly the operations where a single false long execution is most visible —
+     * the ones entered a handful of times per pass.
+     *
+     * One long compare per slot per tick, on a thread that has a core to itself.
+     */
+    private val prevThreadId = LongArray(MAX_SLOTS) { -1L }
 
     var ticks: Long = 0; private set
     var lagged: Long = 0; private set
@@ -283,6 +295,13 @@ class Sampler(
 
                 val idx = s.index
                 if (idx < 0) continue           // past the ceiling: sampled, but not tracked
+                // A recycled index starts clean. See [prevThreadId].
+                if (prevThreadId[idx] != s.threadId) {
+                    prevThreadId[idx] = s.threadId
+                    prevOp[idx] = NO_OP
+                    prevCount[idx] = 0
+                    prevStuck[idx] = false
+                }
                 // The other half of the per-thread bound. The duty walk knows how much of thread
                 // i's time was CPU; this is how much of it was inside a label, and the bound is
                 // what the two agree could have been stalling *there*. Two increments on the

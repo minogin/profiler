@@ -292,7 +292,13 @@ private fun observerEffect(
     }
     val rounds = Array(configs.size) { DoubleArray(OBSERVER_ROUNDS) }
     for (round in 0 until OBSERVER_ROUNDS) {
-        for (i in configs.indices) {
+        // Alternating, not fixed-order round-robin. Interleaving alone is not enough and this
+        // project has the measurement: a fixed A-B-C order reported the instrumented configuration
+        // 6.6% *faster* in all four rounds, consistently, because position in the round is worth
+        // more than the effect. StackCost's victimCost has swapped its order since that was found;
+        // this loop kept the comment and lost the protection.
+        val order = if (round % 2 == 0) configs.indices.toList() else configs.indices.reversed().toList()
+        for (i in order) {
             val (_, labels, sampling) = configs[i]
             val bench = benches.getValue(labels)
             bench.resetCounters()
@@ -351,4 +357,3 @@ private fun observerEffect(
     return share <= OBSERVER_TOLERANCE
 }
 
-/** The full phase-1 tables for a single run. */

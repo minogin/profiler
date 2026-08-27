@@ -5,6 +5,7 @@ import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.sqrt
 
+/** The full phase-1 tables for a single run. */
 internal fun printDetail(bench: Bench, o: Outcome, sampler: Sampler?, stepMillis: Double) {
     println(
         String.format(
@@ -466,6 +467,20 @@ private fun printDuty(
  * The cost of a busy-loop iteration right now, in the bench's own units. About 6 ms, and it says
  * directly what clock this phase is getting — no external counters, no sampling resolution to
  * argue about, and the same units the calibration speaks.
+ */
+/**
+ * The sampled waiting share against the workers' own stopwatches — a second truth for the one
+ * quantity this bench can inject on purpose.
+ *
+ * Every thread waiting for the contended lock times its own wait with `nanoTime` and adds it to
+ * `lockWaitNanos`; the sampler independently counts hits where the slot held `lockedUpdate` and
+ * the owning thread was not runnable. The two share nothing — one is a stopwatch on the waiting
+ * thread, the other is a state read from a different thread a millisecond at a time — so agreement
+ * is evidence and disagreement is a defect in one of them.
+ *
+ * The tolerance is loose on purpose. Sampling error alone at these hit counts is a few tenths of a
+ * percent, and the two windows are not identical: the workers' figure covers the whole run while
+ * the sampler covers only the ticks it took.
  */
 private fun printWaitingCheck(sampler: Sampler, bench: Bench) {
     val id = lockOpIdOf(bench)
