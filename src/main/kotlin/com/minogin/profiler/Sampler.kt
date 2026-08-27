@@ -316,8 +316,16 @@ object Profiler {
         val s = local.get()
         if (s.depth == 0) return true
         imbalances.incrementAndGet()
+        // Read before the reset, and defensively: a slot can hold NO_OP with a depth above zero if
+        // the leak was an `exit` without its `enter` rather than the other way round.
+        val id = s.getOpaque()
+        val open = if (id >= 0) nameOf(id) else "an unnamed label"
         s.depth = 0
         s.setOpaque(NO_OP)
+        // Fatal under strict, and it is the only thing that is. Resetting the slot stops the leak
+        // spreading, but it cannot give back the samples already billed to the wrong operation —
+        // so continuing means reporting a share that was manufactured by a bug.
+        sampler?.let { if (it.strict) it.fail(leakMessage(open)) }
         return false
     }
 
@@ -361,8 +369,8 @@ object Profiler {
     /**
      * Starts sampling. One sampler at a time.
      *
-     * [strict] stops the session if a label turns out to be on something below the floor — see the
-     * severity ladder in plan.md. Switch it off to profile code you do not own and cannot resize.
+     * [strict] stops the session if a label leaks — see the severity ladder in plan.md. Switch it
+     * off to profile code you do not own and cannot fix.
      */
     fun start(
         stepMillis: Double = 1.0,
@@ -434,6 +442,21 @@ fun tooSmallMessage(name: String, calls: Long, upperNanos: Double): String = Str
             "trace in the numbers.%n" +
             "    Label the enclosing loop instead and divide by the iteration count.",
     name, calls, duration(upperNanos), Report.FLOOR_NANOS
+)
+
+/**
+ * What to tell someone whose label leaked. Names the operation that was open, because that is the
+ * one whose share is now wrong and the reader has no other way to know which.
+ */
+fun leakMessage(open: String, thread: String = Thread.currentThread().name): String = String.format(
+    Locale.ROOT,
+    "%s was still open on thread %s at a point the caller said should be quiescent.%n" +
+            "    Every sample taken on that thread between the leak and this check was billed to " +
+            "%s,%n" +
+            "    which does not look like an error — it looks like a finding, with a plausible " +
+            "number beside it.%n" +
+            "    A label placed with enter/exit has no finally: a body that throws leaves it set.",
+    open, thread, open
 )
 
 fun isSuspect(hits: Long, stuckHits: Long, stuckInstances: Long, machineFloor: Double): Boolean =
@@ -816,7 +839,7 @@ class Report(
         val achieved = if (ticks > 1) samplingSpanNanos.toDouble() / (ticks - 1) / 1e6 else Double.NaN
         if (failure != null) {
             appendLine("!".repeat(WIDTH))
-            appendLine("PROFILING STOPPED — this label could not have produced a correct number:")
+            appendLine("PROFILING STOPPED — these numbers were not going to be right:")
             appendLine("  $failure")
             appendLine("Everything below is what led to that verdict, not a result. Pass strict=false to")
             appendLine("profile anyway, which is what to do when the code is not yours to change.")
@@ -926,8 +949,10 @@ class Report(
             )
             appendLine("    " + verdictFor(op))
         }
-        // The other end of the same question. Fatal under strict, so under strict this list is at
-        // most one long and the session has already stopped; without it, every offender is named.
+        // The other end of the same question, and a warning rather than a verdict: a label below
+        // the floor cannot move a ranking, so the cost of being wrong about one is the loudest
+        // failure this tool has — stopping a run that was fine. It did exactly that in two
+        // consecutive trials. Every offender is named; the reader decides.
         for (op in tooSmall()) {
             appendLine("  ! " + tooSmallMessage(op.name, op.calls, impliedUpperNanosOf(op)))
         }
@@ -1104,14 +1129,17 @@ class Sampler(
     private val jitterFraction: Double = 0.25,
     dutyWindowNanos: Long = DutyCycle.DEFAULT_WINDOW_NANOS,
     /**
-     * Whether a label below the floor stops the session. See the severity ladder in plan.md: a
-     * label on something too small is a property of the code and not of the run, so there is no
-     * rerun in which it becomes valid, and continuing for twenty minutes to hand back a number that
-     * was never going to be right is the worse of the two failures.
+     * Whether a leaked label stops the session. See the severity ladder in plan.md.
      *
-     * Off for code you do not own and cannot resize.
+     * A label left open at a point the caller declared quiescent does not make a number imprecise,
+     * it makes it *someone else's*: every sample after the leak is billed to the leaked operation,
+     * and the result looks exactly like a finding. There is no rerun in which that becomes valid,
+     * so under strict the session stops at the first one rather than spending twenty minutes
+     * producing an answer that was never going to be right.
+     *
+     * Off for code you do not own and cannot fix — the leak is then still counted and reported.
      */
-    private val strict: Boolean = true,
+    val strict: Boolean = true,
     /**
      * Whether each hit also records whether the owning thread was runnable.
      *
@@ -1123,14 +1151,12 @@ class Sampler(
 ) : Thread("sampler") {
 
     /**
-     * Why the session stopped early, or null if it did not. Checked once a second, so a mistake
-     * that could never have produced a valid answer is caught in seconds rather than at the end.
+     * Why the session stopped early, or null if it did not. Set the moment the leak is noticed, on
+     * the thread that noticed it, so a run that cannot be right ends there rather than at the end.
      */
     @Volatile
     var failure: String? = null
         private set
-
-    private var nextFloorCheck = Long.MIN_VALUE
 
     /**
      * The duty cycle rides on this thread's tick loop, but at its own far lower rate — it costs one
@@ -1353,7 +1379,6 @@ class Sampler(
             ticks++
             // Self-throttling: these return immediately on all but one tick in a thousand.
             duty.tick(now, slots)
-            floorCheck(now)
 
             if (prev == 0L) {
                 first = now
@@ -1379,26 +1404,19 @@ class Sampler(
     }
 
     /**
-     * Is any label on something too small to be described? Evaluated once a second.
+     * Stops the session and records why. Called from whatever noticed, on whatever thread.
      *
-     * Nothing has to be assumed about how much evidence has accumulated: the bound is a *upper*
-     * one, so early in the run, with few samples, it is simply too loose to accuse anybody. It
-     * tightens as the run goes on and fires the moment the answer is certain, which for an
-     * operation called millions of times is within the first second or two.
+     * The one condition that reaches here is a leaked label — see [Profiler.expectBalanced]. A
+     * below-floor label used to as well, and stopped two correct runs in two consecutive trials
+     * before it was demoted to the warning it always should have been; the reasoning is in
+     * plan.md § 1a and the list it now produces is [Report.tooSmall].
+     *
+     * Stops sampling rather than the application: this is somebody else's process.
      */
-    private fun floorCheck(now: Long) {
-        if (!strict || failure != null || now < nextFloorCheck) return
-        nextFloorCheck = now + FLOOR_CHECK_NANOS
-        if (ticks < 2) return
-        val step = span.toDouble() / (ticks - 1)
-        for (id in 0 until Profiler.registeredCount()) {
-            val calls = sessionCalls(id)
-            if (!isTooSmall(counters[id], calls, step)) continue
-            failure = tooSmallMessage(Profiler.nameOf(id), calls, impliedUpperNanos(counters[id], calls, step))
-            // Stop sampling rather than the application: this is somebody else's process.
-            running = false
-            return
-        }
+    fun fail(reason: String) {
+        if (failure != null) return
+        failure = reason
+        running = false
     }
 
     /** How much of the occupancy this session sampled was CPU. See [DutyCycle]. */
@@ -1440,8 +1458,4 @@ class Sampler(
     /** Total samples taken: one per slot per tick. */
     fun totalSamples(): Long = counters.sum()
 
-    private companion object {
-        /** Once a second. The check walks the slot registry per operation, so not per tick. */
-        const val FLOOR_CHECK_NANOS = 1_000_000_000L
-    }
 }

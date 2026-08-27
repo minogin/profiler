@@ -146,6 +146,31 @@ At 1–4 they all fit on performance cores; at 16 every core is occupied so noth
 the scheduler has genuine freedom to shuffle. Less load meant *more* noise, which is the opposite
 of what contention would predict.
 
+**The same label is below the floor or above it depending on how many threads are running.** Two
+20-second runs of the same binary on the same laptop, differing only in `--threads`:
+
+| operation | configured | implied at 1 thread | implied at 8 threads | flagged below the 50 ns floor |
+|---|---|---|---|---|
+| `tinyStep` | 20 ns | **17.8 ns** (0.89×) | **55.4 ns** (2.77×) | at 1 thread only |
+| `nodeLookup` | 20 ns | 16.9 ns (0.85×) | 53.6 ns (2.68×) | at 1 thread only |
+| `hashProbe` | 25 ns | 26.2 ns (1.05×) | 69.1 ns (2.77×) | at 1 thread only |
+| `visitNeighbor` | 30 ns | 33.5 ns (1.12×) | 87.6 ns (2.92×) | at 1 thread only |
+| `expandNode` | 35 ns | 38.5 ns (1.10×) | 111.7 ns (3.19×) | **never** |
+
+At one thread the check names four operations and the run finishes. At eight it names none — not
+because the labels moved, but because eight busy threads make every operation on this machine 2.7×
+slower than its single-threaded fit, which lifts a 20 ns operation clean over a 50 ns floor.
+
+This is what demoted the check from fatal to a warning (plan.md § 1a). The rung was justified on the
+premise that a below-floor label is *deterministic* — "20 ns on a loaded machine, a quiet one, a
+different machine, and every rerun". It is not deterministic across two runs of the same binary on
+one laptop half an hour apart.
+
+`expandNode` clears it in both, by 0.4 ns: its upper bound is 42.0 ns and the check inflates by
+[FLOOR_BIAS_ALLOWANCE] 1.2 before accusing, giving 50.4 against a 50 ns floor. Five operations are
+configured under the floor and four are named — the borderline one is let go, which is the
+conservative direction for a check whose false positive stops a run.
+
 **An A/B harness that tears itself down between arms is the dominant source of variance, not the
 machine.** Four attempts at the same three-way comparison on the Netty trial, each fixing one thing:
 

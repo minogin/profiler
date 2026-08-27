@@ -100,7 +100,7 @@ s = op(parse) { parseRecord(input) }             // wrap the work; nesting is fi
 println(Profiler.stop().render())
 ```
 
-`./gradlew run --args="--demo"` runs exactly that against a toy workload and prints the report, so
+`./gradlew :run --args="--demo"` runs exactly that against a toy workload and prints the report, so
 there is a working example to copy. Up to 256 operations, registered by name at runtime. Call
 `Profiler.release()` when a thread exits, or dead threads keep reading as idle ones.
 
@@ -116,7 +116,9 @@ Profiler.expectBalanced()                        // at a point the thread should
 
 A leaked label bills every later sample on that thread to the leaked operation — silently, and the
 number still looks plausible. `expectBalanced()` is how that surfaces where it happened rather than
-as a finding at the end; the report counts what it found either way.
+as a finding at the end; the report counts what it found either way. Under `strict` — the default —
+the first one stops the session and names the operation, because a leak does not make a number
+imprecise, it makes it somebody else's. Pass `strict = false` for labels on code you cannot fix.
 
 **For an operation under ~50 ns**, do not label it individually — the hook is a visible fraction of
 it, the sampler reads it low, and the compiler can move work across the boundaries of adjacent short
@@ -137,11 +139,15 @@ the labels being reordered against *each other*; they do not fence anything else
 Needs a JDK; Gradle provisions the toolchain itself.
 
 ```bash
-./gradlew run                                  # 60 s, half your cores, sampler on
-./gradlew run --args="--verify"                # sampler against the truth, four sample sizes
-./gradlew run --args="--sweep=1,2,4,8,16"      # the bench across thread counts
-./gradlew run --args="--hook"                  # what the instrumentation costs
+./gradlew :run                                 # 60 s, half your cores, sampler on
+./gradlew :run --args="--verify"               # sampler against the truth, four sample sizes
+./gradlew :run --args="--sweep=1,2,4,8,16"     # the bench across thread counts
+./gradlew :run --args="--hook"                 # what the instrumentation costs
+./gradlew :run --args="--leakcheck"            # the one condition that stops a session
 ```
+
+`:run` with the colon. Plain `run` matches the task in every module, so it starts the Calcite and
+Lucene trials as well, with their defaults and none of your arguments.
 
 `--demo` uses only the public API and touches none of the bench machinery.
 

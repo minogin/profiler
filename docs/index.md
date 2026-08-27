@@ -65,9 +65,12 @@ because the profiler has none.
 
 ```bash
 # the bench — the workload whose true answer is known
-./gradlew run --args="--seconds=20"
-./gradlew run --args="--seconds=20 --lock=2000,10"    # with injected blocking
-./gradlew run --args="--seconds=15 --threads=32 --oversubscribe"
+# `:run`, with the colon. Plain `run` matches the task in every module, so it runs the Calcite and
+# Lucene trials too — with their own defaults, and with no argument you passed.
+./gradlew :run --args="--seconds=20"
+./gradlew :run --args="--seconds=20 --lock=2000,10"    # with injected blocking
+./gradlew :run --args="--seconds=15 --threads=32 --oversubscribe"
+./gradlew :run --args="--leakcheck"                    # the one fatal condition, staged on purpose
 
 # Netty — qualification, the labelled run, and the A/B
 ./gradlew :trial-netty:classpathFile

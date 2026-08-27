@@ -344,7 +344,7 @@ operations — call count, nesting depth — rather than with size alone. That i
 Lucene's top two clauses when a *timer* did it, and it would be intolerable here for the same reason.
 The open question in findings.md is worth keeping for that reason and not for this one.
 
-## 12. Make the floor check survive a machine whose clock moves · partly decided
+## 12. Make the floor check survive a machine whose clock moves · half promoted, half open
 
 The floor check fires within a second on the argument that a below-floor label is a property of the
 code, "identical on every machine and every rerun". Measured on Lucene, that is false here: this
@@ -360,6 +360,9 @@ it is one row of a list, and the cost of getting it wrong is that we *stop a cor
 the loudest failure this tool can produce and the one we have actually observed. So the first move
 is not a better estimator at all: **make it a warning rather than fatal, and keep the advice**, which
 costs nothing and cannot stop anybody's correct placement.
+
+**That half is done** — plan.md § 1a. The estimator options below are what is left, and they are now
+optional: nothing downstream depends on the bound being tight, because nothing stops on it any more.
 
 That leaves the estimator work optional rather than blocking, and it should be judged on whether it
 buys anything a warning does not. Options 2 and 4 below remain interesting for their own reasons —
@@ -397,10 +400,10 @@ Candidate fixes, cheapest first:
    higher — which would put most of the Lucene term clauses in marginal territory. Most principled,
    most work, and the conclusion may be unwelcome.
 
-Related: the ladder's premise is that a below-floor label is *fatal* because it is deterministic,
-while a long operation is only a *warning* because it depends on the day's workload. If the floor
-verdict depends on the machine's power state, that distinction is weaker than it was written to be
-and may deserve revisiting rather than patching.
+Related, and **settled**: the ladder's premise was that a below-floor label is *fatal* because it is
+deterministic, while a long operation is only a *warning* because it depends on the day's workload.
+The floor verdict turned out to depend on the machine's power state, so the distinction did not hold
+and the rung was revisited rather than patched. Fatal now means one thing — a leaked label.
 
 ## 13. Report the boundary a label does not cover · partly promoted
 
@@ -560,6 +563,23 @@ So the line should say what it is actually guarding against — *this total may 
 wait many times* — rather than implying a CPU measurement was the objective and was missed. Also
 open: the same line's denominators are wrong, which is item 10, and the two are worth fixing in one
 pass since they are the same two sentences of output.
+
+## 18. The imbalance count is per process, and everything beside it is per session · open
+
+*Noticed while writing the leak check for 1a, which had to expect the wrong number to pass.*
+
+`Profiler.imbalances` is an `AtomicInteger` that is never reset, so a second session in the same
+process reports the first session's leaks as well as its own. Every other number in a `Report` is
+per session — deliberately, and at some cost: `callsAtStart` exists precisely because call counts
+that spanned the warm-up were inflating implied durations by a tenth, and that mismatch was found
+only because it made an upper bound come out *below* the truth, which is arithmetically impossible.
+
+This one has no such tell. It fails quietly, in the direction of over-reporting, and only in a
+process that profiles twice — which our harnesses do and a library's users certainly will.
+
+The fix is the shape `callsAtStart` already uses: snapshot at `start()`, subtract at `stop()`.
+`openAtEnd` is fine as it is, being a count of live slots rather than an accumulator. Not done with
+1a because 1a was about which rung of the ladder a finding sits on, not about what a session is.
 
 ---
 

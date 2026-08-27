@@ -44,7 +44,28 @@ by measurement rather than by argument. Together they are the accumulated intere
 
 ### Step 1 — the three small things
 
-**1a. The floor check stops being fatal.** [ideas.md](ideas.md) item 12.
+**1a. The floor check stops being fatal.** **done.** [ideas.md](ideas.md) item 12.
+
+*What was built.* Smaller than it looked: `Report.tooSmall()` already listed every below-floor label
+at the end of every report, so the once-a-second `floorCheck` existed **only** to stop the run. It
+is gone, with `nextFloorCheck` and `FLOOR_CHECK_NANOS`; the list stays and now names every offender
+instead of the first one found.
+
+That left `strict` gating nothing and `failure` with no producer, so `strict` was repointed at the
+condition the ladder above always said was fatal and the code never implemented: a leaked label.
+`Profiler.expectBalanced()` now calls `Sampler.fail()` under strict, naming the operation that was
+open and the thread it was open on. The bench's own `--strict` no longer tests anything — the bench
+never leaks — so `--leakcheck` stages a leak on purpose and asserts **both** directions: that it
+stops under strict, and that it stops *only* under strict. A check that asserted the first alone
+would still pass if the flag were wired to nothing.
+
+*Verified.* `--leakcheck` passes both rounds. The bench at one thread names four operations and
+finishes; at eight threads it names none, because eight busy threads make every operation on this
+laptop 2.7× slower than its single-threaded fit and a 20 ns label reads 55 ns. Same binary, same
+machine, half an hour apart — which is a sharper disproof of the "deterministic" premise than the
+run-length one that started this, and it is recorded in
+[findings.md](findings.md#the-machine). The bench had no surface for the warning at all
+(it builds a `Report` and then prints its own tables, never `render()`), so it prints the list now.
 
 A label below the 50 ns floor halts the session under `strict`. It has now stopped a *correct* run in
 **two consecutive trials**: Lucene, citing 27.5 ns for a label whose settled figure is 49.7 ns, purely
@@ -494,12 +515,22 @@ to the code, or only to the run?**
 | **warning** | the measurement is honest but the label is in the wrong tier, or the run's conditions limit what the numbers mean | printed with the report, which stays valid |
 | **note** | what the reader needs in order to read the numbers — the bound, the noise floor, what was excluded | printed |
 
-**Too small is fatal. Too long is a warning.** They look symmetric and are not:
+**One rung is fatal, and it is not the one this ladder was written for.** A *leaked* label stops the
+session. Too small and too long are both warnings:
 
-- *Too small* is deterministic. A 20 ns operation is 20 ns on a loaded machine, a quiet one, a
-  different machine, and every rerun. There is no run in which the label is fine, so stopping costs
-  the user one run and saves them a wrong conclusion. It is also detectable within seconds — see the
-  bound below, which needs no hits at all.
+- *A leak invents attribution.* A label left open at a point the caller declared quiescent bills
+  every subsequent sample on that thread to the wrong operation, and the result does not look like
+  an error — it looks like a finding, with a plausible number beside it. Nothing downstream detects
+  it and no rerun makes it valid. Checked in both directions by `--leakcheck`, which stages one on
+  purpose: a check that never fires is not a check.
+- *Too small* was fatal, on the argument that a 20 ns operation is 20 ns on a loaded machine, a
+  quiet one, a different machine and every rerun. Lucene falsified the premise — this laptop's
+  throughput alone moves the estimate 2.2× — and the
+  [accuracy principle](profiler.md#how-accurate-this-has-to-be-and-where-that-budget-goes) finished
+  it: a below-floor label is one row of a list and cannot move a ranking, so the cost of being wrong
+  about one is the loudest failure this tool has. It stopped a *correct* run in two consecutive
+  trials. Now a warning, with the advice unchanged and every offender named rather than only the
+  first.
 - *Too long* depends on the run. Contention is a property of the workload that day; a `StampedLock`
   optimistic read is a 15 ns fine operation in a read-mostly phase and a parked thread in a
   write-heavy one, from identical source. Worse, Calcite proved that an operation can outlive a tick
@@ -512,9 +543,8 @@ means the profiling session stops and says why; the application carries on. Our 
 exit(1) on it, because the bench *is* the application.
 
 **And it is switchable, because of Calcite.** `strict = false` downgrades fatal to warning, for the
-case where the labels are on code you do not own and cannot resize. The two harnesses in this
-repository both switch it off deliberately — they exist to stress the instrument below its floor,
-which is exactly what a real user should be stopped from doing by accident.
+case where the labels are on code you do not own and cannot fix. The leak is then still counted and
+still printed — switching strict off buys a report, not silence.
 
 ### Catching an operation that is below the floor
 

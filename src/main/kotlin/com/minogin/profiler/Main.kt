@@ -114,10 +114,9 @@ fun main(args: Array<String>) {
     val jitter = if (opt["jitter"] == "off") 0.0 else 0.25
     val verify = opt["verify"] != null
 
-    // Off by default here, and that is not a double standard. Four of this bench's twenty
-    // operations sit below the 50 ns floor *on purpose* — a bench exists to work the instrument at
-    // the point where it fails, so under strict rules it would stop within a second of every run
-    // and measure nothing. `--strict` turns it on, which is how the stopping itself gets tested.
+    // Now that a below-floor label only warns, strict governs one thing: whether a leaked label
+    // stops the session. This bench never leaks one, so the flag changes nothing here and the
+    // stopping is tested where it can be provoked on purpose — see [checkLeakStopsTheSession].
     val strict = opt["strict"] != null
 
     // Whether each hit also records the owning thread's state. A switch for the same reason
@@ -168,6 +167,14 @@ fun main(args: Array<String>) {
     // and needs no calibration beyond the busy loop.
     if (opt["stackcost"] != null) {
         runStackCost(victims = activeThreads)
+        return
+    }
+
+    // The one thing `strict` still stops, provoked on purpose. Its own mode because it registers an
+    // operation of its own, which would otherwise show up as a twenty-first line of the bench's
+    // report carrying no samples.
+    if (opt["leakcheck"] != null) {
+        if (!checkLeakStopsTheSession()) exitProcess(1)
         return
     }
 
@@ -520,6 +527,58 @@ private fun runSweep(
     val allOk = outcomes.all { it.ok } && warmedUp
     println(if (allOk) "\nEvery thread count holds. The bench is sound." else "\nAt least one thread count fails. The bench is not sound.")
     return allOk
+}
+
+/**
+ * The one fatal condition, staged on purpose — because a check that never fires is not a check.
+ *
+ * A below-floor label used to be what `strict` stopped, and the bench tested that simply by
+ * running: four of its twenty operations sit under the floor by design. Now that this is the only
+ * fatal condition left, and nothing here leaks a label by accident, it has to be staged.
+ *
+ * Both directions, since "a leak stops the session" is only half the claim. The other half is that
+ * it stops *only* under strict, and a check that asserted the first alone would still pass if the
+ * flag had been wired to nothing at all.
+ */
+private fun checkLeakStopsTheSession(): Boolean {
+    val id = Profiler.register("leakedOnPurpose")
+    println("--- Leak check: does a label left open stop the session? ---")
+    var ok = true
+
+    for ((round, strict) in listOf(true, false).withIndex()) {
+        Profiler.start(stepMillis = 1.0, strict = strict)
+        // On a thread of its own. The leak lives in one slot, and this thread's slot has to be
+        // clean going into the second half or it would inherit the first half's mess.
+        val leaker = Thread {
+            Profiler.enter(id)
+            if (Profiler.expectBalanced()) {
+                println("  FAIL: a leaked label reported itself balanced")
+                ok = false
+            }
+        }
+        leaker.start()
+        leaker.join()
+        val report = Profiler.stop()
+
+        val stopped = report.failure != null
+        val named = report.failure?.contains("leakedOnPurpose") == true
+        // Cumulative, not per session: the imbalance counter runs for the life of the process,
+        // unlike the call counts, which the sampler rebases at every start. Expected here rather
+        // than corrected, because correcting it is not this change — see ideas.md.
+        val counted = report.imbalances == round + 1
+        val good = stopped == strict && (!strict || named) && counted
+        if (!good) ok = false
+        println(
+            String.format(
+                Locale.ROOT, "  strict=%-5s  stopped: %-5s (expected %-5s)  named the operation: %-5s  " +
+                        "imbalances: %d  %s",
+                strict, stopped, strict, named, report.imbalances, if (good) "ok" else "FAIL"
+            )
+        )
+        report.failure?.let { println("    $it") }
+    }
+    println(if (ok) "  the ladder is real: one rung, and it fires" else "  THE LADDER IS BROKEN")
+    return ok
 }
 
 /**
@@ -1157,13 +1216,10 @@ private fun printSampler(
     val achieved = if (sampler.ticks > 1) sampler.span.toDouble() / (sampler.ticks - 1) else Double.NaN
 
     println("\n--- Sampler ---")
-    // Without this the run merely looks as though the sampler died. Four of this bench's twenty
-    // operations are below the floor by design, so under --strict this is the expected outcome and
-    // the covered-percentage line below shows how quickly it was caught.
+    // Without this the run merely looks as though the sampler died.
     sampler.failure?.let {
-        println("  PROFILING STOPPED — this label could not have produced a correct number:")
+        println("  PROFILING STOPPED — these numbers were not going to be right:")
         println("  $it")
-        println("  (expected under --strict: this bench deliberately labels operations below the floor)")
     }
     println(String.format(Locale.ROOT, "  requested step: %.3f ms", stepMillis))
     println(
@@ -1256,6 +1312,15 @@ private fun printSampler(
             )
         )
     }
+
+    // The warning a library user gets from render(), which the bench does not call — it prints its
+    // own tables. Printed here because this is the one workload where the answer is known in
+    // advance: five of the twenty operations are configured under the 50 ns floor, so a run that
+    // flags none of them is a statement about the machine's clock and not about the check.
+    val small = report.tooSmall()
+    println("\n  below the floor: ${if (small.isEmpty()) "none flagged" else small.joinToString { it.name }}")
+    for (op in small) println("  ! " + tooSmallMessage(op.name, op.calls, report.impliedUpperNanosOf(op)))
+    if (small.isNotEmpty()) println("  the run finished anyway — this is a warning, not a verdict")
 }
 
 /**
