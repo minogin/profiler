@@ -19,7 +19,7 @@ kotlin {
 }
 
 application {
-    mainClass.set("com.minogin.profiler.MainKt")
+    mainClass.set("com.minogin.profiler.bench.MainKt")
 }
 
 tasks.test {

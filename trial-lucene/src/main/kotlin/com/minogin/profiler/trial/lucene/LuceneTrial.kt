@@ -454,7 +454,6 @@ private fun load(
     seconds: Int,
     mode: Placement,
     sampler: Boolean,
-    strict: Boolean,
     step: Double,
     jfr: String?,
     warmups: Int,
@@ -462,13 +461,13 @@ private fun load(
     gapTrigger: Int,
 ) {
     Bed(corpus, threads, mode).use { bed ->
-        println("threads=$threads placement=$mode sampler=$sampler strict=$strict; warm-up $warmups searches, then searching for $seconds s")
+        println("threads=$threads placement=$mode sampler=$sampler; warm-up $warmups searches, then searching for $seconds s")
         val warm = repeatSearch(bed, warmups)
         println(String.format(Locale.ROOT, "warm-up: first %.1f ms, last %.2f ms", millis(warm[0]), millis(warm.last())))
         bed.trialQuery.clauses.reset()
 
         val recording = if (jfr != null) recordExecutionSamples(1) else null
-        if (sampler) Profiler.start(stepMillis = step, strict = strict)
+        if (sampler) Profiler.start(stepMillis = step)
 
         val prober = if (stacks > 0) Prober(bed, stacks).also { it.start() } else null
         val gaps = if (gapTrigger > 0) GapProbe(bed, gapTrigger).also { it.start() } else null
@@ -644,7 +643,6 @@ fun main(args: Array<String>) {
                 seconds = opt["seconds"]?.toInt() ?: 20,
                 mode = Placement.valueOf((opt["placement"] ?: "LABEL").uppercase(Locale.ROOT)),
                 sampler = opt["sampler"] != "false",
-                strict = opt["strict"] == "true",
                 step = opt["step"]?.toDouble() ?: 1.0,
                 jfr = opt["jfr"],
                 warmups = opt["warmups"]?.toInt() ?: 30,

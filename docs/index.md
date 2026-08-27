@@ -49,10 +49,17 @@ tidying — each is a number the report gets wrong today, and each is now backed
 
 | | |
 |---|---|
-| `src/main/kotlin/com/minogin/profiler/Sampler.kt` | the fine tier: slots, the hook, the sampling thread, the report |
-| `src/main/kotlin/com/minogin/profiler/Duty.kt` | how much of the sampled occupancy was CPU, and the bound that puts on every share |
-| `src/main/kotlin/com/minogin/profiler/Workload.kt`, `Burn.kt`, `Bench.kt` | the bench — a workload whose true answer is known |
-| `src/main/kotlin/com/minogin/profiler/Main.kt` | the harness that runs it all and checks every claim |
+| **`com/minogin/profiler/`** | **the library — everything a user imports, and nothing else** |
+| `Profiler.kt` | the slot, the registry, `op { }` / `enter` / `exit`, and the constants that bound them |
+| `Sampler.kt` | the sampling thread: the tick loop, the slot walk, the wait strategy |
+| `Report.kt` | what a session collected and how it is rendered, including every verdict and threshold |
+| `Duty.kt` | how much of the occupancy was CPU, and the bound that puts on every share |
+| **`com/minogin/profiler/bench/`** | **the harness — never shipped, and now unable to leak into the above** |
+| `Workload.kt`, `Burn.kt`, `Bench.kt` | a workload whose true answer is known |
+| `Main.kt` | the modes, the run, and the bench's own tolerance table |
+| `Verify.kt` | the sampler against the truth, and the observer effect |
+| `Print.kt` | every report the bench prints about itself |
+| `StackCost.kt` | what a cross-thread stack walk costs |
 | `trial-calcite/` | the Calcite trial, in its own module so its dependencies cannot leak into the profiler |
 | `trial-lucene/` | the Lucene trial — the corpus, the wrappers that place the labels, and four instrumentation configurations to compare |
 | `trial-netty/` | the Netty trial — the HTTP pipeline, the load generator, and the three-way A/B |

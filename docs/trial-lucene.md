@@ -437,3 +437,26 @@ java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement LABEL
 java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt \
   --ab true --modes NONE,INERT,LABEL,TIME --rounds 24 --per 20
 ```
+
+### Every flag
+
+| flag | default | what it does |
+|---|---|---|
+| `--placement=MODE` | `LABEL` | which instrumentation to run — the four configurations compared in §2 |
+| `--seconds=N` | 20 | length of the measured run |
+| `--threads=N` | 8 | search threads |
+| `--warmups=N` | 30 | searches before measurement starts |
+| `--step=MS` | 1.0 | sampling interval |
+| `--sampler=false` | on | run without the sampler |
+| `--index=PATH` | `trial-lucene/index` | where the index lives. Relative, so **run from the repository root** — from inside the module it resolves to `trial-lucene/trial-lucene/index` and builds a second copy |
+| `--build --docs=N --segments=N` | 1,000,000, 8 | build the corpus and exit |
+| `--qualify` | — | does this workload qualify as a target at all |
+| `--ab --modes=A,B --rounds=N --per=N` | 6, 20 | interleaved A/B across placements |
+| `--stacks=N` | 0 | take N on-demand stack samples |
+| `--gaps=N` | 0 | trigger a stack when a gap exceeds N ms |
+| `--jfr=PATH` | none | also record JFR execution samples |
+| `--analyze=PATH --top=N --collapsed=PATH` | 15 | read a JFR recording back and rank it |
+
+`--strict` used to be here, defaulting to off because the floor check would stop the run. The floor
+check is a warning now, and every label in this trial is a lexical `op(id) { }` that cannot leak, so
+the trial runs strict and the flag is gone.

@@ -149,12 +149,49 @@ Needs a JDK; Gradle provisions the toolchain itself.
 `:run` with the colon. Plain `run` matches the task in every module, so it starts the Calcite and
 Lucene trials as well, with their defaults and none of your arguments.
 
-`--demo` uses only the public API and touches none of the bench machinery.
-
-Useful flags: `--threads`, `--seconds`, `--step` (sampling interval, ms), `--active` (starve some
-threads), `--labels=off`, `--sampler=off`, `--jitter=off`.
-
 Everything prints to the console. There is no UI, no output file and no configuration.
+
+### Every flag
+
+Six of them pick a **mode** — the bench does that one thing and exits. Without one it runs the
+workload and checks itself against the truth.
+
+| mode | what it does |
+|---|---|
+| `--demo` | the public API and nothing else: register, wrap, start, stop, print. No bench machinery, so it is also the only test that the API stands up on its own. Deliberately leaks a label every thousandth pass to show what the balance check is for |
+| `--verify` | the sampler against the known truth at four sample sizes, plus the observer effect |
+| `--sweep=1,2,4,8,16` | the bench across thread counts, one calibration shared by every entry so that the thing varied is not confounded with the thing held fixed. Forces `--sampler=off` |
+| `--hook` | what the instrumentation costs per call, labels on against labels off |
+| `--stackcost` | what a cross-thread stack walk costs — the measurement that decides whether the tool may ever take one |
+| `--leakcheck` | stages a leaked label on purpose and asserts it stops the session, and *only* under strict |
+
+The rest shape the run:
+
+| flag | default | what it is for |
+|---|---|---|
+| `--seconds=N` | 60 | length of the measured run |
+| `--threads=N` | half your cores | worker threads. Filling every core starves the sampler, the JIT threads and everything else, and the workers then get preempted by all three |
+| `--active=N` | `--threads` | how many of them actually work. The rest park — **starvation mode**, which is how the duty cycle's per-thread bound is tested against idle threads |
+| `--step=MS` | 1.0 | sampling interval |
+| `--lock=HOLD,EVERY` | off | hold a real `ReentrantLock` for HOLD µs every EVERY ms. The one thing here that genuinely blocks, and the only way a measurement of stalling can be checked against a known amount of waiting |
+| `--labels=off` | on | the hook, off |
+| `--sampler=off` | on | the sampling thread, off |
+| `--state=off` | on | the per-sample thread-state read, off |
+| `--oversubscribe` | off | allow more threads than cores. A mode, not an escape hatch: the sampler then reads slots rather than cores, so occupancy over-reads CPU by exactly the oversubscription factor — the one configuration whose duty cycle is predictable from the configuration alone |
+
+**`--labels`, `--sampler` and `--state` are three switches rather than one, on purpose.** The hook's
+cost, the sampling thread's cost and the state read's cost are different questions, and a thing that
+is always on can only be priced by argument. `--state=off` has a second job since the duty cycle
+went per-thread: it is the only way to exercise the fallback the bound uses when it cannot see where
+the waiting was.
+
+**Three flags that used to exist and no longer do.** `--strict` gated the floor check, which is now
+a warning; what strict still governs is a leaked label, and the bench never leaks one, so the flag
+changed nothing — `--leakcheck` tests the mechanism properly instead. `--wait` chose the sampler's
+wait strategy; spinning is the only one that holds a 1 ms step (park drifts to 1.62 ms, and to
+13.5 ms with every core loaded), the measurement is recorded in `docs/findings.md`, and the enum
+remains in the library with `SPIN` as its default. `--jitter=off` disabled the sampler's interval
+jitter, and in the whole project it never produced a measurement.
 
 ## What is here
 

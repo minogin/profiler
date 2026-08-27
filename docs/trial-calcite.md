@@ -376,3 +376,24 @@ java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt \
 
 Machine: Intel Core Ultra 7 255H, 16 cores, JDK 26, Windows 11. The same caveats as the bench
 apply — the clock swings by 2× inside a run and heat soak accumulates across runs.
+
+### Every flag
+
+`--associate` and `--labels`/`--sampler` are opt-*in* here (`--associate true`), unlike the bench,
+because the interesting runs are the instrumented ones and the default is the control.
+
+| flag | default | what it does |
+|---|---|---|
+| `--tables=N` | 10, or 4 in an A/B | tables in the generated join query — the knob that sets planning cost |
+| `--associate=true` | off | let the planner reassociate joins, which is what makes the search space large |
+| `--seconds=N` | 20 | length of the measured run |
+| `--warmups=N` | 3 | plans before measurement starts |
+| `--labels=true` | off | place the `RelOptListener` labels |
+| `--sampler=true` | off | run the sampler and print the report |
+| `--step=MS` | 1.0 | sampling interval |
+| `--mergejoin=false` | on | remove `EnumerableMergeJoinRule` — the 275× finding |
+| `--jfr=PATH` | none | also record JFR execution samples |
+| `--scale --from=N --to=N --cap=MS` | 3, 14, 20000 | the growth curve: plan at each table count until one exceeds the cap |
+| `--ab=labels\|tool\|listener\|merge --rounds=N` | 5 rounds | interleaved A/B. `listener` prices attaching a bare `RelOptListener`, which allocates two events per rule firing whether it does anything or not |
+| `--plan` | — | print the plan the search produces |
+| `--analyze=PATH --top=N --collapsed=PATH` | 25 | read a JFR recording back and rank it, optionally writing collapsed stacks |

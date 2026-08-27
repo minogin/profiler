@@ -1,5 +1,6 @@
-package com.minogin.profiler
+package com.minogin.profiler.bench
 
+import com.minogin.profiler.*
 import java.util.Random
 
 const val OP_COUNT = 20

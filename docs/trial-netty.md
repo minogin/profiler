@@ -402,3 +402,18 @@ been nothing to check against**, and that is a real gap in the method rather tha
 3. **Coverage is 14.5%**, and most of the rest is Netty's own HTTP codec. Whether labels belong on
    somebody else's codec is a real question about what this tool is for, and it is the same question
    the Calcite fork ([ideas.md](ideas.md) item 3) asks from the other end.
+
+## 9. Every flag
+
+| flag | default | what it does |
+|---|---|---|
+| `--qualify` | — | does this workload qualify as a target at all |
+| `--labels` | — | the labelled run and the report a user would get |
+| `--ab --rounds=N` | 4 | the three-way interleaved A/B. Rebuilds nothing between arms, which took [four attempts](findings.md#the-machine) to get right |
+| `--seconds=N` | 20 | length of each measured window |
+| `--threads=N` | 4 | event-loop threads |
+| `--connections=N` | 16 | client connections |
+| `--inflight=N` | 8 | requests in flight per connection |
+
+`--strict` was never a flag here; the trial passed `strict = false` in code because of the floor
+check. That is gone — the labels are lexical `op(id) { }` and cannot leak, so it runs strict.
