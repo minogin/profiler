@@ -45,3 +45,6 @@ bin/
 .DS_Store
 ### Trial indexes — generated, large, and not worth a clean rebuild
 /trial-lucene/index/
+# …and the copy you get when the trial is run from inside the module rather than the repo root,
+# where the default path `trial-lucene/index` resolves one level too deep.
+/trial-lucene/trial-lucene/
