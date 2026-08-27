@@ -60,6 +60,11 @@ tidying — each is a number the report gets wrong today, and each is now backed
 | `Verify.kt` | the sampler against the truth, and the observer effect |
 | `Print.kt` | every report the bench prints about itself |
 | `StackCost.kt` | what a cross-thread stack walk costs |
+| **`src/test/kotlin/`** | **the arithmetic, checked without starting anything — `./gradlew test`, ~3 s** |
+| `DutyBoundTest.kt` | the bound on every share: four properties, and the five regimes the trials measured |
+| `FloorCheckTest.kt` | who gets named as below the floor, including both sides of the 0.35 ns boundary |
+| `RegistryTest.kt` | slots, nesting, the balance check, and the one fatal condition in both directions |
+| `ReportTest.kt` | shares, coverage, the long-execution floor, and what the report promises to print |
 | `trial-calcite/` | the Calcite trial, in its own module so its dependencies cannot leak into the profiler |
 | `trial-lucene/` | the Lucene trial — the corpus, the wrappers that place the labels, and four instrumentation configurations to compare |
 | `trial-netty/` | the Netty trial — the HTTP pipeline, the load generator, and the three-way A/B |

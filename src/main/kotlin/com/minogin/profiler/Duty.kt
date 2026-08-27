@@ -240,46 +240,6 @@ class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
      * Still an upper bound, and on Lucene a tight one: 29.9 of the 31.3 points of off-CPU there
      * were observably not runnable, leaving 1.4 to assume the worst about.
      */
-    private fun labelledDuty(
-        slotHits: LongArray,
-        slotLabelled: LongArray,
-        slotWaiting: LongArray,
-        slotLabelledWaiting: LongArray,
-        stateSampled: Boolean,
-    ): Triple<Double, Double, Double> {
-        var labelled = 0.0
-        var stall = 0.0
-        var invisible = 0.0
-        var total = 0.0
-        for (i in 0 until MAX_SLOTS) {
-            val hits = slotHits[i]
-            val wall = wallByIndex[i]
-            if (hits == 0L || wall <= 0L) continue
-            val l = slotLabelled[i].toDouble() / hits
-            // Clamped: the CPU counter moves in scheduler ticks, so a window can read a hair over
-            // wall or a hair under zero, and a fraction outside 0..1 is quantisation and not news.
-            val f = min(1.0, max(0.0, 1.0 - cpuByIndex[i].toDouble() / wall))
-            labelled += slotLabelled[i]
-            total += hits
-            stall += if (!stateSampled) min(f, l) * hits
-            else {
-                val w = slotWaiting[i].toDouble() / hits
-                val wl = slotLabelledWaiting[i].toDouble() / hits
-                // Off the CPU while reading RUNNABLE: the scheduler, or a native call the JVM
-                // cannot see into. Tracked because it is the term that can make the bound useless,
-                // and a reader who is told that is in a different position from one who is not.
-                invisible += max(0.0, f - w) * hits
-                // Capped by `f` as well, so that using the state read can never produce a *worse*
-                // bound than ignoring it. Not runnable implies not on the CPU, so `wl` is a subset
-                // of `f` by definition and the cap binds only when the two instruments disagree —
-                // the clock moves in 15.6 ms steps and the state read does not, so they will.
-                min(l, min(f, wl + max(0.0, f - w))) * hits
-            }
-        }
-        if (labelled <= 0.0 || total <= 0.0) return Triple(Double.NaN, Double.NaN, Double.NaN)
-        return Triple((labelled - stall) / labelled, invisible / total, labelled / total)
-    }
-
     fun report(
         slotHits: LongArray,
         slotLabelled: LongArray,
@@ -287,13 +247,16 @@ class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
         slotLabelledWaiting: LongArray,
         stateSampled: Boolean,
     ): DutyReport = run {
-        val (d, invisible, labelled) =
-            if (available) labelledDuty(slotHits, slotLabelled, slotWaiting, slotLabelledWaiting, stateSampled)
-            else Triple(Double.NaN, Double.NaN, Double.NaN)
+        val b =
+            if (available) labelledDuty(
+                slotHits, slotLabelled, slotWaiting, slotLabelledWaiting,
+                cpuByIndex, wallByIndex, stateSampled
+            )
+            else LabelledDuty(Double.NaN, Double.NaN, Double.NaN)
         DutyReport(
-        labelledDuty = d,
-        invisibleOffCpu = invisible,
-        labelledFraction = labelled,
+        labelledDuty = b.duty,
+        invisibleOffCpu = b.invisibleOffCpu,
+        labelledFraction = b.labelledFraction,
         reason = reason,
         resolutionNanos = resolution,
         windowNanos = windowNanos,
@@ -322,6 +285,96 @@ class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
          */
         const val DEFAULT_WINDOW_NANOS = 1_000_000_000L
     }
+}
+
+/** What [labelledDuty] came to. Three numbers because the second and third explain the first. */
+class LabelledDuty(
+    val duty: Double,
+    val invisibleOffCpu: Double,
+    val labelledFraction: Double,
+)
+
+/**
+ * How much of *labelled* occupancy was CPU — the number the report's shares are bounded by.
+ *
+ * A bound and not a measurement, and it has to be: a thread can be parked *inside* a label. The
+ * bench's `--lock` mode puts the label outside the acquisition on purpose and 52,422 of
+ * `lockedUpdate`'s 71,839 hits caught a thread that was not runnable, so "labelled therefore
+ * running" is false and the cheap version of this is not available.
+ *
+ * What is available is an interval, and how tight it is depends on whether thread state was
+ * sampled. For thread *i*, as fractions of that thread's own occupancy:
+ *
+ * - `f` — off the CPU altogether, from the clock. Everything below has to fit inside it.
+ * - `l` — inside some label.
+ * - `w` — caught not runnable, and `wl` the part of that which was also inside a label. Both
+ *   measured per sample rather than inferred.
+ *
+ * **Without state**, all that can be said is `min(f, l)`: no more stall inside labels than there is
+ * stall, and no more than there are labels. Sound, and on a thread pool useless — a pool thread
+ * parks between tasks and works inside a label, so both terms are large and the bound assumes the
+ * parking happened inside the label. Measured on Lucene: a true ~98% printed as 47.35%, and a
+ * 100 pp error on shares that were fine.
+ *
+ * **With state** the visible half is not an assumption at all. `wl` *is* the waiting that was
+ * inside a label. What is left over, `f − w`, is off-CPU the state read cannot see — a preempted
+ * thread and a thread in a native call both read `RUNNABLE` — and that part still has to be assumed
+ * worst case, all of it inside labels. So `min(l, wl + max(0, f − w))`.
+ *
+ * Still an upper bound, and on Lucene a tight one: 29.9 of the 31.3 points of off-CPU there were
+ * observably not runnable, leaving 1.4 to assume the worst about.
+ *
+ * A free function over six arrays rather than a method, because everything it does is arithmetic
+ * and arithmetic should be checkable without starting a sampler. The regimes it has to get right
+ * are the ones the trials found, and they are in `DutyBoundTest`.
+ *
+ * @param slotHits every sample taken at that slot, labelled or not. Its length bounds the walk, so
+ *   a caller with three threads passes arrays of three.
+ * @param slotLabelled those of them that were inside some operation.
+ * @param slotWaiting those that caught the thread not runnable, and [slotLabelledWaiting] the ones
+ *   that were also inside a label.
+ * @param cpuNanos, wallNanos per slot, from the duty walk.
+ */
+internal fun labelledDuty(
+    slotHits: LongArray,
+    slotLabelled: LongArray,
+    slotWaiting: LongArray,
+    slotLabelledWaiting: LongArray,
+    cpuNanos: LongArray,
+    wallNanos: LongArray,
+    stateSampled: Boolean,
+): LabelledDuty {
+    var labelled = 0.0
+    var stall = 0.0
+    var invisible = 0.0
+    var total = 0.0
+    for (i in slotHits.indices) {
+        val hits = slotHits[i]
+        val wall = wallNanos[i]
+        if (hits == 0L || wall <= 0L) continue
+        val l = slotLabelled[i].toDouble() / hits
+        // Clamped: the CPU counter moves in scheduler ticks, so a window can read a hair over
+        // wall or a hair under zero, and a fraction outside 0..1 is quantisation and not news.
+        val f = min(1.0, max(0.0, 1.0 - cpuNanos[i].toDouble() / wall))
+        labelled += slotLabelled[i]
+        total += hits
+        stall += if (!stateSampled) min(f, l) * hits
+        else {
+            val w = slotWaiting[i].toDouble() / hits
+            val wl = slotLabelledWaiting[i].toDouble() / hits
+            // Off the CPU while reading RUNNABLE: the scheduler, or a native call the JVM cannot
+            // see into. Tracked because it is the term that can make the bound useless, and a
+            // reader who is told that is in a different position from one who is not.
+            invisible += max(0.0, f - w) * hits
+            // Capped by `f` as well, so that using the state read can never produce a *worse*
+            // bound than ignoring it. Not runnable implies not on the CPU, so `wl` is a subset of
+            // `f` by definition and the cap binds only when the two instruments disagree — the
+            // clock moves in 15.6 ms steps and the state read does not, so they will.
+            min(l, min(f, wl + max(0.0, f - w))) * hits
+        }
+    }
+    if (labelled <= 0.0 || total <= 0.0) return LabelledDuty(Double.NaN, Double.NaN, Double.NaN)
+    return LabelledDuty((labelled - stall) / labelled, invisible / total, labelled / total)
 }
 
 /** What the duty measurement came to, and the bound it puts on every share in the report. */

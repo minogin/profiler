@@ -151,6 +151,27 @@ Lucene trials as well, with their defaults and none of your arguments.
 
 Everything prints to the console. There is no UI, no output file and no configuration.
 
+### Two kinds of check, and they are not interchangeable
+
+```bash
+./gradlew test      # 45 tests, ~3 s — the arithmetic
+./gradlew :run      # 60 s — the instrument
+```
+
+**`test` cannot tell you the tool is right**, and is not meant to. Whether a share is accurate,
+whether the sampler holds its step, what the hook costs — those are settled by agreement with an
+independent measurement, and the bench is what produces one. Faking them in a unit test would give
+tests that pass while the instrument is wrong, which is the worst outcome available here.
+
+**The bench cannot tell you the arithmetic is right either**, which is what took a while to notice.
+The bound on every share shipped in a form that was sound and vacuous on a thread pool, and nothing
+caught it until a Lucene trial was re-run by hand. The inputs needed to fail were six numbers.
+
+So `test` covers what is ordinary code sitting on top of the measurements — the bound, the floor
+check, the long-execution verdict, the registry, and the report's promises about itself. Its
+expectations are the numbers recorded in `docs/findings.md`, which makes a finding something that
+fails a build rather than something somebody has to re-run a trial to notice.
+
 ### Every flag
 
 Six of them pick a **mode** — the bench does that one thing and exits. Without one it runs the

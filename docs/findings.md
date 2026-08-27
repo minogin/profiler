@@ -146,6 +146,18 @@ At 1–4 they all fit on performance cores; at 16 every core is occupied so noth
 the scheduler has genuine freedom to shuffle. Less load meant *more* noise, which is the opposite
 of what contention would predict.
 
+**The numbers in this file are now test expectations.** `src/test/kotlin` encodes the duty bound's
+five regimes, both sides of the floor check's 0.35 ns boundary, and the long-execution floor,
+against the figures recorded here — so a change that moves one of them fails a build in three
+seconds instead of surviving until somebody re-runs a trial. Both directions are checked where the
+claim has two: the state read must never make the bound worse, and a leak must stop the session
+*only* under strict. Verified by mutation — reverting the bound to the version that shipped broken,
+and restricting coverage to one side only, each fail exactly one test.
+
+What is deliberately *not* in there: share accuracy, achieved step, hook cost, duty against the OS
+clock, the observer effect. Those are settled by agreement between independent measurements, and a
+unit test of one would pass while the instrument was wrong.
+
 **The bench stops calibrating at all once the machine is heat-soaked.** After about twenty
 consecutive 20–45 second runs in one session, the iteration-count fit stopped converging on six
 attempts in a row, failing on a different operation each time — `traverse` by 3.23%, `tinyStep` by
