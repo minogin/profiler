@@ -300,7 +300,7 @@ cheap and probably enough; or *adaptive promotion*, where a detected operation s
 contexts on subsequent entries, which needs a check at entry and therefore costs hot-path budget.
 Start with reporting; the diagnostic is most of the value.
 
-## 10. The duty cycle per thread, so the bound is not vacuous when threads idle · open
+## 10. The duty cycle per thread, so the bound is not vacuous when threads idle · promoted, done
 
 Phase 3.5 measures the duty cycle over every registered thread, and the shares it bounds are over
 labelled samples only. A thread parked outside any operation therefore lowers the bound without
@@ -535,7 +535,7 @@ state that phase 6 exists for are **halves of one feature**, and neither is much
 divisor above needs, and a histogram is what distinguishes *steadily three busy* from *sawtooth
 spiking to sixteen*, which [plan.md](plan.md) phase 6 already wants for the whole application.
 
-## 17. The report presents CPU as the truth and occupancy as the approximation · open
+## 17. The report presents CPU as the truth and occupancy as the approximation · promoted, done
 
 *A framing defect, not a measurement one. Nothing here is wrong; it reads as though the wrong
 quantity is the goal.*

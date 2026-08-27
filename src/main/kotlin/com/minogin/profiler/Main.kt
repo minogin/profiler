@@ -1279,10 +1279,7 @@ private fun printSampler(
         failure = sampler.failure,
         stateSampled = sampler.sampleState,
     )
-    printDuty(
-        sampler.duty(), bench, runNanos,
-        if (samples == 0L) Double.NaN else labelled.toDouble() / samples, report.stuckBaseline
-    )
+    printDuty(sampler.duty(), bench, runNanos, report.stuckBaseline)
 
     printDetector(report, achieved, bench.contended, lockOpIdOf(bench), bench.stalls())
     printWaitingCheck(sampler, bench)
@@ -1469,11 +1466,10 @@ private fun printDuty(
     d: DutyReport,
     bench: Bench,
     runNanos: Long,
-    labelledFraction: Double,
     stuckShare: Double,
 ) {
     println("\n--- CPU duty cycle: how much of the occupancy was CPU ---")
-    for (l in d.lines(labelledFraction)) println("  $l")
+    for (l in d.lines()) println("  $l")
     if (!d.available) return
 
     val s = bench.stalls()

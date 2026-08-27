@@ -96,6 +96,25 @@ class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
     private var prevWall = 0L
     private var nextAt = Long.MIN_VALUE
 
+    /**
+     * The same two sums as [cpuNanos] and [wallNanos], kept per thread rather than only added up.
+     *
+     * Adding up first is what made the bound vacuous. It is applied to shares that are over
+     * *labelled* samples, while it was computed over *every registered thread* — so a pool thread
+     * that sat outside every label all run pushed the bound up without appearing in a single share
+     * it supposedly bounded. Measured in starvation mode: 18.83% duty and a formally unbounded
+     * error, while the three threads the numbers actually came from were on CPU 96% of the time.
+     *
+     * Indexed by slot index, not by thread id, because that is what the sampler's own per-slot
+     * counters use and the two have to be paired thread by thread. A thread that arrived past the
+     * [MAX_SLOTS] ceiling has no index and is absent from both sides, which is consistent if not
+     * complete — the report says how many those were. A slot handed on to a new thread after the
+     * old one died accumulates both, which is wrong in the fourth decimal and not worth a
+     * generation counter.
+     */
+    private val cpuByIndex = LongArray(MAX_SLOTS)
+    private val wallByIndex = LongArray(MAX_SLOTS)
+
     private var windows = 0
     private var cpuNanos = 0L
     private var wallNanos = 0L
@@ -158,6 +177,14 @@ class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
             if (d < 0) anomalies++ else {
                 cpu += d
                 counted++
+                // Wall time per thread is the same interval for all of them; it is kept per slot
+                // anyway so that the two arrays can be divided one by the other without a second
+                // count of who had a baseline in which window.
+                val idx = s.index
+                if (idx >= 0) {
+                    cpuByIndex[idx] += d
+                    wallByIndex[idx] += now - prevWall
+                }
             }
         }
         if (prevWall != 0L && counted > 0) {
@@ -183,7 +210,42 @@ class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
         if (cost > maxSampleNanos) maxSampleNanos = cost
     }
 
-    fun report(): DutyReport = DutyReport(
+    /**
+     * How much of *labelled* occupancy was CPU — the number the report's shares are bounded by.
+     *
+     * A bound and not a measurement, and it has to be: a thread can be parked *inside* a label. The
+     * bench's `--lock` mode puts the label outside the acquisition on purpose and 52,422 of
+     * `lockedUpdate`'s 71,839 hits caught a thread that was not runnable, so "labelled therefore
+     * running" is false and the cheap version of this fix is not available.
+     *
+     * What is available is an interval. For thread *i* with stall fraction `f` and labelled
+     * fraction `l`, the stall that could possibly have been inside labelled work is
+     * `min(f, l) × occupancy` — you cannot have more stall inside labels than you have stall, nor
+     * more than you have labels. Summed, that is the worst case, and the idle threads that broke
+     * the old number fall out on their own: `min(1.0, 0.0) = 0`.
+     *
+     * @param slotHits every sample taken at that slot, labelled or not.
+     * @param slotLabelled those of them that were inside some operation.
+     */
+    private fun labelledDuty(slotHits: LongArray, slotLabelled: LongArray): Double {
+        var labelled = 0.0
+        var stall = 0.0
+        for (i in 0 until MAX_SLOTS) {
+            val hits = slotHits[i]
+            val wall = wallByIndex[i]
+            if (hits == 0L || wall <= 0L) continue
+            val l = slotLabelled[i].toDouble() / hits
+            // Clamped: the CPU counter moves in scheduler ticks, so a window can read a hair over
+            // wall or a hair under zero, and a fraction outside 0..1 is quantisation and not news.
+            val f = min(1.0, max(0.0, 1.0 - cpuByIndex[i].toDouble() / wall))
+            labelled += slotLabelled[i]
+            stall += min(f, l) * hits
+        }
+        return if (labelled <= 0.0) Double.NaN else (labelled - stall) / labelled
+    }
+
+    fun report(slotHits: LongArray, slotLabelled: LongArray): DutyReport = DutyReport(
+        labelledDuty = if (available) labelledDuty(slotHits, slotLabelled) else Double.NaN,
         reason = reason,
         resolutionNanos = resolution,
         windowNanos = windowNanos,
@@ -215,6 +277,12 @@ class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
 
 /** What the duty measurement came to, and the bound it puts on every share in the report. */
 class DutyReport(
+    /**
+     * The fraction of *labelled* occupancy that was CPU, worst case. NaN when it could not be
+     * computed, and the aggregate [duty] then stands in — which is the old, pessimistic behaviour
+     * rather than a wrong one. See [DutyCycle.labelledDuty].
+     */
+    val labelledDuty: Double,
     val reason: String?,
     val resolutionNanos: Long,
     val windowNanos: Long,
@@ -231,8 +299,18 @@ class DutyReport(
     /** True when there is a number to read: a measurement was attempted and it succeeded. */
     val available: Boolean get() = reason == null && windows > 0 && wallNanos > 0
 
-    /** The fraction of occupancy that was CPU. */
+    /** The fraction of occupancy that was CPU, over every registered thread. */
     val duty: Double get() = if (wallNanos > 0) cpuNanos.toDouble() / wallNanos else Double.NaN
+
+    /**
+     * The duty the shares are actually bounded by: [labelledDuty] where it exists, and the
+     * aggregate where it does not.
+     *
+     * Everything that judges a *share* uses this. Everything that describes what the *machine* was
+     * doing to every thread at once — [Report.machineFloor], [Report.offCpuSamples] — keeps using
+     * [duty], because there the whole process is the subject and an idle thread belongs in it.
+     */
+    val shareDuty: Double get() = if (labelledDuty.isNaN()) duty else labelledDuty
 
     /**
      * The worst a share can be wrong by, in percentage points, if every stall there was landed on
@@ -244,19 +322,13 @@ class DutyReport(
      * `(1 - d) / d`, and that is the number worth printing: it holds for every operation at once
      * and needs nothing to be known about where the stalling went.
      */
-    val boundPp: Double get() = min(100.0, (1 - duty) / duty * 100)
+    val boundPp: Double get() = min(100.0, (1 - shareDuty) / shareDuty * 100)
 
     /** What a reported occupancy share could really be, as CPU. */
     fun boundsFor(share: Double): Pair<Double, Double> =
-        max(0.0, (share - (1 - duty)) / duty) to min(1.0, share / duty)
+        max(0.0, (share - (1 - shareDuty)) / shareDuty) to min(1.0, share / shareDuty)
 
-    /**
-     * @param labelledFraction the share of sampled occupancy that was inside some operation. The
-     *   duty cycle covers every registered thread, while the report's shares cover only labelled
-     *   samples, so a thread sitting outside any operation lowers the duty cycle without being in
-     *   the shares at all. Pass it and the bound says so; pass NaN and the line is omitted.
-     */
-    fun lines(labelledFraction: Double = Double.NaN): List<String> {
+    fun lines(): List<String> {
         if (reason != null) return listOf(
             "CPU duty cycle: unavailable — $reason",
             "  nothing here bounds how much of the occupancy was not CPU",
@@ -279,28 +351,30 @@ class DutyReport(
             "threads were on CPU %.2f%% of sampled wall time  (%d windows, %d threads, per window %.2f%%..%.2f%%)",
             duty * 100, windows, threads, minWindowDuty * 100, maxWindowDuty * 100
         )
+        // The bound is over labelled occupancy alone, which is what the shares are over. Printed
+        // beside the aggregate rather than instead of it: the gap between the two lines is how much
+        // of the process was idle, which is worth seeing and used to be silently charged to the
+        // shares. Starvation mode is the extreme — 18.83% aggregate against 96% inside the labels.
+        if (!labelledDuty.isNaN()) out += String.format(
+            Locale.ROOT,
+            "  inside labelled work it was %.2f%%, and that is what bounds the shares", labelledDuty * 100
+        )
+        // Not "is not CPU", which reads as an apology for having failed to measure CPU. Occupancy
+        // counts a wait in full and that is the right behaviour for the latency question — the
+        // reason the duty cycle exists is not that CPU was the goal, it is that a *sum* over
+        // threads is only additive when it is CPU.
         out += String.format(
-            Locale.ROOT, "at most %.2f pp of any share is occupancy that was not CPU", boundPp
+            Locale.ROOT, "at most %.2f pp of any share is a thread waiting rather than working", boundPp
         )
         out += when {
-            duty >= RANKING_SAFE -> "so the ranking is trustworthy"
-            duty >= OCCUPANCY_ONLY ->
+            shareDuty >= RANKING_SAFE -> "so the ranking is trustworthy"
+            shareDuty >= OCCUPANCY_ONLY ->
                 "so a share is still roughly time, but small gaps between operations are not resolved"
 
             else ->
-                "this report says where threads SIT, not where cycles GO — most occupancy was not CPU"
+                "so read a share as where threads SIT, not where cycles GO — and beware of adding two " +
+                        "of them up, since one wait can be counted once per thread waiting on it"
         }
-        // The bound above charges every idle thread's parked time against the shares, and the
-        // shares do not contain that time in the first place. Starvation mode is the extreme case:
-        // 3 of 15 threads working reads a 19.67% duty cycle and an unbounded error, when the
-        // working threads were in fact on CPU 96-99% of the time. Until the duty cycle is taken per
-        // thread and paired with that thread's labelling, the size of the over-estimate cannot be
-        // stated — only its direction, which is why this is a note and not a correction.
-        if (!labelledFraction.isNaN() && labelledFraction < MOSTLY_LABELLED && duty < RANKING_SAFE) out += String.format(
-            Locale.ROOT,
-            "%.1f%% of occupancy was outside any operation and is not in the shares, so the bound is pessimistic",
-            (1 - labelledFraction) * 100
-        )
         if (anomalies > 0) out += "$anomalies thread readings went backwards and were dropped"
         return out
     }
@@ -314,8 +388,5 @@ class DutyReport(
          */
         const val RANKING_SAFE = 0.95
         const val OCCUPANCY_ONLY = 0.75
-
-        /** Below this much labelled occupancy, idle threads are a real part of the shortfall. */
-        const val MOSTLY_LABELLED = 0.95
     }
 }

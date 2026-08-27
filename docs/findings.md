@@ -645,12 +645,43 @@ on the sampling thread once a second. Achieved step stayed 1.001 ms with zero re
 step observed was 1.445 ms against a 1.25 ms jitter ceiling, so the walk lands inside a single tick
 and delays it by a fraction of a step, roughly one tick in a thousand.
 
-**The bound is pessimistic when threads sit outside any operation.** The duty cycle covers every
-registered thread while the shares cover labelled samples only, so a parked thread lowers the duty
-cycle without appearing in the shares at all. Starvation mode is the extreme: 18.83% duty and a
-formally unbounded error, while the three working threads were on CPU 96% of the time and their
-shares are fine. The report says so rather than pretending otherwise. Tightening it needs the duty
-cycle per thread, paired with that thread's labelling — see [ideas.md](ideas.md).
+**The bound was pessimistic when threads sat outside any operation, and taking it per thread fixed
+it.** The duty cycle covered every registered thread while the shares cover labelled samples only,
+so a parked thread lowered the duty cycle without appearing in a single share it supposedly bounded.
+
+Per thread, the stall that could possibly be inside labelled work is `min(stall, labelled) ×
+occupancy` — you cannot have more stall inside labels than you have stall, nor more than you have
+labels. Summed over threads and divided by labelled occupancy, that is the number the shares are now
+bounded by. Three 20-second runs, one for each thing that can go wrong:
+
+| bench mode | aggregate duty | inside labelled work | bound | what the workers' own stopwatches say |
+|---|---|---|---|---|
+| ordinary, 8 threads | 98.95% | **98.94%** | 1.07 pp | 0.21% preempted → 99.79% |
+| starvation, 3 of 15 working | 19.40% | **96.94%** | **3.16 pp**, was 81.2 | 1.04% preempted on the working threads |
+| contended lock, 2 ms in 10 | 64.61% | **64.48%** | 55.08 pp | 34.53% lock wait + 0.17% preempted → 65.28% |
+
+Each row is a different failure the fix had to avoid:
+
+- *Ordinary* — every thread works and is labelled, so the two figures must agree, and they do to
+  0.01 pp. A change that moved this row would have been a regression, not a fix.
+- *Starvation* — the case the old number was vacuous on. 12 parked threads contribute
+  `min(1.0, 0.0) = 0` and fall out. The bound goes from "formally unbounded" to 3.16 pp.
+- *Contended lock* — the case that decides the *shape*. The label is placed outside the acquisition
+  on purpose, so a thread parked on the lock is inside a labelled operation, and 52,422 of
+  `lockedUpdate`'s 71,839 hits catch a thread that is not runnable. A "labelled therefore running"
+  implementation would print ~0 pp here and be badly wrong. The bound stays at 55.08 pp, and the
+  workers' own account of the same quantity — a stopwatch on the thread doing the waiting, sharing
+  nothing with the OS accounting — puts duty at 65.28% against our 64.48%.
+
+The starvation bound landed at 3.16 pp rather than the "under 1 pp" the plan predicted, and the
+prediction was simply wrong arithmetic: the working threads were already known to be on CPU ~96%,
+and `(1 − 0.96) / 0.96` is 4.2 pp, not 1. The measurement agrees with what was already recorded.
+
+**Coverage had the same defect from the other end.** *"Labels cover 49.8% of thread-time"* reads as
+a placement failure when 79.2% of the unlabelled samples were a thread that was not runnable at all.
+Coverage is now also reported over runnable occupancy alone — with *both* sides restricted, since a
+label can be held across a wait and leaving that in the numerator while removing it from the
+denominator is the same mismatch pointing the other way.
 
 ## The long-instance detector
 

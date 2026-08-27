@@ -84,7 +84,25 @@ different category from a label being small.
 *Check it with:* the bench, where four of twenty operations sit below the floor on purpose — it must
 warn on all four and finish. And `trial-netty --labels`, which must stop needing `strict = false`.
 
-**1b. The duty cycle per thread.** [ideas.md](ideas.md) item 10.
+**1b. The duty cycle per thread.** **done.** [ideas.md](ideas.md) item 10.
+
+*What was built.* `DutyCycle` keeps its two sums per slot index as well as in aggregate; the sampler
+keeps `slotHits` and `slotLabelled` beside them, two increments on the sampling thread and nothing
+on the hot path. `DutyReport.shareDuty` is what every judgement about a *share* now divides by,
+while `machineFloor` and `offCpuSamples` keep the aggregate, because there the whole process is the
+subject and an idle thread belongs in it.
+
+*The verify-first question was already answered, in [findings.md](findings.md#thread-state-beside-the-label):*
+a thread inside a label is **not** always runnable — 52,422 of `lockedUpdate`'s 71,839 hits catch one
+parked. So the cheap version was unavailable and this had to be the `Σ min(stall, labelled)` bound.
+
+*Verified* on three bench modes, in [findings.md](findings.md#the-duty-cycle): ordinary agrees to
+0.01 pp (nothing moved), starvation falls from 81.2 pp to 3.16, and the contended lock correctly
+stays at 55.08 pp rather than collapsing. The predicted "under 1 pp" for starvation was wrong
+arithmetic on our own recorded 96%; 3.16 pp is the right answer.
+
+*Coverage:* both sides restricted to runnable occupancy, not just the unlabelled side — a label held
+across a wait would otherwise reintroduce the same mismatch pointing the other way.
 
 Two lines of every report divide by the wrong thing today.
 
@@ -111,7 +129,14 @@ to under 1 pp, and the ordinary bench, where nothing should change.
 bench's `--lock` mode is where to check — the label there sits *outside* the acquisition precisely so
 that a parked thread is still inside the operation, which is the counter-example if there is one.
 
-**1c. The report stops presenting CPU as the truth.** [ideas.md](ideas.md) item 17.
+**1c. The report stops presenting CPU as the truth.** **done.** [ideas.md](ideas.md) item 17.
+
+*What was built.* *"at most N pp of any share is occupancy that was not CPU"* became *"…is a thread
+waiting rather than working"*, and the verdict for a low duty cycle stopped being an apology —
+*"read a share as where threads SIT, not where cycles GO, and beware of adding two of them up, since
+one wait can be counted once per thread waiting on it"*. That is the thing the duty cycle actually
+guards against, and it is the reason it exists: occupancy counts a wait in full, which is what the
+latency question wants, and a *sum* over threads is only additive when it is CPU.
 
 *"share is of labelled samples and is occupancy, not CPU"* reads as an apology, and it is backwards
 for most of what anyone profiles. Occupancy counts waiting in full, which is the right behaviour for

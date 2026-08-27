@@ -613,6 +613,31 @@ class Report(
     /** Thread-time spent inside any label. */
     val labelledNanos: Double get() = labelledHits * stepNanos
 
+    /** Of [labelledHits], those that caught a thread that was not runnable. Zero without state. */
+    val labelledWaitingHits: Long get() = operations.sumOf { it.waitingHits }
+
+    /**
+     * Coverage with both sides restricted to occupancy where the thread was actually runnable.
+     *
+     * The plain coverage figure divides labelled samples by *every* sample, and on a workload with
+     * idle threads that reads as "the labels miss most of the run" when what it means is "most of
+     * the run was nobody doing anything". On Lucene 79.2% of the unlabelled samples caught a thread
+     * that was not runnable, which turns 49.8% coverage into something quite different.
+     *
+     * Both sides, not just the unlabelled one: a label can be held across a wait — the bench's
+     * `lockedUpdate` spends 73% of itself parked — so leaving that inside the numerator while
+     * removing it from the denominator would be the same mismatch of denominators this fix exists
+     * to remove, pointing the other way. NaN when state was not sampled and the question cannot be
+     * asked.
+     */
+    val runnableCoverage: Double
+        get() {
+            if (!stateSampled) return Double.NaN
+            val labelled = labelledHits - labelledWaitingHits
+            val idle = idleHits - idleWaitingHits
+            return if (labelled + idle <= 0) Double.NaN else labelled.toDouble() / (labelled + idle)
+        }
+
     /**
      * Thread-time the sampler observed at all — every slot read on every tick, labelled or not.
      *
@@ -876,9 +901,21 @@ class Report(
                 threadTime((idleHits - idleWaitingHits) * stepNanos)
             )
         )
+        // The coverage figure a reader should act on. The one above divides by every sample taken,
+        // so a pool of idle threads reads as missing labels; this one asks the question only of
+        // time when a thread was running, on both sides of the division.
+        if (!runnableCoverage.isNaN()) appendLine(
+            String.format(
+                Locale.ROOT,
+                "  of the thread-time that was runnable at all, labels cover %s of %s (%.1f%%)",
+                threadTime((labelledHits - labelledWaitingHits) * stepNanos),
+                threadTime((labelledHits - labelledWaitingHits + idleHits - idleWaitingHits) * stepNanos),
+                runnableCoverage * 100
+            )
+        )
         // The bound belongs beside the sampling rate, not in a footnote: both say how much the
         // numbers below are worth, one against chance and one against stalling.
-        for (l in duty.lines(labelledHits.toDouble() / (labelledHits + idleHits).coerceAtLeast(1))) appendLine(l)
+        for (l in duty.lines()) appendLine(l)
         appendLine("=".repeat(WIDTH))
         appendLine(
             String.format(
@@ -1254,6 +1291,17 @@ class Sampler(
      * A counter that went *backwards* means the index was recycled to a new thread, which is
      * treated as a fresh execution — the one case where the answer would otherwise be nonsense.
      */
+    /**
+     * Per thread, every sample taken at its slot and those of them that were inside some operation.
+     *
+     * Paired with the duty cycle's per-thread CPU fractions to bound the error on the shares — see
+     * [DutyCycle.labelledDuty]. Indexed by slot index, which is why that index exists: it is
+     * immutable for the life of the slot and it is the only thing the sampler and the duty walk
+     * can both use to mean *the same thread*.
+     */
+    val slotHits = LongArray(MAX_SLOTS)
+    val slotLabelled = LongArray(MAX_SLOTS)
+
     private val prevOp = IntArray(MAX_SLOTS) { NO_OP }
     private val prevCount = LongArray(MAX_SLOTS)
     private val prevStuck = BooleanArray(MAX_SLOTS)
@@ -1349,6 +1397,12 @@ class Sampler(
 
                 val idx = s.index
                 if (idx < 0) continue           // past the ceiling: sampled, but not tracked
+                // The other half of the per-thread bound. The duty walk knows how much of thread
+                // i's time was CPU; this is how much of it was inside a label, and the bound is
+                // what the two agree could have been stalling *there*. Two increments on the
+                // sampling thread, nothing on the hot path.
+                slotHits[idx]++
+                if (c >= 0) slotLabelled[idx]++
                 if (c < 0) {
                     prevOp[idx] = NO_OP
                     prevStuck[idx] = false
@@ -1420,7 +1474,7 @@ class Sampler(
     }
 
     /** How much of the occupancy this session sampled was CPU. See [DutyCycle]. */
-    fun duty(): DutyReport = duty.report()
+    fun duty(): DutyReport = duty.report(slotHits, slotLabelled)
 
     private fun waitUntil(deadline: Long) {
         when (wait) {
