@@ -1,5 +1,7 @@
-package com.minogin.profiler.trial
+package com.minogin.profiler.trial.calcite
 
+import com.minogin.profiler.trial.analyzeJfr
+import com.minogin.profiler.trial.recordExecutionSamples
 import com.minogin.profiler.Profiler
 import com.minogin.profiler.op
 import org.apache.calcite.DataContext

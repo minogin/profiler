@@ -28,7 +28,7 @@ tidying — each is a number the report gets wrong today, and each is now backed
 | [plan.md](plan.md) | work we committed to, phase by phase, rewritten as each closes to say what was actually built | you want to know where we are |
 | [findings.md](findings.md) | only things we measured, each with the measurement that produced it | you want to know what is true, and why we believe it |
 | [case.md](case.md) | observations of existing tools failing at something, and where they are better than us | you want to know why this exists at all |
-| [trial.md](trial.md) | the fine tier pointed at Apache Calcite — every number from that exercise | you want the first end-to-end result on code we did not write |
+| [trial-calcite.md](trial-calcite.md) | the fine tier pointed at Apache Calcite — every number from that exercise | you want the first end-to-end result on code we did not write |
 | [trial-lucene.md](trial-lucene.md) | the same, pointed at Apache Lucene — concurrent, and the first head-to-head against a timed-wrapper profiler | you want the second, and the strongest argument for sampling we have |
 | [trial-netty.md](trial-netty.md) | the same pointed at Netty — event loops, and the first test of the thread-state column on foreign code | you want the third, and what a flame graph does with a handler chain |
 | [ideas.md](ideas.md) | things worth doing that we have not committed to | you want to know what was considered and deferred |
@@ -53,7 +53,7 @@ tidying — each is a number the report gets wrong today, and each is now backed
 | `src/main/kotlin/com/minogin/profiler/Duty.kt` | how much of the sampled occupancy was CPU, and the bound that puts on every share |
 | `src/main/kotlin/com/minogin/profiler/Workload.kt`, `Burn.kt`, `Bench.kt` | the bench — a workload whose true answer is known |
 | `src/main/kotlin/com/minogin/profiler/Main.kt` | the harness that runs it all and checks every claim |
-| `trial/` | the Calcite trial, in its own module so its dependencies cannot leak into the profiler |
+| `trial-calcite/` | the Calcite trial, in its own module so its dependencies cannot leak into the profiler |
 | `trial-lucene/` | the Lucene trial — the corpus, the wrappers that place the labels, and four instrumentation configurations to compare |
 | `trial-netty/` | the Netty trial — the HTTP pipeline, the load generator, and the three-way A/B |
 | `trial-common/` | shared by every trial and depending on nothing but the JDK: the JFR recording and the collapsed-stack analysis |

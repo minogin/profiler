@@ -346,7 +346,7 @@ believes the answer.
 
 ## Against a stack profiler
 
-From the two trials — Calcite in [trial.md](trial.md), Lucene in [trial-lucene.md](trial-lucene.md).
+From the two trials — Calcite in [trial-calcite.md](trial-calcite.md), Lucene in [trial-lucene.md](trial-lucene.md).
 Entries say which.
 
 **Many instances behind one class is the shape a flame graph cannot address even in principle.**

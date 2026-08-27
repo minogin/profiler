@@ -1,6 +1,6 @@
 # The second trial — Lucene, and the first concurrent workload we did not write
 
-The first trial ([trial.md](trial.md)) was one data point, and every design decision for a week
+The first trial ([trial-calcite.md](trial-calcite.md)) was one data point, and every design decision for a week
 afterwards was extrapolated from it. This is the second. Target: **Apache Lucene 10.4.0**, a scored
 `BooleanQuery` over a million documents, searched concurrently across eight segments. The harness
 is in [`trial-lucene/`](../trial-lucene) and every number below reproduces from it.

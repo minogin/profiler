@@ -623,7 +623,7 @@ share at once — the CPU duty cycle and the bound it implies, the long-instance
 per-call duration, and the bench work that gives all three a known truth to be checked against.
 
 **Phase 4** already carries these, and they came out of the trial's friction list, recorded in full
-in [trial.md](trial.md#6-the-friction--what-the-trial-says-about-the-tool):
+in [trial-calcite.md](trial-calcite.md#6-the-friction--what-the-trial-says-about-the-tool):
 
 - `Profiler.enter(id)` / `Profiler.exit()` and the span stack they imply, because `op(id) { }` is a
   block and almost nothing in foreign code is ours to wrap in a block.

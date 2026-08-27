@@ -5,7 +5,7 @@ its section is rewritten to say what was actually built rather than what was int
 
 Findings, techniques and dead ends live in [findings.md](findings.md). The idea and the prior art
 live in [profiler.md](profiler.md). The trial on Apache Calcite has its own record in
-[trial.md](trial.md). Where the existing tools fall short — the running case for building this at
+[trial-calcite.md](trial-calcite.md). Where the existing tools fall short — the running case for building this at
 all — is [case.md](case.md), and what we might do but have not committed to is [ideas.md](ideas.md).
 What each document is for is [index.md](index.md); the short version of the whole thing, in plain
 words, is [tldr.md](tldr.md).
@@ -333,7 +333,7 @@ effect.
 ## Trial — the fine tier on somebody else's code · done
 
 Pointed at **Apache Calcite 1.42.0** query planning. Full record with every number in
-[trial.md](trial.md); the harness is [`trial/`](../trial). What it settled:
+[trial-calcite.md](trial-calcite.md); the harness is [`trial-calcite/`](../trial-calcite). What it settled:
 
 **The candidate qualified.** A four-table chain join with join associate enabled takes 16–20 s to
 plan, against 184 ms for three tables. JFR's flame graph is over 60% JDK collections and string
@@ -363,7 +363,7 @@ microseconds, so a 2 ns hook is parts per million. Both A/B comparisons came out
 sign, which is this machine's way of saying "below the floor".
 
 **The friction, which is what phase 4 has to answer** — all nine items are in
-[trial.md](trial.md#6-the-friction--what-the-trial-says-about-the-tool). The four that change the
+[trial-calcite.md](trial-calcite.md#6-the-friction--what-the-trial-says-about-the-tool). The four that change the
 design:
 
 - **There is no enter/exit hook.** `op(id) { }` is a block, and almost nothing in third-party code
@@ -735,7 +735,7 @@ instrument is sufficient alone, which is the argument for having both.
 
 Phase 7's essentials, pulled forward, because the Calcite trial could not use the documented API at
 all and because the coarse tier needs the same machinery anyway. Everything here comes from the
-[friction list](trial.md#6-the-friction--what-the-trial-says-about-the-tool) — observed, not
+[friction list](trial-calcite.md#6-the-friction--what-the-trial-says-about-the-tool) — observed, not
 imagined.
 
 **1. `Profiler.enter(id)` / `Profiler.exit()`, and the span stack they imply.** An *addition* to
@@ -885,12 +885,12 @@ honest section on where the other tools are better, and it is currently built fr
 A trial that ends in "async-profiler would have told you this in ten seconds" is a real result and
 belongs there.
 
-Each trial gets its own module beside [`trial/`](../trial), so nothing it depends on can reach the
+Each trial gets its own module beside [`trial-calcite/`](../trial-calcite), so nothing it depends on can reach the
 profiler, which still takes no dependencies at all.
 
 ### Running one — what the first two trials say to do, in order
 
-[trial.md](trial.md) and [trial-lucene.md](trial-lucene.md) are the two full records. What they
+[trial-calcite.md](trial-calcite.md) and [trial-lucene.md](trial-lucene.md) are the two full records. What they
 establish about *how to run one*:
 
 1. **Qualify the candidate before instrumenting it.** Calcite earned the trial by taking 16–20 s to

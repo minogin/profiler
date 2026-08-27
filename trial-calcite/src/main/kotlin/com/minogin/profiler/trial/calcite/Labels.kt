@@ -1,4 +1,4 @@
-package com.minogin.profiler.trial
+package com.minogin.profiler.trial.calcite
 
 import com.minogin.profiler.Profiler
 import org.apache.calcite.plan.RelOptListener

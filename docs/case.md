@@ -10,7 +10,7 @@ the end for what the other tools do *better* than this one, and it is not option
 other people's weaknesses with no honest column is marketing, and would stop being useful to us
 the moment we started believing it.
 
-Numbers cited here are recorded in full in [findings.md](findings.md) and [trial.md](trial.md).
+Numbers cited here are recorded in full in [findings.md](findings.md) and [trial-calcite.md](trial-calcite.md).
 
 ---
 
@@ -56,7 +56,7 @@ for one rule and off by 57× for another, with no marker distinguishing them, be
 lives in a base class's internal structure. **The ranking inverts: the flame graph shows
 `JoinCommuteRule` at 30% and merge join at 0.8%, and the truth is the other way round.** Not
 "failed to answer" — answered confidently, and wrongly. Full tables in
-[trial.md](trial.md#1-the-candidate-and-whether-it-qualifies).
+[trial-calcite.md](trial-calcite.md#1-the-candidate-and-whether-it-qualifies).
 
 **Self time points at the standard library.** Over 60% of Calcite's self time is
 `ArrayList.indexOfRange`, `HashMap.putVal`, `String.equals`, `String.hashCode` and number

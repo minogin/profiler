@@ -4,7 +4,7 @@ Everything before this was self-referential: we built a bench, built a tool, and
 reads the bench. This is the tool pointed at code nobody here wrote, to find out whether it is
 *useful* rather than merely correct.
 
-Target: **Apache Calcite 1.42.0**, query planning. The harness is in [`trial/`](../trial), and
+Target: **Apache Calcite 1.42.0**, query planning. The harness is in [`trial-calcite/`](../trial-calcite), and
 every number below is reproducible from it. Findings that generalise beyond Calcite have been
 folded into [findings.md](findings.md); this file is the trial's own record.
 
@@ -348,29 +348,29 @@ should be in the documentation, not discovered.
 ## 7. Reproducing it
 
 ```
-./gradlew :trial:classpathFile
-CP=$(cat trial/build/classpath.txt)
+./gradlew :trial-calcite:classpathFile
+CP=$(cat trial-calcite/build/classpath.txt)
 
 # the growth curve
-java -cp "$CP" com.minogin.profiler.trial.CalciteTrialKt --scale --from 3 --to 12 --associate true
+java -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt --scale --from 3 --to 12 --associate true
 
 # the conventional profile
-java -Xmx6g -cp "$CP" com.minogin.profiler.trial.CalciteTrialKt \
+java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt \
      --tables 4 --associate true --warmups 1 --seconds 60 --jfr calcite.jfr
-java -cp "$CP" com.minogin.profiler.trial.CalciteTrialKt --analyze calcite.jfr --top 25
+java -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt --analyze calcite.jfr --top 25
 
 # ours
-java -Xmx6g -cp "$CP" com.minogin.profiler.trial.CalciteTrialKt \
+java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt \
      --tables 4 --associate true --warmups 1 --seconds 60 --labels true --sampler true
 
 # the finding, and the plans it produces
-java -Xmx6g -cp "$CP" com.minogin.profiler.trial.CalciteTrialKt --ab merge --tables 4 --associate true
-java -Xmx6g -cp "$CP" com.minogin.profiler.trial.CalciteTrialKt --plan --tables 4 --associate true
+java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt --ab merge --tables 4 --associate true
+java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt --plan --tables 4 --associate true
 
 # what the instrumentation costs
-java -Xmx6g -cp "$CP" com.minogin.profiler.trial.CalciteTrialKt \
+java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt \
      --ab listener --tables 4 --associate true --mergejoin false --rounds 40
-java -Xmx6g -cp "$CP" com.minogin.profiler.trial.CalciteTrialKt \
+java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt \
      --ab labels --tables 4 --associate true --mergejoin false --rounds 40
 ```
 

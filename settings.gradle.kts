@@ -3,10 +3,10 @@ plugins {
 }
 rootProject.name = "profiler"
 
-// The trial: the fine tier pointed at somebody else's code. Separate module so that nothing it
+// The first trial: the fine tier pointed at somebody else's code. Separate module so that nothing it
 // needs — Calcite, a logging binding, JFR plumbing — can leak into the profiler itself, which
 // still takes no dependencies at all.
-include("trial")
+include("trial-calcite")
 
 // Shared by every trial and depending on nothing but the JDK: the JFR recording and the
 // collapsed-stack analysis that answers "what would a flame graph have told you".
