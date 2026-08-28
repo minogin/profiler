@@ -670,6 +670,69 @@ Options, none chosen:
 The second is the most in keeping with the rest of the report, which prefers stating a measurement
 to issuing an instruction.
 
+## 22. Vary the thread count and re-run — the counterfactual for parallelism · open, one data point
+
+The sibling of item 1. That one asks *what would removing this operation save* by disabling it and
+re-running; this asks **what is parallelism buying** by changing the thread count and re-running.
+Same experimental shape, different knob, and neither is answerable from a single run at any amount of
+instrumentation.
+
+**It has already happened once, by accident.** The Lucene revisit ran the same coarse label at one
+thread and at eight:
+
+```
+threads 1   span 14.88 ms   busy/exec 14.87 ms   waiting  0.0%
+threads 8   span  4.10 ms   busy/exec  3.10 ms   waiting 24.5%
+```
+
+Three things fall out of two rows:
+
+**A speedup curve per logical operation.** 3.63× on eight threads. Inverted through Amdahl the serial
+fraction is about 17%, which caps this search at roughly **5.8× however many threads you add**. That
+is a property of the code, and it is exactly the sort of number the `in flight` column cannot be —
+see the load-versus-code argument under phase 5 in [plan.md](plan.md). *Back-of-envelope: two points,
+and the clock moved between them.*
+
+**A propagation check that needs no propagation.** The work a query does should not depend on how many
+threads run it, so `busy/exec` ought to be invariant under the sweep. It fell 14.87 → 3.10 ms, which
+is **11.8 ms of work escaping the context**, measured, with nothing implemented. That invariant —
+*work per execution must not depend on thread count* — is the cheapest sharp test phase 5 could have,
+and it should be an assertion the moment propagation lands.
+
+**And it survives phase 5 rather than being replaced by it.** Propagation reports the parallelism you
+*are* getting, from one run; the sweep reports the **curve**, which is what says whether more threads
+would help. Different questions.
+
+### Can the harness control a foreign target's threading?
+
+Where the target exposes the knob, which is most of the time but not all:
+
+| target | knob | |
+|---|---|---|
+| Lucene | the pool is constructed by our own `Bed` | already done — which is why the experiment was free |
+| Netty | event-loop count is a constructor argument | easy |
+| Calcite | single-threaded | nothing to vary |
+| anything that spawns threads internally with no setting | — | **not possible from outside** |
+
+There is a blunt fallback — CPU affinity, or `ForkJoinPool.common.parallelism` — but it is a
+*different experiment*: it changes how many cores the work has, not how many threads the code uses,
+so it measures resource contention rather than fan-out. Worth keeping the two apart.
+
+### Three caveats that decide whether it is trustworthy
+
+1. **Thread count changes the machine as well as the code.** All-core clock sits below single-core
+   boost — measured at ×1.126–1.453 and already named *the price of parallelism* — so a 3.63×
+   speedup contains a clock change. Every sweep point needs its clock trace beside it, which
+   `CLAUDE.md` now requires anyway.
+2. **Offline only, and the workload must be repeatable.** The same constraint item 1 carries, and it
+   keeps this a developer's mode rather than anything that could run in production.
+3. **The knob is usually per-process, not per-operation.** Two coarse types sharing one pool cannot be
+   varied independently, so this gives a curve for the whole run. The disable-and-re-run
+   counterfactual can target one operation; this generally cannot.
+
+**Where it would start:** the invariant, not the curve. It is cheaper, it is a pass/fail rather than a
+number needing interpretation, and phase 5 needs it.
+
 ## Promoted to plan.md
 
 **Phase 3.5** is item 9 above, reframed from detecting bad operations to bounding the error on every

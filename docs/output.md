@@ -233,6 +233,25 @@ thread, every occupied execution is occupied by exactly one thread, so the numbe
 construction and would be a column of ones. It is measured all the same, because a known answer is
 what an instrument gets calibrated against — see `plan.md`, phase 5.
 
+### The one thing to know before trusting `waiting`
+
+**If your operation hands work to other threads, `waiting` counts that work as waiting.** A context
+lives on the thread that created it, so `busy/exec` only ever counts samples taken on that thread.
+Measured on Lucene, whose search fans out across a pool — same code, same label:
+
+| threads | mean | busy/exec | waiting |
+|---|---|---|---|
+| 1 | 14.88 ms | 14.87 ms | **0.0%** |
+| 8 | 4.10 ms | 3.10 ms | **24.5%** |
+
+Neither number is wrong: the calling thread really is blocked for a quarter of the search. What the
+report cannot say is that the *request* was not idle — it was working, on threads the context never
+reached. Until propagation exists, read `waiting` as *"the thread holding this context was not
+running"*, which is what it measures, and not as *"this operation was idle"*.
+
+Same-thread operations — a query planner, a synchronous handler chain — are unaffected, and both read
+0.0% correctly.
+
 ---
 
 ## The warnings, and what to do about each
@@ -252,6 +271,25 @@ adjacent short labels without leaving a trace in the numbers. In the demo this c
 **What to do:** `op(id, times = n) { … }` around the enclosing loop, and the report speaks in your
 units. **Not fatal** — it warns and the run finishes, because the check is machine-dependent: the
 same label reads 17.8 ns at one thread and 55.4 ns at eight on one laptop.
+
+### `! … under the N a coarse label needs here`
+
+The tier boundary, checked. A coarse label costs about 40 ns per execution to allocate, timestamp
+and stamp, and there are two ways that can be too much — **which one bound decides what you are being
+told**, because the remedies differ:
+
+| bound | the complaint | example |
+|---|---|---|
+| `d ≥ 800 ns` | the number would describe the instrument as much as your code | a label on a 200 ns operation |
+| `d ≥ 4 µs × share` | the *program* you measured is not the one you started with | a 1 µs operation holding 62% of the run: accurate per execution, but the contexts alone cost over 1% of everything |
+
+**Unlike the fine floor above, this check is exact.** That one has to *infer* an operation's duration
+from `hits ÷ calls`, so it carries a statistical bound and a bias allowance to avoid accusing an
+innocent label. Here the duration is measured, so no slack is needed. The only sampled input is the
+share, and it is taken a standard error low before the second condition can fire.
+
+**What to do:** use a fine label — `op(id) { }` — or move the coarse label outward to a batch of
+these. A warning, never fatal.
 
 ### `! N executions lasted over a tick`
 

@@ -1062,6 +1062,53 @@ quarters of a request is inside Netty's codec and write path"*.
 
 Where a logical operation stops being a thread-local concept.
 
+### Start here — what a fresh session needs to know
+
+**The defect, measured on real code.** Lucene fans a search across a pool, so the context stays on
+the calling thread. Same code, same label, `--placement LABEL --coarse`:
+
+```
+--threads 1   mean 14.88 ms   busy/exec 14.87 ms   waiting  0.0%
+--threads 8   mean  4.10 ms   busy/exec  3.10 ms   waiting 24.5%
+```
+
+**Without propagation, parallel work inside a coarse operation is reported as waiting.** Both numbers
+are honest — the calling thread really is blocked — but the report cannot say the *request* was
+working. That is this phase's justification, and the single-threaded row is what makes it a finding
+rather than a suspicion. `docs/trial-lucene.md` has the full record.
+
+**What is already built and must not be re-derived:**
+
+- `CoarseContext` carries `parent` and `depth`; the slot holds it in `OpSlot.context`, read opaquely.
+  Propagation is *save the reference, restore it on the other thread* — nothing else.
+- **The parallelism counter exists and is silent.** `coarseInstanceTicks` is stamped on the context
+  by the sampler, so `inclusiveHits / instanceTicks` is threads-per-execution. It reads **exactly
+  1.0000** today, asserted by the bench in `VerifyCoarse.kt`, and that assertion is the thing to
+  watch: the moment a context crosses a thread it must move, and a missed hand-off shows up as it
+  stubbornly staying at 1.0.
+- `Report.CoarseStat.parallelism` and `.inFlight` are computed and documented; only the column is
+  withheld. `threads inside = in flight x parallelism` is the identity, and the naming is settled —
+  see below.
+
+**Three checks to write before the mechanism:**
+
+1. **Work per execution must not depend on thread count.** `busy/exec` at 1 thread and at N should
+   agree; today Lucene loses 11.8 ms of 14.87. Cheapest sharp test there is —
+   [ideas.md](ideas.md) item 22.
+2. **Parallelism must stop being 1.0** on a fanned-out workload, and the bench's existing assertion
+   must be inverted rather than deleted, so same-thread workloads still pin it at exactly 1.
+3. **A context that outlives its span** — the detection mechanism for the contaminating direction,
+   already named below.
+
+**The bench cannot test this yet.** Its workers each run their own schedule and nothing is ever handed
+between them, so building fork/join in the bench is a prerequisite, not a side quest — and phase 6
+needs the same thing.
+
+**What must not regress:** the four coarse checks passed on all twenty runs of the stability campaign
+*because* they are clock-independent — spans against the same intervals, counts against counts. Keep
+any new check the same shape; anything comparing an absolute duration across runs will be noise on
+this machine.
+
 **Propagation.** Every hand-off needs a hook: executors (wrap the `Runnable`), coroutines
 (`ThreadContextElement`), `CompletableFuture` (through its executor), parallel streams
 (`ForkJoinPool`). Threads created by hand cannot be caught automatically and need an explicit call.
@@ -1090,7 +1137,15 @@ exercises is work crossing threads and suspending, and until propagation exists 
 it to test. It is a bench, not a trial — our code, so it inherits our assumptions, which is exactly
 why it cannot substitute for pointing the tool at somebody else's.
 
-**What this unlocks:** per-operation parallelism becomes real rather than trivially 1.
+**What this unlocks:** per-operation parallelism becomes real rather than trivially 1 — and the
+`waiting` column stops charging a fanned-out request for work its own helper threads were doing.
+
+**What it still will not answer, and the sweep will.** Propagation reports the parallelism you *are*
+getting, at the thread count you happen to be running. It cannot say what a different thread count
+would give, and that is the question anybody tuning a pool is actually asking. Changing the thread
+count and re-running is the counterfactual for parallelism, the sibling of the disable-and-re-run
+idea, and it survives this phase rather than being replaced by it —
+[ideas.md](ideas.md) item 22, which already has its first data point.
 
 ### Two parallelisms, and the identity that relates them · settled before any of it was built
 

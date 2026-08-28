@@ -765,9 +765,9 @@ class Report internal constructor(
         }
         appendLine("-".repeat(WIDTH))
         // ⚠ THE COARSE LEGEND. Also a paragraph in docs/output.md § The coarse table.
-        appendLine("executions, mean and the percentiles are MEASURED, two timestamps per execution — the only")
-        appendLine("  numbers here that are not sampled. Percentiles are exact to 6.25% and rounded upward, so a")
-        appendLine("  printed p99 is never below the truth")
+        appendLine("executions, mean and the percentiles are MEASURED, two timestamps per execution - the only")
+        appendLine("  numbers here that are not sampled. Percentiles round UP to their bucket: at most 12.5%")
+        appendLine("  high and never low, because a latency figure may overstate and must not understate")
         appendLine("busy/exec is thread-time on a CPU per execution, sampled: mean - busy/exec is the WAITING,")
         appendLine("  which is the one thing a fine label can never tell you. waiting is that as a share")
         appendLine("in flight is executions at once out of the threads there were — your load, not your code")

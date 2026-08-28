@@ -24,14 +24,24 @@ measured bound on how wrong the shares can be**. It reaches operations of tens o
 is the regime stack profilers cannot see into, and it has no upper limit — Calcite's labels were
 millisecond-sized and it handled them to within a percentage point of JFR.
 
+**And for operations big enough to afford it — a request, a query, a plan — a second kind of label
+answers what the first cannot:** how long *one execution* took. `coarse(type) { }` timestamps both
+ends, so you get executions, mean, p50/p90/p99 and max **measured rather than sampled**, the fine
+breakdown of what ran underneath it, and `mean − busy/exec` as the time it spent not running. On
+Calcite that reads *of the 9.08 ms a plan takes, `FilterIntoJoinRule` is 25.2%* — a sentence neither
+tier can produce alone.
+
 **It does not answer:**
 
-- **How long did one *execution* take.** There are no per-execution durations and so no percentiles,
-  ever. Sampling gives you a share of time, not a distribution of latencies. An operation that is
-  50 ns normally and 100 µs when it hits a lock reports the average of the two and no execution was
-  ever that.
-- **How long did one *request* take**, or where it went across a thread hand-off. That is the coarse
-  tier, and it is not built. This measures thread-time.
+- **How long did one execution of a *fine* operation take.** No per-execution durations there and so
+  no percentiles, ever: sampling gives a share of time, not a distribution. An operation that is
+  50 ns normally and 100 µs when it hits a lock reports the average and no execution was ever that.
+  Above about a microsecond, a coarse label answers this properly; below it, nothing can.
+- **Where a request went across a thread hand-off.** Propagation is not built. A coarse context stays
+  on the thread that created it, so if your operation fans out to a pool, the work on those threads
+  is *missing from its CPU and shows up as waiting* — measured on Lucene at 24.5% against 0.0% for
+  the same code single-threaded. The report's own documentation says so; read `waiting` as *"the
+  thread holding this context was not running"* until this lands.
 - **What would I save by removing it.** A share is where time went, not what deleting it buys. In
   the Calcite trial an operation holding 46% was worth **275×** when removed, because it was creating
   work for everything else. The report says so at the foot of every run.
@@ -143,6 +153,25 @@ there is a working example to copy. Up to 256 operations, registered by name at 
 
 `Profiler.start()` also takes `strict` (below), `sampleState = false` to switch off the per-sample
 thread-state read, and `stepMillis` — a smaller step is more samples and more sampler CPU.
+
+**For a whole request, query or plan, add a coarse label as well:**
+
+```kotlin
+val request = Profiler.registerCoarse("request")   // a separate id space
+
+coarse(request) {                                  // timestamps both ends
+    handle(input)                                  // your op(...) labels nest inside
+}
+```
+
+That gives you the second table: how long each execution took, with percentiles, and what ran inside
+it. `enterCoarse(id)` / `exitCoarse()` exist for a boundary that is two callbacks rather than a block
+— they have no `finally`, so pair them with `Profiler.expectBalanced()` at a point the thread should
+be quiescent, which for a coarse label means *between* requests and not inside one.
+
+**Do not put one on something small.** A context costs about 40 ns; the rule is
+`d ≥ max(800 ns, 4 µs × share)`, and the report tells you when a label breaks it — exactly, because
+unlike the fine floor it is comparing a duration it measured rather than one it inferred.
 
 Call `Profiler.release()` when a thread exits. There is a safety net — the sampler reclaims the
 slots of threads that have died — but it waits on a garbage collection, and until then a dead
@@ -274,6 +303,8 @@ The rest shape the run:
 | `--sampler=off` | on | the sampling thread, off |
 | `--state=off` | on | the per-sample thread-state read, off |
 | `--oversubscribe` | off | allow more threads than cores. A mode, not an escape hatch: the sampler then reads slots rather than cores, so occupancy over-reads CPU by exactly the oversubscription factor — the one configuration whose duty cycle is predictable from the configuration alone |
+| `--coarse` | off | place the coarse labels too — `checkpoint` containing `maintain`, `rankBatch`, and a variable-sized `request` — and check every span against the interval each worker timed itself. A switch of its own for the same reason as the three above: a context costs tens of nanoseconds where the fine hook costs two |
+| `--coarse=violate` | off | the same, plus a coarse label on `traverse`, which the tier boundary rejects — 905 ns at a 65.2% share needs 2610 ns. The negative control for the floor check, so it is watched firing rather than assumed wired up |
 
 **`--labels`, `--sampler` and `--state` are three switches rather than one, on purpose.** The hook's
 cost, the sampling thread's cost and the state read's cost are different questions, and a thing that

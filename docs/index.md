@@ -11,15 +11,21 @@ is far enough for a 0.x but has no annotations and no agent.
 
 Since the trials: the three small fixes and the pause after them are **done**, and the pause earned
 its place — it caught the new error bound being sound and useless on a thread pool. There is a test
-suite now (48 tests, ~3 s) whose expectations are the numbers in findings.md, two code reviews have
+suite now (63 tests, ~3 s) whose expectations are the numbers in findings.md, two code reviews have
 been through every file, and `D₂` — the one outright defect the design carried — is fixed.
 
-**Phase 4 — the coarse tier — is done**, same-thread. Contexts, measured spans with percentiles, the
-`(fine, coarse)` cross-tabulation, and `mean − busy/exec` as the waiting quantified. Verified against
-a truth that is an identity rather than an estimate: the bench times every one of its own requests
-and the profiler's p50, p90 and p99 agree to +0.00%. **What to do next is
-[plan.md § Phase 5](plan.md#phase-5--crossing-threads--not-started)** — propagation across hand-offs
-and coroutines, which is what makes per-operation parallelism a real number rather than 1.0.
+**Phase 4 — the coarse tier — is done**, same-thread, and checked on all three trials. Contexts,
+measured spans with percentiles, the `(fine, coarse)` cross-tabulation, `mean − busy/exec` as the
+waiting quantified, and a floor check for the tier boundary that is *exact* where the fine one has to
+infer. Verified against truths that are identities rather than estimates: the bench times every one
+of its own requests, the Calcite harness has timed every plan since before this tier existed, and in
+both cases p50, p90 and p99 agree to **+0.00%**.
+
+**What to do next is [plan.md § Phase 5](plan.md#phase-5--crossing-threads--next-and-the-trials-said-why)**,
+which opens with a *"start here"* section written for a session picking this up cold. The short
+version: Lucene fans a search across a pool, so a context stays on the calling thread and the work on
+the others is reported as **waiting** — 0.0% at one thread against 24.5% at eight, same code, same
+label. Propagation fixes that and makes per-operation parallelism a real number rather than 1.0.
 
 **Two things worth knowing before reading anything else**, because they govern the rest:
 
@@ -38,9 +44,9 @@ and coroutines, which is what makes per-operation parallelism a real number rath
 | [plan.md](plan.md) | work we committed to, phase by phase, rewritten as each closes to say what was actually built | you want to know where we are |
 | [findings.md](findings.md) | only things we measured, each with the measurement that produced it | you want to know what is true, and why we believe it |
 | [case.md](case.md) | observations of existing tools failing at something, and where they are better than us | you want to know why this exists at all |
-| [trial-calcite.md](trial-calcite.md) | the fine tier pointed at Apache Calcite — every number from that exercise | you want the first end-to-end result on code we did not write |
-| [trial-lucene.md](trial-lucene.md) | the same, pointed at Apache Lucene — concurrent, and the first head-to-head against a timed-wrapper profiler | you want the second, and the strongest argument for sampling we have |
-| [trial-netty.md](trial-netty.md) | the same pointed at Netty — event loops, and the first test of the thread-state column on foreign code | you want the third, and what a flame graph does with a handler chain |
+| [trial-calcite.md](trial-calcite.md) |  Apache Calcite — the first end-to-end result on foreign code, and where the coarse tier was checked against a stopwatch the harness already had | you want the first end-to-end result on code we did not write |
+| [trial-lucene.md](trial-lucene.md) | the same, Apache Lucene — concurrent, the first head-to-head against a timed-wrapper profiler, and where the coarse tier meets the edge of its own tier | you want the second, and the strongest argument for sampling we have |
+| [trial-netty.md](trial-netty.md) | the same, Netty — event loops, the first test of the thread-state column on foreign code, and the negative control for the coarse tier's waiting column | you want the third, and what a flame graph does with a handler chain |
 | [ideas.md](ideas.md) | things worth doing that we have not committed to | you want to know what was considered and deferred |
 | [../README.md](../README.md) | how to use it and how to run the bench | you want to run something |
 
@@ -62,12 +68,14 @@ and coroutines, which is what makes per-operation parallelism a real number rath
 | **`com/minogin/profiler/`** | **the library — everything a user imports, and nothing else** |
 | `Profiler.kt` | the slot, the registry, `op { }` / `enter` / `exit`, and the constants that bound them |
 | `Sampler.kt` | the sampling thread: the tick loop, the slot walk, the wait strategy |
+| `Coarse.kt` | the coarse tier: the context, the span histogram, and `coarse { }` / `enterCoarse` / `exitCoarse` |
 | `Report.kt` | what a session collected and how it is rendered, including every verdict and threshold |
 | `Duty.kt` | how much of the occupancy was CPU, and the bound that puts on every share |
 | **`com/minogin/profiler/bench/`** | **the harness — never shipped, and now unable to leak into the above** |
 | `Workload.kt`, `Burn.kt`, `Bench.kt` | a workload whose true answer is known |
 | `Main.kt` | the modes, the run, and the bench's own tolerance table |
 | `Verify.kt` | the sampler against the truth, and the observer effect |
+| `VerifyCoarse.kt` | the coarse tier against the truth: counts, spans against the workers own stopwatches, the cross-tabulation, and parallelism |
 | `Print.kt` | every report the bench prints about itself |
 | `StackCost.kt` | what a cross-thread stack walk costs |
 | **`src/test/kotlin/`** | **the arithmetic, checked without starting anything — `./gradlew test`, ~3 s** |
@@ -75,6 +83,7 @@ and coroutines, which is what makes per-operation parallelism a real number rath
 | `FloorCheckTest.kt` | who gets named as below the floor, including both sides of the 0.35 ns boundary |
 | `RegistryTest.kt` | slots, nesting, the balance check, and the one fatal condition in both directions |
 | `ReportTest.kt` | shares, coverage, the long-execution floor, and what the report promises to print |
+| `CoarseTest.kt` | the histogram brackets what it is given, nesting restores the parent, a leaked context is caught, and the tier boundary from the coarse side |
 | `trial-calcite/` | the Calcite trial, in its own module so its dependencies cannot leak into the profiler |
 | `trial-lucene/` | the Lucene trial — the corpus, the wrappers that place the labels, and four instrumentation configurations to compare |
 | `trial-netty/` | the Netty trial — the HTTP pipeline, the load generator, and the three-way A/B |
