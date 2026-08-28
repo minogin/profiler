@@ -176,6 +176,48 @@ class OpSlot(
     @JvmField
     internal var overflows: Long = 0
 
+    /**
+     * The coarse execution this thread is currently inside, or null.
+     *
+     * Where the two tiers meet. The sampler reads this and [current] in the same visit, so every
+     * sample carries the pair *(which physical operation, under which logical one)* — which is the
+     * cross-tabulation, and neither tier can produce it alone.
+     *
+     * Accessed opaquely for the identical reason [current] is: no fence on either side, and the
+     * publication safety comes from [CoarseContext]'s final fields rather than from ordering here.
+     * A stack is not needed beside it — the context chains to its parent, so restoring on exit is
+     * one field write.
+     */
+    @JvmField
+    var context: CoarseContext? = null
+
+    /**
+     * This thread's span statistics, one entry per coarse type, or null if it has entered none.
+     *
+     * Lazily allocated so that a program using only the fine tier pays nothing for this — not the
+     * array, not the histograms. Written by the owning thread alone, read when the report is taken.
+     */
+    @JvmField
+    internal var coarseAgg: Array<CoarseAgg?>? = null
+
+    /**
+     * Records one completed coarse execution of [type] lasting [nanos].
+     *
+     * Not inline, deliberately: it is called from [coarse], which is, and an inline function that
+     * drags a histogram update into every call site would bloat exactly the code the JIT needs to
+     * keep small. The work here is a handful of plain writes with a single writer.
+     */
+    @PublishedApi
+    internal fun recordSpan(type: Int, nanos: Long) {
+        if (type < 0 || type >= MAX_COARSE_TYPES) return
+        val aggs = coarseAgg ?: arrayOfNulls<CoarseAgg>(MAX_COARSE_TYPES).also { coarseAgg = it }
+        val a = aggs[type] ?: CoarseAgg(type).also { aggs[type] = it }
+        a.record(nanos)
+    }
+
+    /** How deeply this thread is nested in coarse executions. Zero when it is inside none. */
+    internal fun coarseDepth(): Int = context?.let { it.depth + 1 } ?: 0
+
     fun countOf(id: Int): Long = counts[id + COUNT_PAD]
 
     internal fun resetCounts() = counts.fill(0L)
@@ -201,6 +243,11 @@ class OpSlot(
          */
         @JvmStatic
         val COUNTS: VarHandle = MethodHandles.arrayElementVarHandle(LongArray::class.java)
+
+        /** The coarse half of the pair. Static final for the same constant-folding reason as [CURRENT]. */
+        @JvmStatic
+        val CONTEXT: VarHandle =
+            MethodHandles.lookup().findVarHandle(OpSlot::class.java, "context", CoarseContext::class.java)
     }
 }
 
@@ -212,6 +259,12 @@ fun OpSlot.getOpaque(): Int = OpSlot.CURRENT.getOpaque(this) as Int
 
 /** How many times this thread has entered [id], read from another thread. See [OpSlot.COUNTS]. */
 fun OpSlot.countOpaque(id: Int): Long = OpSlot.COUNTS.getOpaque(counts, id + OpSlot.COUNT_PAD) as Long
+
+/** The coarse execution this thread is inside, or null. No fence — see [OpSlot.context]. */
+fun OpSlot.contextOpaque(): CoarseContext? = OpSlot.CONTEXT.getOpaque(this) as CoarseContext?
+
+/** Publishes [ctx] as this thread's current coarse execution. See [OpSlot.context]. */
+fun OpSlot.setContextOpaque(ctx: CoarseContext?) = OpSlot.CONTEXT.setOpaque(this, ctx)
 
 /**
  * The slot registry. A thread gets its slot from a ThreadLocal and is added to the walk list on
@@ -327,6 +380,101 @@ object Profiler {
      */
     internal fun registeredCount(): Int = min(nextId.get(), MAX_OPERATIONS)
 
+    private val coarseNames = arrayOfNulls<String>(MAX_COARSE_TYPES)
+    private val coarseIds = ConcurrentHashMap<String, Int>()
+    private val nextCoarseId = AtomicInteger(0)
+
+    /**
+     * Id for a coarse operation, in an id space of its own.
+     *
+     * Separate from [register] rather than sharing one space, because the same name can legitimately
+     * carry both labels: the fine one measures the operation's *self* time, the coarse one its
+     * duration and everything nested under it, and comparing the two is a cross-check worth having.
+     */
+    fun registerCoarse(name: String): Int = coarseIds.computeIfAbsent(name) {
+        val id = nextCoarseId.getAndIncrement()
+        check(id < MAX_COARSE_TYPES) { "more than $MAX_COARSE_TYPES distinct coarse operations registered" }
+        coarseNames[id] = name
+        id
+    }
+
+    fun coarseNameOf(type: Int): String =
+        if (type in 0 until MAX_COARSE_TYPES) coarseNames[type] ?: "coarse#$type" else "coarse#$type"
+
+    /** How many coarse types have been registered. Clamped for the reason [registeredCount] is. */
+    internal fun coarseCount(): Int = min(nextCoarseId.get(), MAX_COARSE_TYPES)
+
+    /**
+     * Span statistics from threads that have already exited, so a pool that recycles does not lose
+     * the executions its retired threads measured.
+     */
+    private val retiredCoarse = arrayOfNulls<CoarseAgg>(MAX_COARSE_TYPES)
+
+    /** Folds one departing thread's span statistics into [retiredCoarse]. */
+    private fun retire(aggs: Array<CoarseAgg?>?) {
+        if (aggs == null) return
+        synchronized(retiredCoarse) {
+            for (t in 0 until MAX_COARSE_TYPES) {
+                val a = aggs[t] ?: continue
+                val into = retiredCoarse[t] ?: CoarseAgg(t).also { retiredCoarse[t] = it }
+                into.mergeFrom(a)
+            }
+        }
+    }
+
+    /**
+     * Every completed coarse execution this session knows about, live threads and retired ones.
+     *
+     * Taken once, when the report is. Allocates and walks every slot, which is why it is not
+     * something the sampler does per tick.
+     */
+    internal fun coarseTotals(): Array<CoarseAgg?> {
+        val out = arrayOfNulls<CoarseAgg>(MAX_COARSE_TYPES)
+        synchronized(retiredCoarse) {
+            for (t in 0 until MAX_COARSE_TYPES) {
+                val a = retiredCoarse[t] ?: continue
+                out[t] = CoarseAgg(t).also { it.mergeFrom(a) }
+            }
+        }
+        forEachSlot { s ->
+            val aggs = s.coarseAgg ?: return@forEachSlot
+            for (t in 0 until MAX_COARSE_TYPES) {
+                val a = aggs[t] ?: continue
+                val into = out[t] ?: CoarseAgg(t).also { out[t] = it }
+                into.mergeFrom(a)
+            }
+        }
+        return out
+    }
+
+    /**
+     * Clears every thread's span statistics, so a report describes one session.
+     *
+     * The fine counters solve this by snapshotting at the start and subtracting — see
+     * `Sampler.callsAtStart` — which a minimum and a histogram cannot be made to do. Resetting is
+     * the honest alternative, and it costs the same thing everywhere else here costs: an execution
+     * that began before [start] and ends inside the session is counted in full. Two instructions
+     * wide, in the direction of reporting a span that is real but started slightly early.
+     *
+     * **Spans recorded with no session running are discarded when the next session starts.** Called
+     * from the sampling thread immediately before its first tick, beside the snapshot of the call
+     * counters and for the identical reason: *no execution is counted whose samples could not have
+     * been taken.* Getting this wrong is not hypothetical — the bench's warm-up runs on its own
+     * worker threads before the measured run, and with the reset in the wrong place every coarse
+     * count came out 11.06% high, which is precisely the warm-up.
+     */
+    internal fun resetCoarse() {
+        synchronized(retiredCoarse) { for (t in 0 until MAX_COARSE_TYPES) retiredCoarse[t] = null }
+        forEachSlot { s -> s.coarseAgg?.forEach { it?.reset() } }
+    }
+
+    /** Threads inside a coarse execution right now, which at the end of a session is a leak. */
+    internal fun openContexts(): Int {
+        var n = 0
+        forEachSlot { if (it.context != null) n++ }
+        return n
+    }
+
     /** The calling thread's slot, registering it on first call. */
     fun slot(): OpSlot = local.get()
 
@@ -372,18 +520,26 @@ object Profiler {
      */
     fun expectBalanced(): Boolean {
         val s = local.get()
-        if (s.depth == 0) return true
-        imbalances.incrementAndGet()
-        // Read before the reset, and defensively: a slot can hold NO_OP with a depth above zero if
-        // the leak was an `exit` without its `enter` rather than the other way round.
+        // Read before anything is reset, and defensively: a slot can hold NO_OP with a depth above
+        // zero if the leak was an `exit` without its `enter` rather than the other way round.
+        val ctx = s.contextOpaque()
         val id = s.getOpaque()
-        val open = if (id >= 0) nameOf(id) else "an unnamed label"
+        val leaked = when {
+            // The coarse half is named first when both leaked, because a coarse context left open
+            // collects a whole request's worth of samples rather than one label's.
+            ctx != null -> coarseNameOf(ctx.type)
+            s.depth > 0 && id >= 0 -> nameOf(id)
+            s.depth > 0 -> "an unnamed label"
+            else -> return true
+        }
+        imbalances.incrementAndGet()
+        s.setContextOpaque(null)
         s.depth = 0
         s.setOpaque(NO_OP)
         // Fatal under strict, and it is the only thing that is. Resetting the slot stops the leak
         // spreading, but it cannot give back the samples already billed to the wrong operation —
         // so continuing means reporting a share that was manufactured by a bug.
-        sampler?.let { if (it.strict) it.fail(leakMessage(open)) }
+        sampler?.let { if (it.strict) it.fail(leakMessage(leaked)) }
         return false
     }
 
@@ -444,6 +600,7 @@ object Profiler {
         synchronized(retiredCounts) {
             for (id in 0 until MAX_OPERATIONS) retiredCounts[id] += s.countOf(id)
         }
+        retire(s.coarseAgg)
         // Removed from the walk list first, so the sampler cannot be reading this slot at the
         // moment its index is handed to somebody else.
         if (s.index >= 0) freeIndexes.add(s.index)
@@ -485,6 +642,7 @@ object Profiler {
             synchronized(retiredCounts) {
                 for (id in 0 until MAX_OPERATIONS) retiredCounts[id] += s.countOf(id)
             }
+            retire(s.coarseAgg)
             freeIndexes.add(i)
             reclaimed.incrementAndGet()
         }
@@ -545,12 +703,35 @@ object Profiler {
         // A label still open when the session ends is a leak by definition: nothing can close it
         // now. Counted here rather than left to the user to notice, because the symptom — one
         // operation quietly accumulating everybody else's samples — looks exactly like a finding.
+        // Taken before the open-context count, so a context still open at the end is visible in
+        // both: its span is missing from the totals precisely because nothing closed it.
+        val totals = coarseTotals()
+        val coarse = (0 until coarseCount()).map { t ->
+            val a = totals[t]
+            CoarseStat(
+                t, coarseNameOf(t),
+                count = a?.count ?: 0L,
+                spanSumNanos = a?.sumNanos ?: 0L,
+                spanMinNanos = if (a == null || a.count == 0L) 0L else a.minNanos,
+                spanMaxNanos = a?.maxNanos ?: 0L,
+                hist = a?.hist ?: LongArray(SpanHistogram.BUCKETS),
+                hits = s.coarseHits[t],
+                runningHits = s.coarseRunningHits[t],
+                inclusiveHits = s.coarseInclusiveHits[t],
+                runningInclusiveHits = s.coarseRunningInclusiveHits[t],
+                instanceTicks = s.coarseInstanceTicks[t],
+                activeTicks = s.coarseActiveTicks[t],
+                fine = LongArray(MAX_OPERATIONS + 1) { s.pairHits[t * (MAX_OPERATIONS + 1) + it] },
+            )
+        }
         return Report(
             stats, s.counters[NO_OP_INDEX], s.ticks, s.span, duration, s.maxSlots, s.duty(), s.failure,
             imbalances = imbalances.get() - imbalancesAtStart, openAtEnd = openSpans(), stateSampled = s.sampleState,
             untrackedSlots = (untrackedSlots() - untrackedAtStart).coerceAtLeast(0),
             reclaimedSlots = (reclaimedSlots() - reclaimedAtStart).coerceAtLeast(0),
             idleWaitingHits = s.idleWaitingHits,
+            coarse = coarse,
+            openContextsAtEnd = openContexts(),
         )
     }
 }

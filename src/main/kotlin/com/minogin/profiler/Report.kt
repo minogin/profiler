@@ -151,6 +151,71 @@ class OperationStat internal constructor(
 }
 
 /**
+ * One coarse operation's line in a [Report].
+ *
+ * The asymmetry with [OperationStat] is the point of the tier. **Span is measured**, exactly, by two
+ * timestamps per execution — it is the only quantity in this whole tool that is not sampled, and it
+ * is the one a fine label can never produce. Everything about *where the time went* is still
+ * sampled, because that is the only way to see inside an execution without pricing it.
+ */
+class CoarseStat internal constructor(
+    val type: Int,
+    val name: String,
+    /** Executions that completed inside the session. Exact. */
+    val count: Long,
+    val spanSumNanos: Long,
+    val spanMinNanos: Long,
+    val spanMaxNanos: Long,
+    internal val hist: LongArray,
+    /** Samples that caught a thread inside this operation and not inside a nested coarse one. */
+    val hits: Long,
+    /** Of those, the ones whose thread was runnable. */
+    val runningHits: Long,
+    /** Samples caught anywhere under this operation, itself included. */
+    val inclusiveHits: Long,
+    /** Of those, the ones whose thread was runnable. `mean span - busy` is the waiting, quantified. */
+    val runningInclusiveHits: Long,
+    /** Distinct executions occupied at each tick, summed over ticks. See [parallelism]. */
+    val instanceTicks: Long,
+    /** Ticks at which at least one thread was anywhere under this operation. */
+    val activeTicks: Long,
+    /** Inclusive samples broken down by the fine operation they caught. Last entry: no fine label. */
+    internal val fine: LongArray,
+) {
+    /** Mean measured duration of one execution. Exact, not sampled. */
+    val meanSpanNanos: Double get() = if (count == 0L) Double.NaN else spanSumNanos.toDouble() / count
+
+    /** A percentile of the measured durations, to within [SpanHistogram.PRECISION]. */
+    fun percentileNanos(p: Double): Double = SpanHistogram.percentile(hist, count, p)
+
+    /** Of the samples caught under this operation, those whose thread was parked or blocked. */
+    val waitingHits: Long get() = inclusiveHits - runningInclusiveHits
+
+    /**
+     * **Threads working on one execution at once** — `work / span`, the work-span model's `T1/T8`.
+     *
+     * This is the number the fine tier structurally cannot produce, and the one that is a property
+     * of the code rather than of the load. It is **1.0 by construction until contexts cross threads**
+     * (phase 5): a context lives on the thread that created it, so every occupied instance is
+     * occupied by exactly one thread. That makes it a known answer to measure against rather than a
+     * useless one — anything but 1.0 here means the instance stamping is broken, and we find that
+     * out while the truth is still known. It is deliberately not printed for the same reason.
+     *
+     * The honest caveat for when it does start moving: what gets measured is
+     * `min(what the code could do, threads actually free)`, so a saturated pool reads it low.
+     */
+    val parallelism: Double
+        get() = if (instanceTicks == 0L) Double.NaN else inclusiveHits.toDouble() / instanceTicks
+
+    /**
+     * Executions of this operation running at once — the same quantity as [OperationStat.inFlight]
+     * and with the same caveat: it tracks the load, not the code.
+     */
+    val inFlight: Double
+        get() = if (activeTicks == 0L) Double.NaN else instanceTicks.toDouble() / activeTicks
+}
+
+/**
  * What a sampling session collected.
  *
  * Shares are over *labelled* samples. Samples that caught a thread outside any operation are
@@ -198,6 +263,13 @@ class Report internal constructor(
      * the walk reading empty and every share is taken over a denominator inflated by dead threads.
      */
     val reclaimedSlots: Int = 0,
+    /** The coarse tier's half of the report, empty when no coarse label was placed. */
+    val coarse: List<CoarseStat> = emptyList(),
+    /**
+     * Coarse executions still open when the session ended, which is a leak by definition — nothing
+     * can close them now, and their spans are missing from [coarse] for exactly that reason.
+     */
+    val openContextsAtEnd: Int = 0,
 ) {
     /** False when a fatal finding stopped the session. See the severity ladder in plan.md. */
     val ok: Boolean get() = failure == null
@@ -545,6 +617,81 @@ class Report internal constructor(
      * The rule: **a line you add here needs a paragraph there, and a line you reword here needs
      * that paragraph reworded.** `output.md` carries the same warning pointing back at this file.
      */
+    /** Thread-time actually on a CPU inside one execution of [c], on average. */
+    fun busyPerExecutionNanos(c: CoarseStat): Double =
+        if (c.count == 0L) Double.NaN else c.runningInclusiveHits * stepNanos / c.count
+
+    /**
+     * The coarse table, or nothing at all when no coarse label was placed.
+     *
+     * Printed after the fine one and not instead of it, because the two answer different halves of
+     * the same question and the report is worth less if a reader has to choose. Fine sampling says
+     * what is hot; a span says how long one execution took. Only the pair says *of the time this
+     * request spent, this much was that operation*.
+     */
+    private fun StringBuilder.renderCoarse() {
+        val seen = coarse.filter { it.count > 0 || it.inclusiveHits > 0 }
+        if (seen.isEmpty()) return
+        appendLine("=".repeat(WIDTH))
+        appendLine(
+            String.format(
+                Locale.ROOT, "%-26s %11s %10s %10s %10s %10s %10s %10s %8s %11s",
+                "coarse operation", "executions", "mean", "p50", "p90", "p99", "max",
+                "busy/exec", "waiting", "in flight"
+            )
+        )
+        appendLine("-".repeat(WIDTH))
+        for (c in seen.sortedByDescending { it.inclusiveHits }) {
+            val waitShare =
+                if (c.inclusiveHits == 0L) 0.0
+                else (c.inclusiveHits - c.runningInclusiveHits).toDouble() / c.inclusiveHits
+            appendLine(
+                String.format(
+                    Locale.ROOT, "%-26s %,11d %10s %10s %10s %10s %10s %10s %7.1f%% %11s",
+                    c.name, c.count,
+                    duration(c.meanSpanNanos), duration(c.percentileNanos(0.50)),
+                    duration(c.percentileNanos(0.90)), duration(c.percentileNanos(0.99)),
+                    duration(c.spanMaxNanos.toDouble()), duration(busyPerExecutionNanos(c)),
+                    waitShare * 100,
+                    if (c.inFlight.isNaN()) "-" else String.format(Locale.ROOT, "%.2f/%d", c.inFlight, threads)
+                )
+            )
+        }
+        appendLine("-".repeat(WIDTH))
+        // The cross-tabulation, which is the reason the pair is recorded at all. One line per type
+        // rather than a matrix: a reader wants "what was this request made of", and twenty columns
+        // of mostly zeroes is not that.
+        for (c in seen.sortedByDescending { it.inclusiveHits }) {
+            if (c.inclusiveHits == 0L) continue
+            val parts = operations
+                .map { it.name to c.fine[it.id] }
+                .plus("unlabelled" to c.fine[NO_OP_INDEX])
+                .filter { it.second > 0 }
+                .sortedByDescending { it.second }
+            if (parts.isEmpty()) continue
+            val shown = parts.take(6).joinToString(", ") {
+                String.format(Locale.ROOT, "%s %.1f%%", it.first, it.second * 100.0 / c.inclusiveHits)
+            }
+            val rest = parts.size - 6
+            appendLine("  ${c.name} was: $shown" + if (rest > 0) ", and $rest more" else "")
+        }
+        appendLine("-".repeat(WIDTH))
+        // ⚠ THE COARSE LEGEND. Also a paragraph in docs/output.md § The coarse table.
+        appendLine("executions, mean and the percentiles are MEASURED, two timestamps per execution — the only")
+        appendLine("  numbers here that are not sampled. Percentiles are exact to 6.25% and rounded upward, so a")
+        appendLine("  printed p99 is never below the truth")
+        appendLine("busy/exec is thread-time on a CPU per execution, sampled: mean - busy/exec is the WAITING,")
+        appendLine("  which is the one thing a fine label can never tell you. waiting is that as a share")
+        appendLine("in flight is executions at once out of the threads there were — your load, not your code")
+        appendLine("the 'was:' lines are the cross-tabulation: which fine operations ran under this one")
+        if (openContextsAtEnd > 0) {
+            appendLine(
+                "! $openContextsAtEnd coarse executions were still open when sampling stopped: their spans are " +
+                        "missing here, and every sample taken inside them was billed to them"
+            )
+        }
+    }
+
     fun render(): String = buildString {
         val achieved = if (ticks > 1) samplingSpanNanos.toDouble() / (ticks - 1) / 1e6 else Double.NaN
         if (failure != null) {
@@ -665,6 +812,7 @@ class Report internal constructor(
                 "implied/call is hits x step / calls; 'over 1 tick' is occupancy inside executions that outlived a tick",
             )
         )
+        renderCoarse()
         appendLine(
             String.format(
                 Locale.ROOT,

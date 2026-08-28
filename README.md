@@ -363,9 +363,17 @@ actually spread out.
 on the error of every share — the `waiting`, `elapsed` and `in-flight` columns are those. And the
 library surface enough to publish: **v0.1.0**, Apache-2.0, on JitPack.
 
-**Still to build:** the coarse tier, propagation across thread boundaries (executors, coroutines,
-futures), the whole-application parallelism coefficient, annotations plus a bytecode agent, and JFR
-as an output format.
+**And the coarse tier is built, same-thread.** `coarse(type) { }` around a logical operation gives
+executions, mean, p50/p90/p99 and max — **measured**, two timestamps per execution, the only numbers
+in the report that are not sampled — plus busy time per execution, so `mean − busy/exec` is the
+waiting quantified, and the breakdown by fine operation underneath it. Verified by a truth that is an
+identity rather than an estimate: the bench times every one of its own requests, and over half a
+million of them the profiler's p50, p90 and p99 agree to **+0.00%**.
+
+**Still to build:** propagation across thread boundaries (executors, coroutines, futures) — which is
+what turns per-operation parallelism from 1.0-by-construction into a real number — the
+whole-application parallelism coefficient, annotations plus a bytecode agent, and JFR as an output
+format.
 
 **Untested, and therefore unclaimed:** coroutines and virtual threads. The design argues the fine
 tier is structurally safe with the first and the registry is now bounded for the second, but no

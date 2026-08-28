@@ -113,6 +113,11 @@ fun main(args: Array<String>) {
     val stepMillis = opt["step"]?.toDouble() ?: 1.0
     val verify = opt["verify"] != null
 
+    // The coarse tier, off by default and a switch of its own. Its cost is an order of magnitude
+    // above the fine hook's, so it must be measurable against its own absence — and leaving it off
+    // by default keeps every figure already in findings.md comparable with a fresh run.
+    val coarseLabels = opt["coarse"] != null
+
 
     // Whether each hit also records the owning thread's state. A switch for the same reason
     // --labels and --sampler are: a cost that is always on can only be priced by argument.
@@ -180,7 +185,7 @@ fun main(args: Array<String>) {
     } else {
         println("threads: $threads, of them working: $activeThreads, run: $seconds s")
     }
-    println("labels:  ${if (labels) "on" else "off"}")
+    println("labels:  ${if (labels) "on" else "off"}${if (coarseLabels) ", coarse tier on" else ""}")
     println("sampler: ${if (sampling) "on, step $stepMillis ms" else "off"}")
     if (sampling && !labels) println("  (sampler with no labels: every sample lands on 'no operation' by design)")
     println("JVM: ${System.getProperty("java.vm.name")} ${System.getProperty("java.version")}, cores: $cores")
@@ -202,6 +207,7 @@ fun main(args: Array<String>) {
     // The cost of a busy-loop iteration is not a constant: it is taken at runtime, and only
     // after a warm-up.
     registerOperations()
+    if (coarseLabels) registerCoarseOperations()
     // After the catalogue, so it takes the id straight after the bench's twenty and none of the
     // truth machinery — which is indexed by operation id up to OP_COUNT — has to know about it.
     // Its truth is not the configured one anyway: it is whatever the workers measured.
@@ -211,7 +217,7 @@ fun main(args: Array<String>) {
     println("\n--- Busy-loop calibration (provisional, before the workload warm-up) ---")
     println("  $provisional")
 
-    val workload = Workload()
+    val workload = Workload(coarseLabels)
     workload.applyCalibration(provisional)
 
     // --- Workload warm-up ------------------------------------------------------------
@@ -333,7 +339,11 @@ fun main(args: Array<String>) {
         // A, B and C side by side is the point of the whole exercise, so it belongs in the
         // ordinary run rather than only inside --verify.
         if (sampler != null) printComparisonDetail(compare(Cell(stepMillis, seconds), outcome, sampler))
-        val good = printVerdict(outcome, warmedUp)
+        // Before printVerdict, so a coarse failure is part of the verdict rather than a note beside
+        // it. Only with both switches on: the coarse numbers need labels to be placed and a sampler
+        // to have read them.
+        val coarseOk = if (coarseLabels && sampler != null && labels) checkCoarse(bench, outcome, sampler, stepMillis) else true
+        val good = printVerdict(outcome, warmedUp) && coarseOk
         bench.stop()
         good
     }
@@ -362,6 +372,11 @@ internal class Outcome(
     val clockDuringRun: DoubleArray,
     /** Calls per operation as counted by the hook itself, for cross-checking the graph expansion. */
     val hookCalls: LongArray,
+    /** Garbage collections during the measured run, and the time they took. See checkCoarse. */
+    val gcCollections: Long = 0,
+    val gcMillis: Long = 0,
+    /** Span statistics as they stood when the sampler stopped, before the batch measurement. */
+    val coarseTotals: Array<CoarseAgg?> = arrayOfNulls(MAX_COARSE_TYPES),
 ) {
     val throughput: Double get() = rootCalls / (runNanos / 1e9)
     val ok: Boolean
@@ -380,6 +395,10 @@ internal fun measureOnce(bench: Bench, seconds: Int, sampler: Sampler?): Outcome
     // Probing before or after would measure an idle machine, which is not the clock the run got —
     // and the gap between the fit's clock and the run's clock is the whole question.
     val durationNanos = seconds * 1_000_000_000L
+    // Across the measured run only. The coarse tier allocates a context per execution and never
+    // recycles one, so how much garbage that is and what it costs has to be a number rather than an
+    // assurance — see checkCoarse, and findings.md.
+    val gcBefore = gcTotals()
     val startedAt = bench.runStart(durationNanos)
     val clockDuringRun = DoubleArray(RUN_CLOCK_PROBES)
     for (i in 0 until RUN_CLOCK_PROBES) {
@@ -388,6 +407,7 @@ internal fun measureOnce(bench: Bench, seconds: Int, sampler: Sampler?): Outcome
         clockDuringRun[i] = clockNow()
     }
     val runNanos = bench.runAwait(startedAt)
+    val gcAfter = gcTotals()
     sampler?.shutdown()
 
     val active = bench.workers.filter { it.active }
@@ -396,6 +416,10 @@ internal fun measureOnce(bench: Bench, seconds: Int, sampler: Sampler?): Outcome
     // times to time the labelled path, and every one of those calls increments the same counters.
     // Reading afterwards counted the measurement as if it were the workload.
     val hookCalls = LongArray(OP_COUNT) { id -> active.sumOf { it.slot.countOf(id) } }
+    // And the coarse aggregates for the same reason and more urgently: the batch measurement calls
+    // execLabeled tens of thousands of times, so with the coarse tier on it records tens of
+    // thousands of spans that belong to no request and are outside the sampled window entirely.
+    val coarseTotals = Profiler.coarseTotals()
 
     bench.measure()
     val measuredIncl = DoubleArray(OP_COUNT) { id -> active.map { it.measuredInclusive[id] }.average() }
@@ -455,6 +479,9 @@ internal fun measureOnce(bench: Bench, seconds: Int, sampler: Sampler?): Outcome
         worstScatter = worstScatter,
         clockDuringRun = clockDuringRun,
         hookCalls = hookCalls,
+        coarseTotals = coarseTotals,
+        gcCollections = gcAfter.first - gcBefore.first,
+        gcMillis = gcAfter.second - gcBefore.second,
     )
 }
 
@@ -612,6 +639,13 @@ private fun runApiDemo(threads: Int, seconds: Int) {
     // worker leaks it on purpose, every thousandth pass, to show what the balance check is for.
     val flush = Profiler.register("flushBatch")
 
+    // 2b. A coarse label, in an id space of its own. It goes around a *batch* of passes and not
+    // around one, and that is the tier boundary doing its job rather than an arbitrary choice: one
+    // pass here is about 700 ns, and a context costs tens of nanoseconds to allocate and stamp. The
+    // rule is d >= max(800 ns, 4 us x share), so a single pass cannot carry one. A batch can, and
+    // then the report can say how long a request took, which no fine label ever can.
+    val request = Profiler.registerCoarse("request")
+
     val deadline = System.nanoTime() + seconds * 1_000_000_000L
     val workers = List(threads) { n ->
         Thread {
@@ -619,21 +653,32 @@ private fun runApiDemo(threads: Int, seconds: Int) {
             var pass = 0L
             try {
                 while (System.nanoTime() < deadline) {
-                    // 3. Wrap the work. Nesting is fine; the innermost label wins.
-                    s = op(parse) { burn(s, work[0]) }
-                    s = op(validate) { burn(s, work[1]) }
-                    s = op(index) { burn(s, work[2]) }
+                    // 3. One request. The batch size varies from pass to pass so that p50, p90 and
+                    // p99 are three different numbers rather than three copies of one — a
+                    // percentile over a distribution with no spread describes nothing.
+                    val batch = 64 + ((pass.toInt() * 37) and 255)
+                    coarse(request) {
+                        repeat(batch) {
+                            // 3a. Wrap the work. Nesting is fine; the innermost label wins.
+                            s = op(parse) { burn(s, work[0]) }
+                            s = op(validate) { burn(s, work[1]) }
+                            s = op(index) { burn(s, work[2]) }
 
-                    // 3b. The non-lexical form, for a boundary that is not a block — a listener, a
-                    // before/after callback, a span across several methods. It has no `finally`,
-                    // which is the whole risk: thread 0 here "throws" every thousandth pass and
-                    // never calls exit, exactly as a Calcite rule that throws would.
-                    Profiler.enter(flush)
-                    s = burn(s, work[1])
-                    val leak = n == 0 && (++pass % 1000L) == 0L
-                    if (!leak) Profiler.exit()
+                            // 3b. The non-lexical form, for a boundary that is not a block — a
+                            // listener, a before/after callback, a span across several methods. It
+                            // has no `finally`, which is the whole risk: thread 0 here "throws"
+                            // every thousandth pass and never calls exit, exactly as a Calcite rule
+                            // that throws would.
+                            Profiler.enter(flush)
+                            s = burn(s, work[1])
+                            val leak = n == 0 && (++pass % 1000L) == 0L
+                            if (!leak) Profiler.exit()
+                        }
+                    }
 
-                    // 3c. And the check, at a point this thread is known to be quiescent.
+                    // 3c. And the check, at a point this thread is known to be quiescent — which
+                    // now means *between* requests. Inside one, the coarse context is legitimately
+                    // open and the check would report every request as a leak.
                     Profiler.expectBalanced()
                 }
             } finally {

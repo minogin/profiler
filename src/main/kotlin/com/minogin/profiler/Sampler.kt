@@ -155,6 +155,54 @@ internal class Sampler(
      */
     private val seenAt = LongArray(MAX_OPERATIONS) { -1L }
 
+    /** Samples that caught a thread inside an execution of this coarse type, innermost only. */
+    internal val coarseHits = LongArray(MAX_COARSE_TYPES)
+
+    /** Of those, the ones whose thread was runnable. `hits - running` is the waiting, sampled. */
+    internal val coarseRunningHits = LongArray(MAX_COARSE_TYPES)
+
+    /**
+     * Samples caught anywhere **under** this coarse type, itself included.
+     *
+     * The self/inclusive distinction the fine tier never needed: a fine operation is atomic, so its
+     * self time is its inclusive time, while a coarse operation exists precisely to contain others.
+     * Counted by walking the parent chain, deduplicated by type so that a type nested inside itself
+     * is credited once for a sample rather than once per level.
+     */
+    internal val coarseInclusiveHits = LongArray(MAX_COARSE_TYPES)
+
+    /** Of [coarseInclusiveHits], the ones whose thread was runnable. `span - this` is the waiting. */
+    internal val coarseRunningInclusiveHits = LongArray(MAX_COARSE_TYPES)
+
+    /**
+     * Distinct executions of this type occupied at each tick, summed over ticks.
+     *
+     * The denominator of the second factor. `inclusiveHits / instanceTicks` is threads per
+     * execution — **parallelism** — and `inclusiveHits / activeTicks` is threads per tick, so the
+     * two divided give executions in flight. Counted by stamping the context object rather than a
+     * table, because the thing being counted is an instance and only the instance can identify
+     * itself; three threads inside one execution stamp it once.
+     */
+    internal val coarseInstanceTicks = LongArray(MAX_COARSE_TYPES)
+
+    /** Ticks at which at least one thread was anywhere under this coarse type. */
+    internal val coarseActiveTicks = LongArray(MAX_COARSE_TYPES)
+
+    /** As [seenAt], for coarse types, so [coarseActiveTicks] counts ticks and not slots. */
+    private val coarseSeenAt = LongArray(MAX_COARSE_TYPES) { -1L }
+
+    /**
+     * The cross-tabulation: `[coarse type][fine operation]`, the last column being *no fine label*.
+     *
+     * Every sample records the pair, which is the one thing neither tier can produce alone — fine
+     * sampling says what is hot but not what it was for, coarse spans say where the time went but
+     * not why. 131 KB, flat and indexed rather than nested so the tick loop does one bounds check.
+     */
+    internal val pairHits = LongArray(MAX_COARSE_TYPES * (MAX_OPERATIONS + 1))
+
+    /** Types already credited while walking one parent chain. Reused; never escapes the tick loop. */
+    private val chain = IntArray(MAX_COARSE_DEPTH)
+
     /**
      * Per thread, every sample taken at its slot and those of them that were inside some operation.
      *
@@ -301,6 +349,53 @@ internal class Sampler(
                     idleWaitingHits++
                 }
 
+                // The coarse half of the same photograph. One reference read, and it costs nothing
+                // at all when nobody has placed a coarse label: the field is null and the branch is
+                // perfectly predicted.
+                val ctx = s.contextOpaque()
+                if (ctx != null) {
+                    val t = ctx.type
+                    coarseHits[t]++
+                    if (!waiting) coarseRunningHits[t]++
+                    val fine = if (c < 0) NO_OP_INDEX else c
+                    // Everything else is credited up the chain, each type at most once per sample.
+                    // Inclusive and not self, because the question a coarse label is asked is *what
+                    // was this request made of* — and an answer scoped to the operation's own frame
+                    // would leave out everything it delegated, which is most of it.
+                    var p: CoarseContext? = ctx
+                    var d = 0
+                    var n = 0
+                    while (p != null && d < MAX_COARSE_DEPTH) {
+                        val pt = p.type
+                        var seen = false
+                        var j = 0
+                        while (j < n) {
+                            if (chain[j] == pt) { seen = true; break }
+                            j++
+                        }
+                        if (!seen) {
+                            chain[n++] = pt
+                            coarseInclusiveHits[pt]++
+                            if (!waiting) coarseRunningInclusiveHits[pt]++
+                            // The pair, and the whole reason both halves are read in one visit.
+                            pairHits[pt * (MAX_OPERATIONS + 1) + fine]++
+                            if (coarseSeenAt[pt] != ticks) {
+                                coarseSeenAt[pt] = ticks
+                                coarseActiveTicks[pt]++
+                            }
+                            // Stamped on the instance, so an execution occupied by four threads at
+                            // one tick counts once here and four times in the hits above. That
+                            // ratio is the parallelism.
+                            if (p.tickStamp != ticks) {
+                                p.tickStamp = ticks
+                                coarseInstanceTicks[pt]++
+                            }
+                        }
+                        p = p.parent
+                        d++
+                    }
+                }
+
                 val idx = s.index
                 if (idx < 0) continue           // cannot happen: only indexed slots are in the walk
                 // A recycled index starts clean. See [prevThreadId].
@@ -423,6 +518,24 @@ internal class Sampler(
                 while (running && deadline - System.nanoTime() > 0) onSpinWait()
             }
         }
+    }
+
+    /**
+     * Clears the span statistics **on the caller's thread**, then starts sampling.
+     *
+     * Synchronously, and that is the whole point. Doing it inside `run()` puts it on the sampling
+     * thread, which is racing the caller: the caller goes on to release the workers while this
+     * thread is still starting, so the first few milliseconds of spans get recorded and then wiped.
+     * Measured, that lost 0.21% of every coarse count — small, systematic, and in the direction that
+     * makes an execution count look *lower* than the call graph says, which reads exactly like a
+     * dropped span.
+     *
+     * The fine tier's `callsAtStart` snapshot is left where it is: it has the same shape of race and
+     * it subtracts rather than resets, so a call counted on both sides of the boundary cancels.
+     */
+    override fun start() {
+        Profiler.resetCoarse()
+        super.start()
     }
 
     internal fun shutdown() {

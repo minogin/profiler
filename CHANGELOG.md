@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+### The coarse tier
+
+The half the fine tier could not reach: **how long did one execution take.** A `coarse(type) { }`
+label allocates a context per execution, timestamps both ends, and publishes it into the slot beside
+the fine operation id — so every sample records the pair, and the report can say *of the time under
+`request`, this much was `validateRecord`*. `enterCoarse`/`exitCoarse` for a boundary that is two
+callbacks; `Profiler.registerCoarse` for the ids; `Profiler.expectBalanced()` now checks the coarse
+half first, because a leaked context collects a whole request's samples where a leaked label collects
+one operation's.
+
+Per type: executions, mean, min, max and p50/p90/p99 — **measured, not sampled**, the only numbers in
+the report that are — plus busy time per execution, so that `mean − busy/exec` **is** the waiting,
+and the breakdown by fine operation. Percentiles come from a 320-bucket log histogram, 2.5 KB per
+type per thread and allocated lazily, so a program using only the fine tier pays nothing for any of
+it. A percentile is reported at the top of its bucket: at most 12.5% high, never low.
+
+**Verified against a truth that is an identity rather than an estimate.** A span is something the
+bench can measure for itself, so each worker times every one of its own requests with the same two
+clock readings the profiler takes. Over 531,049 requests the counts agree exactly and p50, p90 and
+p99 agree to **+0.00%**; execution counts agree with the call graph to **+0**; parallelism reads
+**exactly 1.0000**, which is the answer it must give until a context can cross a thread.
+
+**Not built, deliberately:** cross-thread propagation and coroutines — that is the next phase, and
+keeping it separate means a propagation bug can never be mistaken for a tier bug. There is no
+parallelism column for the same reason: it would be a column of ones. It is measured all the same,
+because a known answer is what an instrument gets calibrated against.
+
+**One open item, recorded rather than explained away:** running the bench with `--coarse` makes the
+bench's *own* two-truths self-check fail more often, on a different operation each time, and the
+cause is not established — garbage was the first hypothesis and the collection counters refute it.
+The coarse tier's own checks pass on every run, including the failing ones. See
+[docs/findings.md](docs/findings.md#the-coarse-tier).
+
 **Breaking, and deliberately made before the second number exists.** The `threads` column is now
 `in flight`, printed over the threads there were as `3.28/8`, and `OperationStat.concurrency` is now
 `OperationStat.inFlight`.

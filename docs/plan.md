@@ -21,8 +21,8 @@ words, is [tldr.md](tldr.md).
 | — | Trial 2 — Lucene: concurrent, and identity by instance rather than by class | **done** |
 | — | Trial 3 — Netty: few event loops, many tasks, time that is mostly not CPU | **done** |
 | — | Trials 4+ — a compiler, two negative controls | after Netty |
-| 4 | The coarse tier — contexts, spans, cross-tabulation | after the trials |
-| 5 | Crossing threads — propagation, and per-operation parallelism | not started |
+| 4 | The coarse tier — contexts, spans, cross-tabulation | **done** |
+| 5 | Crossing threads — propagation, and per-operation parallelism | next |
 | 6 | Thread state and the whole-application parallelism coefficient | **partly done** |
 | 7 | Library surface — annotations, agent, results API | **v0.1.0 released**; annotations and the agent not started |
 | 8 | JFR output | not started |
@@ -940,77 +940,95 @@ under `strict`, folded empty operations, and the counts column. Still never met 
 `op(id, times = n)`, the balance check on a workload that actually throws, and anything at all above
 the fine tier.
 
-## Phase 4 — the coarse tier · after the trials
+## Phase 4 — the coarse tier · **done**
 
-Contexts, spans, and the cross-tabulation. Same-thread to begin with — crossing threads is phase 5,
-and the two are worth separating so that propagation bugs cannot be confused with tier bugs.
+Contexts, spans and the cross-tabulation, same-thread. Crossing threads is phase 5, and the two were
+kept apart so that a propagation bug could never be confused with a tier bug.
 
-**The context object.** Allocated on entry to a coarse operation, holding a type id, a reference to
-its parent context, a start timestamp, and one counter the sampler increments. Every identity field
-is `val`: final fields carry a freeze at the end of construction, which is what makes the reference
-safe to publish into the slot and read from the sampling thread without a lock or a fence.
+**What is built.** A `CoarseContext` per execution — type id, parent, start timestamp — published
+into the slot beside the fine id and read from the sampling thread with no lock and no fence, which
+is safe for exactly one reason: every identity field is `val`, so the end of the constructor carries
+a freeze. Contexts are **never recycled**; reuse would break that freeze and let the sampler credit a
+sample to a context that had since become a different execution. Nesting is the parent chain, so
+`exitCoarse` is one field write and no stack is needed. Aggregation is per type — fifty types is
+bounded, fifty thousand executions is not — and each thread keeps its own span statistics, folded
+together when the report is taken and into the retired totals when the thread goes.
 
-Coarse operations nest, so the parent reference is a stack — but of few, long-lived objects, so a
-linked reference costs nothing.
-
-**Contexts are never recycled.** Reuse breaks the final-field guarantee and would let the sampler
-attribute samples to a context that has since become something else. Silent misattribution, which
-is the failure mode this whole design keeps having to guard against.
-
-**Aggregation is per type, not per instance.** Fifty types is bounded; fifty thousand executions is
-not. Instances are absorbed into their type's statistics and forgotten.
+`coarse(type) { }` is the form to reach for; `enterCoarse`/`exitCoarse` exists for the boundary that
+is two callbacks, carries the same no-`finally` hazard `enter` does, and is now covered by
+`expectBalanced` — which checks the coarse half **first**, because a leaked context collects a whole
+request's samples where a leaked label collects one operation's.
 
 **What comes out, per coarse type:**
 
-| quantity | statistics | basis |
-|---|---|---|
-| span | count, avg, min, max, p50/p90/p99 | measured exactly, two timestamps |
-| total CPU | sum | sampled |
-| breakdown by fine operation | shares | sampled, from the `(fine, coarse)` pair |
-| parallelism | avg, p50/p90/p99 | sampled — see the caveat |
+| quantity | basis |
+|---|---|
+| executions, mean, min, max, p50/p90/p99 | **measured** — two timestamps per execution, the only unsampled numbers in the report |
+| busy/exec | sampled, running samples only, so `mean − busy/exec` **is** the waiting |
+| breakdown by fine operation | sampled, from the `(fine, coarse)` pair, credited inclusively |
+| in flight | sampled, and printed over the thread count for the reason the fine column is |
 
-Percentiles come from a logarithmic-bucket histogram: fixed memory, roughly 1.6 KB per type, any
-percentile to a known precision. About forty lines, since we take no third-party dependencies. p99 is included
-because it costs nothing extra and the tail is usually where the interesting behaviour is.
+Percentiles come from a 320-bucket log histogram, 2.5 KB per type per thread, allocated lazily so a
+fine-tier-only program pays nothing. Forty lines rather than a dependency.
 
-**The caveat that must reach the output.** A coarse operation's duration is measured; its CPU is
-*sampled*. An 8 ms instance with four threads busy at a 1 ms tick collects around 32 samples and is
-usable; a 100 µs instance collects zero or one and is noise. So per-instance CPU and parallelism
-statistics are computed only above a sample threshold, and **the report has to say how many
-instances were excluded** — otherwise it quietly describes a biased subset.
+**The unsettled question is settled, and phase 6 settled it.** The old text here said the CPU column
+would really be *occupancy*, so `span − CPU` would come out near zero and the report would say "no
+waiting here" in exactly the case where it is all waiting — the one answer that was wanted,
+inverted. That is no longer a risk: the sampler already reads thread state per slot, so the walk
+credits `runningInclusiveHits` separately and `busy/exec` is running samples only. The mechanism
+cost nothing to add because the photograph was already being taken.
 
-**Unsettled, and it has to be settled before the CPU column means anything: what is a sample worth
-when the thread is not running?** The sampler counts a slot as being inside its operation whether
-the thread is on a CPU, blocked on I/O, parked on a lock, descheduled by the OS, or — for a virtual
-thread — unmounted entirely. What it measures is **occupancy**: how many threads are inside this
-operation. Not CPU.
+**The caveat that was going to need a sample threshold did not survive contact with the design.**
+Per-instance CPU and parallelism are not reported, so there is no biased subset to warn about. What
+is reported per type is exact (the spans) or aggregated over the whole session (the sampled columns),
+and neither needs a per-instance sample count.
 
-Occupancy is a real measurement, not a broken one. Waiting is slow, and a report that ignored
-waiting would be answering the wrong question. Two different questions are in play and both are
-legitimate:
+**Parallelism is measured and not printed.** `inclusiveHits / instanceTicks` — threads per execution,
+which is `work / span` in the work-span sense. It is **1.0 by construction** until a context can
+cross a thread, so a column of ones would be noise; but the counter is built, and the bench asserts
+it reads *exactly* 1.0000. That is the point of building it now: a known answer to calibrate the
+instrument against, while the answer is still known. In phase 5 the same counter starts saying
+something, and a missed hand-off has a signature it cannot hide.
 
-- *Why does this take 200 ms?* — waiting counts in full.
-- *Why is the machine saturated, and why does more parallelism not help?* — waiting costs nothing.
+### Bench work, and what it caught
 
-**What must not happen is mixing them, and the reason is additivity.** CPU time adds up across
-threads: ten thousand threads burning 1 ms each is ten seconds of core time, a real quantity you
-can act on. Wall-clock waiting does not add up: ten thousand threads waiting 200 ms each is 200 ms,
-because they wait simultaneously. Summed occupancy is therefore not a quantity at all — it is
-neither latency nor CPU. Sample ten thousand threads parked in one operation at a 1 ms step and
-after 200 ms you have two million samples, which reads as 2,000 seconds of a 200 ms wait that used
-no CPU.
+`--coarse`, a switch of its own so the tier's cost is measurable against its own absence and every
+figure already in findings.md stays comparable. Promoted against the boundary rather than by taste:
+`checkpoint` (4710 ns) containing `maintain` (2560 ns), and `rankBatch` (1140 ns). `traverse` is the
+**negative control** — 905 ns at a 65.2% share needs 2610 ns to qualify, so it stays fine-only and is
+the standing illustration of why the fine tier exists. Plus `request`, a variable batch of 1–16
+chunks, because percentiles over a distribution with no spread describe nothing.
 
-The design above is right about where waiting belongs: **span** measures it exactly, and
-**span − CPU** *is* the waiting, quantified. The defect is only that the CPU column as built would
-be occupancy, so `span − CPU` would come out near zero and the report would say "no waiting here"
-in exactly the case where it is all waiting. The one answer that was wanted, inverted.
+The truth is stronger here than anywhere else in this project, and for a structural reason: **a span
+is a quantity the bench can measure for itself.** A share had to be reconstructed from configuration
+because nothing can time a 20 ns operation without destroying it; a request lasts hundreds of
+microseconds, so each worker times every one of its own with the same two clock readings the profiler
+uses, and the check is an identity rather than an estimate.
 
-Either the sampler learns to distinguish a running thread from a parked one, or the column is
-renamed to what it actually measures and a separate mechanism supplies CPU. This is the same
-problem as the coroutine one in a different costume — the slot is attached to a thread, and the
-thing being measured is not a thread. See [ideas.md](ideas.md) items 8 and 9.
+Four assertions, and three of them found real defects on the way:
 
-**Bench work:** some operations promoted to coarse, so there is something to cross-tabulate.
+| check | result |
+|---|---|
+| execution counts against the call graph | **exact, +0** on all three types |
+| spans against the workers' own stopwatches | count exact; mean −0.01%; p50/p90/p99 **+0.00%** |
+| breakdown against `subtree × measured self` | worst 1.72 pp against a 3.0 pp budget |
+| parallelism | **exactly 1.0000** on all four types |
+
+- **Counts came out 11.06% high**, identically on every type. That is the bench's warm-up, whose
+  worker threads run before the measured run: the session reset was in the wrong place. The fine
+  tier's `callsAtStart` snapshot had already found this exact failure once, in a different costume.
+- **Then 0.21% low**, again identically. The reset had moved to the sampling thread, which races the
+  caller: the workers were released while the sampler was still starting, so the first milliseconds
+  of spans were recorded and then wiped. It resets on the caller's thread now, synchronously.
+- **A p50 reading +7.70% high was the histogram behaving exactly as specified**, and it briefly
+  looked like a defect. Reporting at the top of a bucket costs `9/8 − 1` = 12.5%, not the 6.25% a
+  half-width suggests, and the true p50 had landed at the very bottom of its bucket. The
+  documentation was wrong, not the code. The check now runs the workers' spans through the same
+  histogram, so it measures whether the profiler recorded *the same intervals* rather than measuring
+  the quantiser — and the answer is that it does, to the last bucket.
+- **`max` is reported and never gated.** A maximum is one observation, the worker's stopwatch
+  brackets the profiler's, and one Windows scheduling quantum between the two clock readings lands
+  entirely on it — measured once at −16.93%, which is one descheduled thread and not a defect.
 
 ## Phase 5 — crossing threads · not started
 

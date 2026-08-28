@@ -181,3 +181,20 @@ private fun repsForIters(iters: Int): Int {
     val estNanos = 1.5 * iters + 5.0
     return max(200.0, 2_000_000.0 / estNanos).toInt()
 }
+
+/**
+ * Total garbage collections and the time they took, across every collector the JVM has.
+ *
+ * For pricing the coarse tier, which allocates a context per execution and never recycles one. The
+ * boundary rule prices that context's ~40 ns of CPU and says nothing about its garbage, and on this
+ * bench the garbage is what shows up first. See checkCoarse.
+ */
+internal fun gcTotals(): Pair<Long, Long> {
+    var count = 0L
+    var millis = 0L
+    for (b in java.lang.management.ManagementFactory.getGarbageCollectorMXBeans()) {
+        if (b.collectionCount > 0) count += b.collectionCount
+        if (b.collectionTime > 0) millis += b.collectionTime
+    }
+    return count to millis
+}

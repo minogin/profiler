@@ -29,6 +29,15 @@ private const val CLOCK_CHUNK = 256
 private const val STALL_GAP_NANOS = 500_000L
 
 /**
+ * How many request spans a worker keeps, for the comparison against what the profiler measured.
+ *
+ * About four times what a sixty-second run produces at the mean request length. Beyond it the
+ * worker counts the overflow rather than wrapping, because a percentile taken over the first
+ * half of a run is a percentile of a biased sample and the verdict has to say so.
+ */
+const val MAX_RECORDED_REQUESTS = 400_000
+
+/**
  * The one thing in this bench that genuinely blocks.
  *
  * Everything else spins on arithmetic and never waits for anything, which is what made the whole
@@ -106,6 +115,22 @@ class Worker(
     var lockAcquisitions: Long = 0; private set
     var maxLockWaitNanos: Long = 0; private set
 
+    /**
+     * Every request this worker ran, timed by the worker itself.
+     *
+     * The truth the coarse tier is checked against, and it is a *direct* one — unlike a share, a
+     * span is something the bench can measure for itself with the same two `nanoTime` calls the
+     * profiler uses. So the check is not "does the distribution look plausible" but "does the
+     * profiler's p90 match the p90 of the very same intervals".
+     *
+     * Sized for about four times the requests a sixty-second run produces. Overflow is counted
+     * rather than wrapped, because a comparison against the first half of a run is a comparison
+     * against a biased sample and the verdict has to know.
+     */
+    val requestSpans = if (w.coarseLabels) LongArray(MAX_RECORDED_REQUESTS) else LongArray(0)
+    var requestCount: Int = 0; private set
+    var requestsDropped: Long = 0; private set
+
     /** Hook analysis: the hook timed alone, and leaf operations timed with and without it. */
     var hookDirect: Double = Double.NaN
         private set
@@ -131,6 +156,8 @@ class Worker(
         lockHeldNanos = 0
         lockAcquisitions = 0
         maxLockWaitNanos = 0
+        requestCount = 0
+        requestsDropped = 0
     }
 
     override fun run() {
@@ -181,34 +208,61 @@ class Worker(
         // first attempt, which would make the first interval unrepresentative of the rest.
         var nextLock = if (contended == null) Long.MAX_VALUE
         else started + contended.intervalNanos * (id + 1) / 8
+        // A request is a variable number of chunks, so the coarse spans have a real distribution for
+        // the percentiles to describe rather than one repeated number. With coarse labels off this
+        // is one chunk per pass and the loop is exactly what it always was.
+        val reqType = if (w.coarseLabels && lbl) requestType else -1
+        var reqIdx = id * 7
         while (true) {
-            var k = 0
-            while (k < CLOCK_CHUNK) {
-                val op = sch[i and mask]
-                i++
-                s = if (lbl) w.execLabeled(op, s) else w.exec(op, s)
-                counts[op]++
-                k++
+            val chunks = if (reqType < 0) 1 else REQUEST_CHUNKS[reqIdx++ and (REQUEST_CHUNKS.size - 1)]
+            val reqStart = if (reqType < 0) 0L else System.nanoTime()
+            // enter/exit rather than the block form, deliberately. It is the shape third-party code
+            // forces on you — two callbacks, no finally — so the bench exercises the dangerous form
+            // under its own balance check instead of only the safe one.
+            if (reqType >= 0) enterCoarse(reqType)
+            var done = false
+            var c = 0
+            while (c < chunks) {
+                var k = 0
+                while (k < CLOCK_CHUNK) {
+                    val op = sch[i and mask]
+                    i++
+                    s = if (lbl) w.execLabeled(op, s) else w.exec(op, s)
+                    counts[op]++
+                    k++
+                }
+                var now = System.nanoTime()
+                val gap = now - last
+                if (gap < shortest) shortest = gap
+                if (gap > STALL_GAP_NANOS) {
+                    stalled += gap
+                    events++
+                    if (gap > worst) worst = gap
+                }
+                if (now >= nextLock) {
+                    s = takeLock(s)
+                    now = System.nanoTime()
+                    nextLock = now + contended!!.intervalNanos
+                    // The lock does not count towards the stall detector: it is the one wait in this
+                    // bench that is *supposed* to happen, and mixing it into the preemption figure
+                    // would destroy the very comparison it exists to make possible. The clock reading
+                    // restarts from here for the same reason.
+                }
+                last = now
+                if (now >= d) {
+                    done = true
+                    break
+                }
+                c++
             }
-            var now = System.nanoTime()
-            val gap = now - last
-            if (gap < shortest) shortest = gap
-            if (gap > STALL_GAP_NANOS) {
-                stalled += gap
-                events++
-                if (gap > worst) worst = gap
+            if (reqType >= 0) {
+                exitCoarse()
+                // Timed outside the label, so this interval contains everything the profiler's span
+                // contains and the two are measuring the same thing. The last request of the run is
+                // recorded like any other: it was cut short by the deadline, and so was the span.
+                recordRequest(System.nanoTime() - reqStart)
             }
-            if (now >= nextLock) {
-                s = takeLock(s)
-                now = System.nanoTime()
-                nextLock = now + contended!!.intervalNanos
-                // The lock does not count towards the stall detector: it is the one wait in this
-                // bench that is *supposed* to happen, and mixing it into the preemption figure
-                // would destroy the very comparison it exists to make possible. The clock reading
-                // restarts from here for the same reason.
-            }
-            last = now
-            if (now >= d) break
+            if (done) break
         }
         // Each counted gap includes the chunk of work that ran inside it. Subtracting the fastest
         // chunk the thread managed all run takes the work back out and leaves the stall itself.
@@ -219,6 +273,10 @@ class Worker(
         state = s
         idx = i
         Sink.consume(s)
+    }
+
+    private fun recordRequest(nanos: Long) {
+        if (requestCount < requestSpans.size) requestSpans[requestCount++] = nanos else requestsDropped++
     }
 
     /**

@@ -69,6 +69,55 @@ val ROOT_WEIGHTS = IntArray(OP_COUNT).also {
 const val SCHEDULE_SIZE = 4096
 
 /**
+ * The bench operations promoted to the coarse tier, checked against the boundary rather than picked.
+ *
+ * The rule in [profiler.md](../../../../../../../docs/profiler.md) is `d >= max(800 ns, 4 us x share)`,
+ * which comes from what the instrumentation costs per execution and not from any opinion about size.
+ * Against this catalogue:
+ *
+ * | operation | inclusive | share | threshold | |
+ * |---|---|---|---|---|
+ * | `checkpoint` | 4710 ns | 3.0% | 800 ns | in — and it contains `maintain`, so nesting is exercised |
+ * | `maintain` | 2560 ns | 6.6% | 800 ns | in — 24 root calls and 8 nested per pass |
+ * | `rankBatch` | 1140 ns | 16.4% | 656 ns | in — the frequent one |
+ * | `traverse` | 905 ns | 65.2% | **2610 ns** | **out**, and deliberately so |
+ *
+ * `traverse` is the negative control and the reason the fine tier exists: it is long enough to look
+ * promotable and holds so much of the run that a ~40 ns context per execution would cost more than
+ * the whole coarse tier is allowed to. It keeps its fine label and nothing else.
+ */
+val COARSE_OPS = intArrayOf(15, 16, 17)
+
+/** Coarse type per operation id, or -1. Filled by [registerCoarseOperations]. */
+val coarseTypeOf = IntArray(OP_COUNT) { -1 }
+
+/** The coarse type of a whole request. See [REQUEST_CHUNKS]. */
+var requestType: Int = -1
+    private set
+
+/**
+ * How many chunks of [SCHEDULE_SIZE]-driven work one `request` contains — 1 to 16, seeded.
+ *
+ * A request is the bench's only millisecond-scale coarse operation, and it exists because
+ * percentiles of a distribution with no spread describe nothing. One chunk is 256 root calls, about
+ * 78 us, so a request runs from roughly 78 us to 1.25 ms and p50, p90 and p99 are genuinely
+ * different numbers. The truth stays exact: the worker times every request itself.
+ */
+val REQUEST_CHUNKS = IntArray(64).also {
+    val rnd = Random(20260828L)
+    for (i in it.indices) it[i] = 1 + rnd.nextInt(16)
+}
+
+/**
+ * Registers the coarse catalogue. Separate from [registerOperations] because the coarse tier is a
+ * separate id space, and because the bench can run entirely without it.
+ */
+fun registerCoarseOperations() {
+    for (id in COARSE_OPS) coarseTypeOf[id] = Profiler.registerCoarse(OPS[id].name)
+    requestType = Profiler.registerCoarse("request")
+}
+
+/**
  * subtree[root][op] — how many times op runs during one call of root.
  * Also catches a cycle in the graph: a bench with a cycle has no finite truth.
  */
@@ -143,7 +192,18 @@ fun inclusiveNanos(subtree: Array<LongArray>): DoubleArray = DoubleArray(OP_COUN
  * The workload. The busy-loop iteration count per operation is recomputed on every calibration,
  * in place in the array; the threads read it after a barrier.
  */
-class Workload {
+class Workload(
+    /**
+     * Whether the coarse labels are placed as well as the fine ones.
+     *
+     * A switch of its own, for the same reason `--labels` and `--sampler` are separate: the coarse
+     * tier costs tens of nanoseconds per execution where the fine hook costs two, and a cost that is
+     * always on can only be priced by argument. It also keeps the observer-effect A/B measuring what
+     * it has always measured — the fine hook against its own absence — rather than silently becoming
+     * a measurement of both tiers at once.
+     */
+    val coarseLabels: Boolean = false,
+) {
     val iters = IntArray(OP_COUNT)
     val children = Array(OP_COUNT) { OPS[it].children }
     val schedule = buildSchedule()
@@ -166,7 +226,15 @@ class Workload {
 
     /** The same thing with the profiler hook around it. The uninstrumented [exec] stays for the
      *  observer-effect comparison: the two differ by the hook and by nothing else. */
-    fun execLabeled(id: Int, state: Long): Long = op(id) {
+    fun execLabeled(id: Int, state: Long): Long {
+        val ct = if (coarseLabels) coarseTypeOf[id] else -1
+        // The coarse label goes *outside* the fine one, so the span it measures is the operation's
+        // inclusive duration — which is exactly the quantity the truth knows, and exactly what a
+        // fine label can never report.
+        return if (ct < 0) execFine(id, state) else coarse(ct) { execFine(id, state) }
+    }
+
+    private fun execFine(id: Int, state: Long): Long = op(id) {
         var s = burn(state, iters[id])
         val ch = children[id]
         var i = 0

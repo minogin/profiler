@@ -1314,7 +1314,80 @@ and zero hits. An operation nobody called is noise; an operation called fifty th
 the sampler never once caught is a statement about its size — under a nanosecond per call by the
 rule of three — and belongs in front of the reader.
 
+## The coarse tier
+
+Measured with `--coarse`, 8 threads, 60 s, 1 ms step. The bench promotes `checkpoint` (4710 ns)
+containing `maintain` (2560 ns), plus `rankBatch` (1140 ns) and a `request` of 1–16 chunks.
+
+**A span is the one quantity the bench can check by an identity rather than an estimate.** Every
+other truth here is reconstructed from configuration, because nothing can time a 20 ns operation
+without destroying it. A request lasts hundreds of microseconds, so each worker times every one of
+its own with the same two clock readings the profiler takes. Across 531,049 requests:
+
+| | profiler | workers | diff |
+|---|---|---|---|
+| count | 531,049 | 531,049 | **+0.00%** |
+| mean | 903.7 µs | 903.8 µs | −0.01% |
+| p50 | 917.5 µs | 917.5 µs | **+0.00%** |
+| p90 | 1.57 ms | 1.57 ms | **+0.00%** |
+| p99 | 1.97 ms | 1.97 ms | **+0.00%** |
+
+The percentiles are compared through the same histogram on both sides, deliberately. Comparing a
+quantised percentile against an exact one measures the quantiser, which is specified; what is worth
+checking is whether the profiler recorded *the same intervals the workers timed*, and it does, to
+the last bucket.
+
+**Execution counts agree with the call graph exactly** — `+0` on 51,714,597 `rankBatch`, 9,193,700
+`maintain` and 2,298,425 `checkpoint`. Both sides count every execution, so anything but zero is a
+lost or double-counted span rather than a measurement error. Getting there took two fixes, both of
+which the fine tier had already met in another costume:
+
+- **11.06% high, identically on every type** — the bench's warm-up threads run before the measured
+  run, and the session reset was in the wrong place. Exactly the failure `callsAtStart` was written
+  for; exactly the same magnitude.
+- **0.21% low, identically on every type** — the reset had moved onto the sampling thread, which
+  races the caller: the workers were released while the sampler was still starting, so the first
+  milliseconds of spans were recorded and then wiped. It resets synchronously on the caller's thread.
+
+**The histogram is 12.5% coarse, not 6.25%.** Reporting a percentile at the top of its bucket means
+the widest bucket in an octave runs `8x` to `9x`, so a value at the bottom of one reads an eighth
+high. Live: a true p50 of 851.9 µs landed at the bottom of the [851968, 917503] bucket and was
+reported as 917.5 µs, +7.70%. The documentation was wrong; the code was doing what it should.
+Reporting the midpoint would halve the error and give up *never below the truth*, which is the wrong
+trade for a latency number.
+
+**The cross-tabulation agrees with the graph to 1.25–1.72 pp**, against a 3.0 pp budget — three
+times the fine tier's. Not laxity: the same attribution bias applies to both, but a run-wide share
+divides by everything while this one divides by one coarse operation, so twenty nanoseconds against
+`rankBatch`'s 1140 ns is one and a half points. The residual sits on the *self* entry of each type,
+which is where it must land if that is what it is: `checkpoint` reads 4.5% against 3.1%, and
+`checkpoint` is the one type that contains another, so it absorbs `maintain`'s coarse entry.
+
+**Parallelism reads exactly 1.0000 on all four types.** Not approximately — a context never leaves
+the thread that made it, so the sample counter and the occupied-instance counter move in lockstep.
+That is the whole reason to build it now: a known answer to calibrate against while the answer is
+still known.
+
+**What the tier costs, and the boundary rule does not price it.** 63.7 million executions in 60 s is
+1,062,294 contexts per second, about **42 MB/s of garbage** — contexts are never recycled, by design,
+so the allocation rate is the execution rate. The boundary `d ≥ max(800 ns, 4 µs × share)` prices the
+~40 ns of CPU and says nothing about this.
+
+**Open, and recorded as open: `--coarse` makes the bench's own two-truths check fail more often, and
+we do not know why.** Two 60 s runs put the scatter at **18.08%** and **68.43%** against a 6% budget,
+on a *different operation each time*, where the same run without `--coarse` came in at 3.62%.
+Garbage was the first hypothesis and the counters refute it: a run at this rate collects 8 times for
+16 ms, which cannot move a median of trials. A 6 GB young generation did bring one run back to 4.87%,
+which is evidence the other way at a sample size of one. The coarse tier's own four checks pass on
+every run including the failing ones, so this is about the bench's self-measurement and not about the
+numbers the profiler produces — but that is an argument, and this file is for measurements.
+
 ## Open questions
+
+**Why `--coarse` destabilises the bench's own duration measurement.** See above. What would settle
+it: several runs of each arm rather than three; the scatter recorded per operation rather than only
+its maximum; and `-Xlog:gc` to see whether a collection lands inside a `timeBurnOnce` trial rather
+than inferring it from totals.
 
 **What a coarse label will cost per execution — only two thirds of it is measured.** The tier
 boundary in [profiler.md](profiler.md#where-the-boundary-is) is derived from ~40 ns per coarse

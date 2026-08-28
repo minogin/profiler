@@ -20,7 +20,10 @@ were. A whole CPU core for the sampler is an accepted cost on that basis.
 3. **Answer "where exactly should we look, and why".** The report has since grown some of the *why*:
    a long execution is now told apart into *waiting on another thread* and *working for a
    millisecond*, which want opposite responses, and `elapsed` beside `occupancy` says whether a
-   hundred thread-seconds is a convoy or a drizzle. What is still missing is the *why* that matters
+   hundred thread-seconds is a convoy or a drizzle. **The coarse tier answers the "where exactly"
+   half properly**: a measured duration per execution with percentiles, and the fine breakdown
+   cross-tabulated underneath it, so the report says *of the time this request took, this much was
+   that operation, and this much was waiting.* What is still missing is the *why* that matters
    most — **what removing the operation would save**. Calcite's 46% share was worth 275× because the
    rule was creating work for everything else, and no share can say that. Recorded rather than
    papered over: it is the warning at the foot of every report and [ideas.md](ideas.md) item 1.

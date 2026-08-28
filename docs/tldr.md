@@ -126,8 +126,13 @@ graph.
 Released as v0.1.0 — Apache-2.0, one dependency, Java 21+, and a report you can read: what every
 column and warning means is [output.md](output.md).
 
-Not built: the coarse tier, following work across thread hand-offs and coroutines, the
-whole-application parallelism coefficient, the annotation and agent surface, JFR output. Thread
+**The coarse tier is built too**, same-thread: a label around a logical operation — a request, a
+query — measures how long each execution took, exactly, and cross-tabulates the fine breakdown
+underneath it. That is the one part of the report that is measured rather than sampled, and the only
+place percentiles exist.
+
+Not built: following work across thread hand-offs and coroutines, the whole-application parallelism
+coefficient, the annotation and agent surface, JFR output. Thread
 state and per-operation concurrency *are* built — they are the waiting, elapsed and in-flight columns.
 Coroutines and virtual threads are untested and so unclaimed. [plan.md](plan.md) has the order.
 

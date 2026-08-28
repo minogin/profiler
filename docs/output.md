@@ -194,6 +194,47 @@ flight` is the one thing that turns summed thread-time back into wall time.
 
 ---
 
+## The coarse table
+
+Present only if you placed a coarse label. It answers the question the table above structurally
+cannot: **how long did one execution take.**
+
+```
+coarse operation            executions       mean        p50        p90        p99        max  busy/exec  waiting   in flight
+----------------------------------------------------------------------------------------------------------------------------
+request                      3,203,348    29.9 us    20.5 us    45.1 us   180.2 us   17.01 ms    29.8 us     0.0%      7.96/8
+----------------------------------------------------------------------------------------------------------------------------
+  request was: flushBatch 38.7%, validateRecord 37.9%, parseRecord 10.3%, unlabelled 7.2%, indexRecord 5.9%
+```
+
+| column | what it is | what to watch for |
+|---|---|---|
+| **executions** | completed executions, counted exactly | not sampled. If this disagrees with what you think ran, a label is leaking |
+| **mean, p50, p90, p99, max** | **measured**, two timestamps per execution | the only numbers in the whole report that are not sampled. Percentiles come from a log-bucket histogram: **at most 12.5% high, never low** |
+| **busy/exec** | thread-time on a CPU inside one execution — sampled | **`mean − busy/exec` is the waiting**, quantified. This is the pair the fine tier cannot give you |
+| **waiting** | that gap as a share | 0.0% here because the demo never blocks. On anything with I/O or a lock it is the finding |
+| **in flight** | executions at once, over the threads there were | the same load-not-code caveat as the fine table's column |
+| **`… was:` line** | the cross-tabulation | which fine operations ran under this one. Neither tier produces this alone |
+
+**Why percentiles exist here and nowhere else.** A share is a fraction of time and has no
+distribution — that is why the v0.1.0 notes say *no percentiles, ever*, and for the fine tier it
+remains true. A coarse execution has two timestamps, so it has a duration, so a thousand of them
+have a distribution. The histogram is 320 log buckets, 2.5 KB per type per thread, and a percentile
+is reported at the **top** of its bucket so it can be high but never low. Erring upward is the right
+direction for a latency figure.
+
+**Why the label goes on a batch and not a pass.** In the demo above one pass is about 700 ns and a
+context costs tens of nanoseconds to allocate and stamp, so the label goes around a batch. That is
+the tier boundary — `d ≥ max(800 ns, 4 µs × share)` — and it is why the fine tier exists at all.
+Put a coarse label on something too small and you are measuring the instrument.
+
+**What is not here, deliberately.** There is no parallelism column. Until a context can cross a
+thread, every occupied execution is occupied by exactly one thread, so the number is 1.00 by
+construction and would be a column of ones. It is measured all the same, because a known answer is
+what an instrument gets calibrated against — see `plan.md`, phase 5.
+
+---
+
 ## The warnings, and what to do about each
 
 ### `! … below the 50 ns floor`

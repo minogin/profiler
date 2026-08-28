@@ -14,9 +14,12 @@ its place — it caught the new error bound being sound and useless on a thread 
 suite now (48 tests, ~3 s) whose expectations are the numbers in findings.md, two code reviews have
 been through every file, and `D₂` — the one outright defect the design carried — is fixed.
 
-**What to do next is [plan.md § What happens next](plan.md#what-happens-next-in-order)**, and it is
-the coarse tier, starting with bench work rather than tool work: promote some bench operations to
-coarse so there is a known truth to cross-tabulate against.
+**Phase 4 — the coarse tier — is done**, same-thread. Contexts, measured spans with percentiles, the
+`(fine, coarse)` cross-tabulation, and `mean − busy/exec` as the waiting quantified. Verified against
+a truth that is an identity rather than an estimate: the bench times every one of its own requests
+and the profiler's p50, p90 and p99 agree to +0.00%. **What to do next is
+[plan.md § Phase 5](plan.md#phase-5--crossing-threads--not-started)** — propagation across hand-offs
+and coroutines, which is what makes per-operation parallelism a real number rather than 1.0.
 
 **Two things worth knowing before reading anything else**, because they govern the rest:
 
