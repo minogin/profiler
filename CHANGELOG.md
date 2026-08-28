@@ -33,6 +33,16 @@ eight**, because Lucene fans a search across a pool — so without propagation, 
 coarse operation is reported as waiting. That is the honest limit of a thread-local context and the
 reason the next phase exists.
 
+**Two checks on the tier boundary, and they cover different failures.** A coarse label on something
+too short is caught exactly — `d ≥ max(800 ns, 4 µs × share)` compared against a duration that was
+*measured*, so unlike the fine floor it needs no statistical slack — and the message says which of the
+two conditions bound, because *"the number describes the instrument"* and *"the program you measured
+is not the one you started with"* have different remedies. And **work escaping its context** is now
+measured: the report counts labelled time that fell under no coarse span, which reads 88.5% on Lucene
+at eight threads and is silent on Calcite, Netty and single-threaded Lucene. Stated as a measurement
+with both its readings, never as an accusation, since it cannot tell *"I bracketed part of the
+program"* from *"work escaped"*.
+
 **Bracketing came for free:** unlabelled samples taken under a context belong to that context, so a
 coverage gap stops being global and becomes located — *"three quarters of a request is inside Netty's
 codec and write path"* rather than *"the labels miss most of the run"*.

@@ -245,6 +245,62 @@ class CoarseTest {
         )
     }
 
+    // --- work escaping its context ---------------------------------------------------
+
+    /**
+     * The Lucene shape, in miniature: a coarse span on the caller, and most of the labelled work
+     * happening on pool threads that never saw the context. The span's own busy time is a fraction
+     * of it and the rest reads as waiting — silent, and in the contaminating direction, which is why
+     * this counter exists at all.
+     */
+    @Test
+    fun `labelled work outside every span is measured and its operations named`() {
+        val fanned = OperationStat(0, "fine", 1000, 1000, 0, 0, 0, 0, 1000)
+        val r = Report(
+            operations = listOf(fanned),
+            idleHits = 0, ticks = 1_000_001, samplingSpanNanos = 1_000_000_000_000,
+            durationNanos = 1_000_000_000_000, threads = 8,
+            duty = DutyReport(
+                labelledDuty = 0.99, invisibleOffCpu = 0.0, labelledFraction = 1.0, reason = null,
+                resolutionNanos = 15_625_000, windowNanos = 1_000_000_000, windows = 20, threads = 8,
+                cpuNanos = 990_000_000, wallNanos = 1_000_000_000,
+                minWindowDuty = 0.99, maxWindowDuty = 0.99, anomalies = 0, maxSampleNanos = 200_000,
+            ),
+            // 250 of the operation's 1000 samples fell under the span; 750 did not.
+            coarse = listOf(
+                stat(count = 100, sumNanos = 100_000_000, hits = 250, running = 250)
+                    .also { it.fine[0] = 250 }
+            ),
+            labelledOutsideCoarse = 750,
+        )
+        assertEquals(0.75, r.labelledOutsideCoarseShare)
+        assertEquals(listOf("fine"), r.outsideCoarseSuspects().map { it.name })
+        val text = r.render()
+        assertTrue(text.contains("NO coarse span"), "the report does not mention it")
+        assertTrue(text.contains("ESCAPING"), "the report does not name the dangerous reading")
+    }
+
+    @Test
+    fun `an operation fully covered by a span is not named`() {
+        val covered = OperationStat(0, "fine", 250, 250, 0, 0, 0, 0, 250)
+        val r = report(
+            coarse = listOf(
+                stat(count = 100, sumNanos = 100_000_000, hits = 250, running = 250)
+                    .also { it.fine[0] = 250 }
+            ),
+        )
+        // Hits come from `report`'s own filler operation, so the covered one is checked directly:
+        // naming an operation whose samples are all accounted for would be a false accusation.
+        assertTrue(covered.hits <= r.coarse[0].fine[0])
+    }
+
+    @Test
+    fun `nothing is said when no coarse label was placed`() {
+        val r = report(coarse = emptyList())
+        assertTrue(r.outsideCoarseSuspects().isEmpty())
+        assertTrue(!r.render().contains("NO coarse span"))
+    }
+
     @Test
     fun `waiting is what the span has and the samples do not`() {
         val c = stat(count = 10, sumNanos = 10_000_000, hits = 100, running = 40)

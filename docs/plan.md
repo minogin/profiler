@@ -1090,6 +1090,20 @@ rather than a suspicion. `docs/trial-lucene.md` has the full record.
   withheld. `threads inside = in flight x parallelism` is the identity, and the naming is settled —
   see below.
 
+**There is already a detector for the defect, and it is your acceptance test.** The report counts
+labelled samples that fell under *no* coarse span, which is where escaped work goes. Baselines
+measured before propagation exists:
+
+| | outside every span |
+|---|---|
+| Calcite, Netty, Lucene at 1 thread | silent — below the 1% floor |
+| **Lucene at 8 threads** | **88.5%**, naming `clause:prefix`, `clause:phrase`, … |
+
+**After propagation, Lucene at 8 threads must collapse towards the others and the same-thread trials
+must stay silent.** That is a pass/fail on real code, needing no new instrument, and it is more
+sensitive than `waiting` — the same run reads 24.5% waiting against 88.5% here, because the calling
+thread is doing plenty of work itself.
+
 **Three checks to write before the mechanism:**
 
 1. **Work per execution must not depend on thread count.** `busy/exec` at 1 thread and at N should

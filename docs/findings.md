@@ -1445,6 +1445,27 @@ located: `request was: unlabelled 74.3%` on Netty is three quarters of a request
 write path; `search was: unlabelled 40.0%` on Lucene is inside Lucene. Run-wide, the same numbers read
 as *"the labels miss most of the run"* and are unactionable.
 
+**Work escaping its context is now measured, and it is sharper than the `waiting` column.** The report
+counts labelled samples that fell under no coarse span — one branch in a loop that already reads both
+values. Across the trials:
+
+| | outside every span |
+|---|---|
+| Calcite — one thread, everything under `plan` | silent |
+| Netty — synchronous pipeline | 0.0%, 3 ms — below the 1% floor |
+| **Lucene, 8 threads** | **88.5%**, naming `clause:prefix`, `clause:phrase`, `clause:point`, `clause:term#2` |
+| Lucene, 1 thread — same code | silent |
+
+On the same Lucene run `waiting` reads 24.5% and this reads 88.5%. The gap is not a contradiction:
+the calling thread does plenty of the work itself, so the span's shortfall understates how much went
+to other threads. **The 1% floor was set by Netty**, whose span covers the whole pipeline and still
+leaves a few samples outside it during connection setup — 0.0% and three milliseconds, which printed
+six lines of warning before the floor existed.
+
+It is stated as a measurement with both readings, never as an accusation, because it cannot tell
+*"I bracketed part of the program"* from *"work escaped"* — that is a question about the reader's
+program.
+
 **Two defects the trials found, neither of them in the tier:** the report advises adding a coarse
 label to an operation that already has one, because the two id spaces are unconnected
 ([ideas.md](ideas.md) item 21); and `:trial-calcite:run` had been broken since the package was

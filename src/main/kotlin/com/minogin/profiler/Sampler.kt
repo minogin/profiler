@@ -204,6 +204,28 @@ internal class Sampler(
     private val chain = IntArray(MAX_COARSE_DEPTH)
 
     /**
+     * Samples that caught a thread inside a fine label and inside **no** coarse context.
+     *
+     * The one detector for the failure mode neither the floor check nor the balance check can see:
+     * **work escaping its context onto another thread.** A context lives on the thread that made it,
+     * so when an operation hands work to a pool, the pool threads run the callers' fine labels with
+     * no context at all — and the caller's span reports that time as *waiting*. Silent, and in the
+     * contaminating direction, which is the class of error this project spends its effort on.
+     *
+     * Measured on Lucene, whose search fans across a pool: at one thread the search's own busy time
+     * is 14.87 ms of a 14.88 ms span, and at eight it is 3.10 ms of 4.10 ms — 11.8 ms of work gone
+     * somewhere the context could not follow. This counter is where it went.
+     *
+     * **A measurement and not an accusation.** It also reads high for a perfectly good reason: you
+     * bracketed part of your program coarsely and not the rest. The report states the number and
+     * names both readings rather than picking one, because it cannot tell them apart and pretending
+     * otherwise is how a tool spends its credibility.
+     *
+     * One branch, in a loop that has both values in registers already.
+     */
+    internal var labelledOutsideCoarse: Long = 0; private set
+
+    /**
      * Per thread, every sample taken at its slot and those of them that were inside some operation.
      *
      * Paired with the duty cycle's per-thread CPU fractions to bound the error on the shares — see
@@ -394,6 +416,9 @@ internal class Sampler(
                         p = p.parent
                         d++
                     }
+                } else if (c >= 0) {
+                    // Labelled work, under no coarse span at all. See labelledOutsideCoarse.
+                    labelledOutsideCoarse++
                 }
 
                 val idx = s.index

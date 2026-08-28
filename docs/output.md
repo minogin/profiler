@@ -233,6 +233,38 @@ thread, every occupied execution is occupied by exactly one thread, so the numbe
 construction and would be a column of ones. It is measured all the same, because a known answer is
 what an instrument gets calibrated against — see `plan.md`, phase 5.
 
+### `N% of labelled thread-time was inside NO coarse span`
+
+The one line that can see **work escaping its context**. Nothing else in a single run can: the floor
+check sees labels that are too small, the balance check sees contexts left open, and neither sees a
+context that is simply not where the work is.
+
+It has two readings and **the report gives both, because it cannot tell them apart**:
+
+- *you bracketed part of your program coarsely and not the rest* — legitimate, and common;
+- *work is escaping onto threads your context never reached* — in which case those threads' time is
+  missing from the operation's `busy/exec` and shows up as its `waiting`.
+
+What separates them is whether the operations it names are ones you expected to be inside a span.
+That is a question about your program, so the report states the measurement and stops.
+
+Measured across the three trials, which is how the threshold was set:
+
+| | outside every span | verdict |
+|---|---|---|
+| Calcite — one thread, everything under `plan` | silent | correct |
+| Netty — synchronous pipeline | 0.0%, 3 ms | below the 1% floor, silent |
+| **Lucene at 8 threads** — search fans across a pool | **88.5%**, naming `clause:prefix`, `clause:phrase`, … | the escaped work |
+| Lucene at 1 thread — same code, no hand-off | silent | correct |
+
+**It is more sensitive than the `waiting` column**, and that is the point. On the same Lucene run
+`waiting` reads 24.5% while this reads 88.5%, because the calling thread is doing plenty of work
+itself — the gap in the span understates how much went elsewhere.
+
+Below 1% it says nothing, for the same reason the report does not chase negligible operations: at
+that size it cannot be where the work went, and a check that cried wolf there would spend its
+credibility.
+
 ### The one thing to know before trusting `waiting`
 
 **If your operation hands work to other threads, `waiting` counts that work as waiting.** A context

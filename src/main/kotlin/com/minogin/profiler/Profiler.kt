@@ -732,6 +732,7 @@ object Profiler {
             idleWaitingHits = s.idleWaitingHits,
             coarse = coarse,
             openContextsAtEnd = openContexts(),
+            labelledOutsideCoarse = s.labelledOutsideCoarse,
         )
     }
 }

@@ -322,6 +322,11 @@ class Report internal constructor(
      * can close them now, and their spans are missing from [coarse] for exactly that reason.
      */
     val openContextsAtEnd: Int = 0,
+    /**
+     * Labelled samples that fell under no coarse span. See [labelledOutsideCoarseShare], and
+     * `Sampler.labelledOutsideCoarse` for what it is for.
+     */
+    val labelledOutsideCoarse: Long = 0,
 ) {
     /** False when a fatal finding stopped the session. See the severity ladder in plan.md. */
     val ok: Boolean get() = failure == null
@@ -710,6 +715,41 @@ class Report internal constructor(
         .sortedByDescending { it.count }
 
     /**
+     * Of the thread-time inside a fine label, the fraction that fell under **no** coarse span.
+     *
+     * The one number that can see work escaping its context. A coarse context stays on the thread
+     * that created it, so an operation that hands work to a pool has that work running under the
+     * callers' fine labels with no context — and its own span reports the gap as *waiting*. There is
+     * no other signal for this in a single run: the floor check sees labels that are too small, the
+     * balance check sees contexts left open, and neither sees a context that is simply not where the
+     * work is.
+     *
+     * **Two readings, and the report gives both** because it cannot tell them apart:
+     *
+     * - *you bracketed part of the program and not the rest* — legitimate, and common;
+     * - *work is escaping to threads your context never reached* — silent misattribution, and the
+     *   thing worth knowing.
+     *
+     * What separates them is whether the operations named are ones you expected to be inside a span.
+     * That is a question about your program, so the report states the measurement and stops.
+     */
+    val labelledOutsideCoarseShare: Double
+        get() = if (labelledHits == 0L) 0.0 else labelledOutsideCoarse.toDouble() / labelledHits
+
+    /** The fine operations most of that time was in — where to look if it should have been covered. */
+    fun outsideCoarseSuspects(): List<OperationStat> {
+        if (coarse.isEmpty()) return emptyList()
+        val under = LongArray(MAX_OPERATIONS + 1)
+        for (c in coarse) for (i in under.indices) under[i] += c.fine[i]
+        // Inclusive rows double-count a sample under nested types, so an operation is only named
+        // when its labelled hits exceed what every span between them could account for. Erring
+        // towards naming nothing is the right direction for a hint.
+        return operations
+            .filter { it.hits > 0 && it.hits > under[it.id] }
+            .sortedByDescending { it.hits - under[it.id] }
+    }
+
+    /**
      * The coarse table, or nothing at all when no coarse label was placed.
      *
      * Printed after the fine one and not instead of it, because the two answer different halves of
@@ -772,6 +812,27 @@ class Report internal constructor(
         appendLine("  which is the one thing a fine label can never tell you. waiting is that as a share")
         appendLine("in flight is executions at once out of the threads there were — your load, not your code")
         appendLine("the 'was:' lines are the cross-tabulation: which fine operations ran under this one")
+        // The one signal for work escaping its context, which neither the floor check nor the
+        // balance check can see. Stated as a measurement with both readings, because it cannot tell
+        // "I bracketed part of the program" from "work escaped to another thread" and guessing would
+        // be worse than saying so.
+        if (labelledOutsideCoarseShare >= OUTSIDE_COARSE_MIN_SHARE) {
+            appendLine(
+                String.format(
+                    Locale.ROOT,
+                    "%n%.1f%% of labelled thread-time (%s) was inside NO coarse span.",
+                    labelledOutsideCoarseShare * 100, threadTime(labelledOutsideCoarse * stepNanos)
+                )
+            )
+            val suspects = outsideCoarseSuspects().take(4)
+            if (suspects.isNotEmpty()) {
+                appendLine("  mostly: " + suspects.joinToString(", ") { it.name })
+            }
+            appendLine("  Two readings and this cannot tell them apart. Either you bracketed part of the program")
+            appendLine("  and not the rest - fine - or work is ESCAPING its context onto threads it never reached,")
+            appendLine("  and then those threads' time is missing from its busy/exec and shows up as its waiting.")
+            appendLine("  Ask whether the operations above are ones you expected to be inside a span.")
+        }
         if (openContextsAtEnd > 0) {
             appendLine(
                 "! $openContextsAtEnd coarse executions were still open when sampling stopped: their spans are " +
@@ -1011,6 +1072,18 @@ class Report internal constructor(
 
         /** `40 ns × executions ≤ 1% of the run`, rewritten as `d ≥ this × share`. */
         const val COARSE_SHARE_NANOS = 4000.0
+
+        /**
+         * Below this share, labelled time outside every coarse span is not worth a word.
+         *
+         * The same reasoning as "negligible operations" in profiler.md: something under a fraction
+         * of a percent of the work cannot be where the work went, and a check that chased it would
+         * spend its credibility on false positives. Netty is the case that set it — its request span
+         * covers the pipeline, and a handful of samples still land outside it during connection
+         * setup and at the tail of a write. That came to **0.0%, three milliseconds**, and printed
+         * six lines of warning about it, which is alarm for nothing.
+         */
+        const val OUTSIDE_COARSE_MIN_SHARE = 0.01
 
         /**
          * How far coverage-over-runnable must sit from plain coverage before it is worth a line of
