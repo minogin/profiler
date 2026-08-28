@@ -73,8 +73,14 @@ class CoarseContext @PublishedApi internal constructor(
  * 917.5 us, +7.70% — quantisation behaving exactly as specified, and it briefly looked like a defect.
  *
  * Forty lines rather than a dependency, which is the whole of the argument for writing it.
+ *
+ * **Public, and for one reason:** to check the profiler against timings of your own, you have to
+ * quantise them the way it does. Comparing a bucketed percentile against an exact one measures this
+ * class rather than the profiler, and the difference is large enough to look like a defect — a true
+ * p50 of 851.9 µs reads 917.5 µs here, +7.70%, which cost an hour before it was recognised. Put both
+ * sides through [bucketOf] and [percentile] and what remains is the profiler.
  */
-internal object SpanHistogram {
+object SpanHistogram {
     /** Sub-buckets per octave, as a power of two. */
     const val SUB_BITS = 3
     const val SUB = 1 shl SUB_BITS

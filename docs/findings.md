@@ -1406,6 +1406,50 @@ workers' stopwatches on *the same intervals*, and counts against counts, so a cl
 mid-run cancels on both sides. The verification is clock-independent by construction, which is a
 stronger property than it was designed for and worth keeping deliberately.
 
+## The coarse tier on foreign code
+
+Three trials, none of them ours. Clock across the lot: mean 122.3% of nominal, range 74.5–215.0%,
+176 samples, none failed.
+
+**Spans are right on somebody else's code, and the check is an identity.** The Calcite harness has
+bracketed `planOnce()` with two `nanoTime` calls since before this tier existed, to print *"N plans
+in T s"*. Against it, over 2,751 plans: count **+0.00%**, mean −0.05%, p50, p90 and p99 all
+**+0.00%**. Both sides through the same histogram, so what is measured is whether the profiler
+recorded the same intervals — not the quantiser, which is specified.
+
+**The cross-tabulation is the thing neither tier produces alone**, and Calcite is where it reads
+best: *of the 9.08 ms a plan takes, `FilterIntoJoinRule` is 25.2%*. A mean of 9.08 ms with a p99 of
+37.75 ms is also a statement about planning latency that no amount of sampling could have made.
+
+**The waiting column needs two trials to be shown to work, and they disagree by construction:**
+
+| trial | shape | `mean − busy/exec` | why |
+|---|---|---|---|
+| Netty | request on an event loop, synchronous pipeline | **0.0%** of 14.5 µs | pure CPU; the waiting is in the selector *between* requests, outside any span |
+| Lucene, 1 thread | search, no hand-off | **0.0%** of 14.88 ms | nothing to wait for |
+| Lucene, 8 threads | search fanned across a pool | **24.5%** of 4.10 ms | the caller is blocked while pool threads work |
+
+Netty and single-threaded Lucene are the negative controls: a tool that mistook any gap for waiting
+would read high on both, and the early design `plan.md` warned about would have read *low* on the
+third. It reads zero, zero, and 24.5%.
+
+**Without propagation, parallel work inside a coarse operation is reported as waiting** — the Lucene
+pair states it exactly, same code and same label, 0.0% at one thread and 24.5% at eight. Both numbers
+are honest: the calling thread really is blocked. The report simply cannot say the *request* was
+working, because a thread-local context can only answer what the thread holding it was doing. That is
+the concrete argument for phase 5, and it is now a measurement rather than a prediction.
+
+**Bracketing falls out for free, as [ideas.md](ideas.md) item 13 predicted.** Unlabelled samples taken
+under a context are attributed to that context, so a coverage gap stops being global and becomes
+located: `request was: unlabelled 74.3%` on Netty is three quarters of a request inside the codec and
+write path; `search was: unlabelled 40.0%` on Lucene is inside Lucene. Run-wide, the same numbers read
+as *"the labels miss most of the run"* and are unactionable.
+
+**Two defects the trials found, neither of them in the tier:** the report advises adding a coarse
+label to an operation that already has one, because the two id spaces are unconnected
+([ideas.md](ideas.md) item 21); and `:trial-calcite:run` had been broken since the package was
+renamed, invisible because the documented launch is `java -cp`.
+
 ## Open questions
 
 **What the bench's duration tolerance should be on a warm machine.** Settled above that `--coarse` is

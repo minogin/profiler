@@ -24,6 +24,19 @@ clock readings the profiler takes. Over 531,049 requests the counts agree exactl
 p99 agree to **+0.00%**; execution counts agree with the call graph to **+0**; parallelism reads
 **exactly 1.0000**, which is the answer it must give until a context can cross a thread.
 
+**Verified on three foreign codebases, not only the bench.** On Calcite the spans were checked against
+a stopwatch that harness has had since before this tier existed — 2,751 plans, count and p50/p90/p99
+all **+0.00%** — and the cross-tabulation reads *of the 9.08 ms a plan takes, `FilterIntoJoinRule` is
+25.2%*. On Netty a request is pure CPU and `mean − busy/exec` reads **0.0%**, which is the negative
+control: the column does not invent waiting. On Lucene it reads **0.0% at one thread and 24.5% at
+eight**, because Lucene fans a search across a pool — so without propagation, parallel work inside a
+coarse operation is reported as waiting. That is the honest limit of a thread-local context and the
+reason the next phase exists.
+
+**Bracketing came for free:** unlabelled samples taken under a context belong to that context, so a
+coverage gap stops being global and becomes located — *"three quarters of a request is inside Netty's
+codec and write path"* rather than *"the labels miss most of the run"*.
+
 **Not built, deliberately:** cross-thread propagation and coroutines — that is the next phase, and
 keeping it separate means a propagation bug can never be mistaken for a tier bug. There is no
 parallelism column for the same reason: it would be a column of ones. It is measured all the same,

@@ -639,6 +639,37 @@ product; a mangled character in every user's terminal is not cosmetic.
 Noticed while adding the coarse floor check, whose own message now uses plain hyphens so as not to
 add to it. Roughly forty strings in `Report.kt`, plus the bench's own printing.
 
+## 21. The report tells you to add a coarse label you have already added · open
+
+Found the moment the coarse tier was pointed at Calcite. The long-instance detector's verdict says:
+
+```
+! phase:optimise: 25 executions lasted over a tick ... the share is honest and the operation
+  wants a coarse label for its per-execution statistics
+```
+
+and `phase:optimise` **has** a coarse label — the run that printed this was measuring its span at
+7.73 ms with percentiles. Advice to do a thing you have just done reads as the tool not knowing what
+it is looking at, and it is on the one line the reader is most likely to act on.
+
+Harder to fix than it looks, because the two tiers have **separate id spaces and independent names**:
+Calcite registers `phase:optimise` fine and `optimise` coarse, and nothing connects them. Matching on
+the name would be wrong the moment somebody names them differently, which is the normal case.
+
+Options, none chosen:
+
+- **Match on occupancy.** If some coarse type's inclusive occupancy equals this operation's within
+  noise, the same boundary is labelled twice and the advice is already taken. Robust to naming,
+  fragile where a coarse type happens to have a similar size.
+- **Say what is true instead of giving advice**: *"N% of its samples fell under coarse `plan`, where
+  per-execution statistics already exist."* Weaker advice, always correct, and computable exactly
+  from the pair matrix the sampler already keeps.
+- **Let the caller declare it** — `register("x", coarse = id)` — which is exact and pushes work onto
+  the user for a diagnostic they did not ask for.
+
+The second is the most in keeping with the rest of the report, which prefers stating a measurement
+to issuing an instruction.
+
 ## Promoted to plan.md
 
 **Phase 3.5** is item 9 above, reframed from detecting bad operations to bounding the error on every

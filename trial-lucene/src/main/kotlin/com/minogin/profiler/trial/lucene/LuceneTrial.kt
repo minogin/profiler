@@ -1,6 +1,7 @@
 package com.minogin.profiler.trial.lucene
 
 import com.minogin.profiler.NO_OP
+import com.minogin.profiler.coarse
 import com.minogin.profiler.Profiler
 import com.minogin.profiler.getOpaque
 import com.minogin.profiler.trial.analyzeJfr
@@ -459,7 +460,13 @@ private fun load(
     warmups: Int,
     stacks: Int,
     gapTrigger: Int,
+    /**
+     * Whether a search also carries a coarse label. Off by default: at threads>1 it measures a
+     * quantity the tier cannot yet represent, and that is a demonstration rather than a setting.
+     */
+    coarse: Boolean = false,
 ) {
+    val searchCoarse = if (coarse) Profiler.registerCoarse("search") else -1
     Bed(corpus, threads, mode).use { bed ->
         println("threads=$threads placement=$mode sampler=$sampler; warm-up $warmups searches, then searching for $seconds s")
         val warm = repeatSearch(bed, warmups)
@@ -485,7 +492,14 @@ private fun load(
         while (System.nanoTime() < deadline) {
             val probing = prober?.probing == true
             val t0 = System.nanoTime()
-            Sink.last = bed.searchOnce()
+            // A search is the obvious coarse operation here, and at threads>1 it is also the first
+            // one this tool has met that does not fit in the tier. Lucene hands one slice per segment
+            // to a pool, so the context stays on the calling thread while most of the work happens on
+            // threads that never see it. The span is still exactly right — it is two timestamps on
+            // one thread — but `busy/exec` counts only the caller, so `span - busy` reads as waiting
+            // when it is really other threads working. That is not a defect in the measurement; it is
+            // the absence of propagation, which is phase 5, and this is what it looks like.
+            Sink.last = if (searchCoarse < 0) bed.searchOnce() else coarse(searchCoarse) { bed.searchOnce() }
             val took = System.nanoTime() - t0
             searches++
             if (probing) {
@@ -648,6 +662,7 @@ fun main(args: Array<String>) {
                 warmups = opt["warmups"]?.toInt() ?: 30,
                 stacks = opt["stacks"]?.toInt() ?: 0,
                 gapTrigger = opt["gaps"]?.toInt() ?: 0,
+                coarse = opt["coarse"] != null,
             )
         }
     }

@@ -417,3 +417,52 @@ been nothing to check against**, and that is a real gap in the method rather tha
 
 `--strict` was never a flag here; the trial passed `strict = false` in code because of the floor
 check. That is gone — the labels are lexical `op(id) { }` and cannot leak, so it runs strict.
+
+---
+
+## Revisited: the coarse tier, and the one thing it must not do
+
+A request is the obvious coarse operation here, and one handler at the head of the pipeline brackets
+it. Netty propagates `fireChannelRead` **synchronously** on the event loop thread, so every policy,
+auth, route, render and the `writeAndFlush` happens inside that one call — no propagation needed,
+which is what makes this a phase 4 workload at all. `--labels --coarse`:
+
+```
+coarse operation            executions       mean        p50        p90        p99        max  busy/exec  waiting   in flight
+request                      3,049,206    14.5 us    14.3 us    20.5 us    36.9 us    3.02 ms    14.4 us     0.0%      2.25/4
+  request was: unlabelled 74.3%, policy:abuse 15.7%, policy:quota 5.1%, render 2.2%,
+               policy:experiment 1.2%, policy:geo 0.9%, and 2 more
+```
+
+### This is a negative control, and that is why it was worth doing
+
+**`mean − busy/exec` is 0.1 µs out of 14.5.** Netty's waiting lives in the selector *between*
+requests, outside any span, so a request here is pure CPU and the waiting column must read zero.
+
+That is the failure [plan.md](plan.md) flagged as the one that must not happen: an early design would
+have made the CPU column *occupancy*, so `span − CPU` would come out near zero **in exactly the case
+where it is all waiting** — the one answer that was wanted, inverted. This trial checks the other
+half of that: a tool that mistakes any gap for waiting reads high here, where the true answer is
+nothing. It reads 0.0%.
+
+The Lucene revisit is the complementary case, where the same column correctly reads 24.5%. Neither
+run alone shows the column works; the pair does.
+
+### And bracketing, which was predicted and had never been seen
+
+`unlabelled 74.3%` is the useful surprise. Run-wide, this trial's labels cover a small fraction of
+thread-time and that reads as *"the labels miss most of the run"*, which is alarming and unactionable.
+Under a request it becomes **specific**: three quarters of a request is Netty's own codec, aggregator
+and write path, which nobody labelled and nobody was ever going to.
+
+[ideas.md](ideas.md) item 13 predicted exactly this — *"bracketing, which the coarse tier gives us for
+free … it needs no new mechanism at all"* — and it is right: unlabelled samples taken under a context
+are attributed to that context, so the pair matrix already had the answer.
+
+**`in flight 2.25/4`** on four event loops, correctly below the ceiling: the load generator keeps
+sixteen connections with eight requests in flight, but a request lasts 14.5 µs, so at any instant
+only about two of the four loops are inside one.
+
+| flag | default | what it does |
+|---|---|---|
+| `--coarse` | off | with `--labels`, wrap each request in a coarse label at the head of the pipeline |

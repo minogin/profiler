@@ -59,13 +59,21 @@ private val POLICIES = arrayOf(
  * sixteen labels reading a sixteenth each, and sixteen small rows look like a finding rather than
  * like a mistake.
  */
-class Labels(val auth: Int, val route: Int, val render: Int, val policies: IntArray) {
+class Labels(
+    val auth: Int, val route: Int, val render: Int, val policies: IntArray,
+    /**
+     * The coarse type for a whole request, or -1. A separate id space, so it does not collide with
+     * the fine labels above and the same name could carry both.
+     */
+    val request: Int = -1,
+) {
     companion object {
-        fun register() = Labels(
+        fun register(coarse: Boolean) = Labels(
             Profiler.register("auth"),
             Profiler.register("route"),
             Profiler.register("render"),
             IntArray(POLICIES.size) { Profiler.register(POLICIES[it].first) },
+            if (coarse) Profiler.registerCoarse("request") else -1,
         )
 
         /** The unlabelled configuration: same objects, same branch, no hook. */
@@ -73,12 +81,12 @@ class Labels(val auth: Int, val route: Int, val render: Int, val policies: IntAr
     }
 }
 
-class Server(private val threads: Int, private val labelled: Boolean) {
+class Server(private val threads: Int, private val labelled: Boolean, private val coarse: Boolean = false) {
     private val boss = MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory())
     private val workers = MultiThreadIoEventLoopGroup(threads, NioIoHandler.newFactory())
 
     /** The labels, or all -1 when this server runs unlabelled. See [Labels]. */
-    private val ids = if (labelled) Labels.register() else Labels.none()
+    private val ids = if (labelled) Labels.register(coarse) else Labels.none()
 
     lateinit var address: InetSocketAddress
         private set
@@ -93,7 +101,7 @@ class Server(private val threads: Int, private val labelled: Boolean) {
                     val p = ch.pipeline()
                     p.addLast(HttpServerCodec())
                     p.addLast(HttpObjectAggregator(64 * 1024))
-                    p.addLast(ExchangeHandler())
+                    p.addLast(ExchangeHandler(ids.request))
                     p.addLast(AuthHandler(ids.auth))
                     p.addLast(RouteHandler(ids.route))
                     for ((i, policy) in POLICIES.withIndex()) {
@@ -306,7 +314,7 @@ fun main(args: Array<String>) {
     }
 
     if (opt["labels"] != null) {
-        profile(seconds, threads, connections, inFlight)
+        profile(seconds, threads, connections, inFlight, coarse = opt["coarse"] != null)
         return
     }
 
@@ -328,8 +336,8 @@ fun main(args: Array<String>) {
  * check to a warning; now it names them and carries on. What strict still stops is a leaked label,
  * and every label here is a lexical `op(id) { }` that cannot leak.
  */
-fun profile(seconds: Int, threads: Int, connections: Int, inFlight: Int) {
-    val server = Server(threads, labelled = true).start()
+fun profile(seconds: Int, threads: Int, connections: Int, inFlight: Int, coarse: Boolean = false) {
+    val server = Server(threads, labelled = true, coarse = coarse).start()
     val client = Client(server.address, connections, inFlight).start()
     try {
         Thread.sleep(5_000)

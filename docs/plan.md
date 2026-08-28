@@ -20,6 +20,7 @@ words, is [tldr.md](tldr.md).
 | 3.75 | Placement — enter/exit, the balance check, report polish | **done** |
 | — | Trial 2 — Lucene: concurrent, and identity by instance rather than by class | **done** |
 | — | Trial 3 — Netty: few event loops, many tasks, time that is mostly not CPU | **done** |
+| — | The coarse tier on all three trials — Calcite, Netty, Lucene | **done** |
 | — | Trials 4+ — a compiler, two negative controls | after Netty |
 | 4 | The coarse tier — contexts, spans, cross-tabulation | **done** |
 | 5 | Crossing threads — propagation, and per-operation parallelism | next |
@@ -1030,7 +1031,34 @@ Four assertions, and three of them found real defects on the way:
   brackets the profiler's, and one Windows scheduling quantum between the two clock readings lands
   entirely on it — measured once at −16.93%, which is one descheduled thread and not a defect.
 
-## Phase 5 — crossing threads · not started
+### The coarse tier on the three trials · **done**
+
+Not a fourth phase-4 deliverable but the check the bench cannot give: the bench inherits our
+assumptions, and every phase here has been validated on somebody else's code before moving on. Full
+records in [trial-calcite.md](trial-calcite.md), [trial-netty.md](trial-netty.md) and
+[trial-lucene.md](trial-lucene.md); what generalises is in [findings.md](findings.md#the-coarse-tier-on-foreign-code).
+
+Each answered a different question, and the third answered one we did not ask:
+
+- **Calcite — is a span right on code we did not write?** Yes, and provably: the harness has timed
+  every plan since before this tier existed, and count, p50, p90 and p99 all agree to **+0.00%**.
+  Nesting works (`plan ⊃ optimise ⊃ the rule labels`) and the cross-tabulation reads *of the 9.08 ms
+  a plan takes, `FilterIntoJoinRule` is 25.2%* — the sentence the tier was justified by.
+- **Netty — does it invent waiting?** No. `mean − busy/exec` is 0.1 µs of 14.5. A request on an event
+  loop is pure CPU, and the column that would have been *occupancy* in the design this plan warned
+  about reads zero.
+- **Lucene — what happens when the obvious coarse operation does not fit the tier?** It fans a search
+  across a pool, so the context stays on the caller. Same code and same label: **0.0% waiting at one
+  thread, 24.5% at eight.** Without propagation, parallel work inside a coarse operation is reported
+  as waiting. Both numbers are honest — the caller really is blocked — but the report cannot say the
+  *request* was working. **That is phase 5's justification, measured rather than argued**, and the
+  single-threaded row is what makes it a finding rather than a suspicion.
+
+**And bracketing arrived for free**, as [ideas.md](ideas.md) item 13 predicted: unlabelled samples
+under a context belong to that context, so *"the labels miss most of the run"* becomes *"three
+quarters of a request is inside Netty's codec and write path"*.
+
+## Phase 5 — crossing threads · next, and the trials said why
 
 Where a logical operation stops being a thread-local concept.
 

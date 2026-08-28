@@ -460,3 +460,51 @@ java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt \
 `--strict` used to be here, defaulting to off because the floor check would stop the run. The floor
 check is a warning now, and every label in this trial is a lexical `op(id) { }` that cannot leak, so
 the trial runs strict and the flag is gone.
+
+---
+
+## Revisited: the coarse tier meets the edge of its own tier
+
+A search is the obvious coarse operation, and this is the first workload where the obvious thing
+**does not fit**. Lucene hands one slice per segment to a pool, so the context stays on the calling
+thread while much of the work happens on threads that never see it. That is phase 5, and this is what
+its absence looks like — measured, with a control:
+
+| `--threads` | executions | mean span | busy/exec | waiting | in flight |
+|---|---|---|---|---|---|
+| **1** | 1,345 | 14.88 ms | 14.87 ms | **0.0%** | 1.00/1 |
+| **8** | 4,870 | 4.10 ms | 3.10 ms | **24.5%** | 1.00/9 |
+
+Same code, same label, same query. Single-threaded there is no hand-off and the waiting is correctly
+**zero**. At eight threads the search is 3.6× faster in wall clock and a quarter of it reads as
+waiting.
+
+**Both numbers are honest and the second is misleading, which is a distinction worth being precise
+about.** The calling thread really is blocked for ~1 ms per search; `busy/exec` really does count
+only the samples that fell under the context. What the report cannot say is that the *request* was
+not idle — it was working, on threads the context never reached. So:
+
+> **Without propagation, parallel work inside a coarse operation is reported as waiting.**
+
+The single-threaded row is what makes that a finding rather than a suspicion: the column is not
+broken, and it is not inventing anything. It is answering "what was the thread holding this context
+doing", which is the only question a thread-local context can answer.
+
+*Aside worth keeping:* the fan-out is smaller than eight threads suggests. The caller processes a
+slice itself, so 3.10 ms of the 4.10 ms span is the calling thread's own work — the pool is doing
+about a quarter of it. `in flight 1.00/9` is right and says something else: nine slots exist, and the
+driving loop issues one search at a time, so only one is ever in flight.
+
+**And the cross-tabulation localises the unlabelled time**, as it did on Netty:
+
+```
+  search was: unlabelled 40.0%, clause:prefix 29.2%, clause:phrase 25.9%, clause:point 1.5%,
+              clause:term#2 1.1%, clause:cat 1.0%, and 3 more
+```
+
+Two clauses are 55% of a search between them, and 40% of it is inside Lucene where no label was
+placed — which is a much more useful statement than the same 40% floating free of any boundary.
+
+| flag | default | what it does |
+|---|---|---|
+| `--coarse` | off | wrap each search in a coarse label. At `--threads 1` it measures a search; above that it measures the phase 5 gap |

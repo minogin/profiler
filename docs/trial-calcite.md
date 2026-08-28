@@ -397,3 +397,63 @@ because the interesting runs are the instrumented ones and the default is the co
 | `--ab=labels\|tool\|listener\|merge --rounds=N` | 5 rounds | interleaved A/B. `listener` prices attaching a bare `RelOptListener`, which allocates two events per rule firing whether it does anything or not |
 | `--plan` | — | print the plan the search produces |
 | `--analyze=PATH --top=N --collapsed=PATH` | 25 | read a JFR recording back and rank it, optionally writing collapsed stacks |
+
+---
+
+## Revisited: the coarse tier, on the trial that gave it its shape
+
+[plan.md](plan.md) records *"one plan is a coarse operation"* as where the tier's shape came from.
+Until now nothing here measured one. `--coarse true` adds two labels — `plan` around `planOnce()`
+and `optimise` nested inside it — beside the fine phase and rule labels that were already there.
+
+```
+coarse operation            executions       mean        p50        p90        p99        max  busy/exec  waiting   in flight
+plan                             2,751    9.08 ms    7.34 ms   14.68 ms   37.75 ms  100.54 ms    9.08 ms     0.0%      1.00/1
+optimise                         2,751    7.73 ms    6.29 ms   12.58 ms   29.36 ms   71.69 ms    7.71 ms     0.0%      1.00/1
+  plan was: rule:FilterIntoJoinRule 25.2%, rule:JoinCommuteRule 11.1%, rule:EnumerableSortRule 8.1%,
+            rule:EnumerableJoinRule 7.9%, phase:sqlToRel 6.9%, rule:EnumerableMergeJoinRule 6.1%, and 13 more
+```
+
+**That second line is the sentence the whole tier was justified by, on code nobody here wrote.**
+*Of the 9.08 ms a plan takes, a quarter is `FilterIntoJoinRule`.* Neither tier says it alone: the
+fine labels give shares of thread-time with no duration attached, and a span gives a duration with
+no idea what filled it.
+
+**The percentiles are what a fine label can never produce.** A mean of 9.08 ms with a p99 of 37.75 ms
+and a worst plan of 100.54 ms is a distribution, and planning latency has a long tail — which is a
+fact about Calcite that twenty-five seconds of sampling could not otherwise have stated.
+
+### Checked against a stopwatch this harness already had
+
+The loop has bracketed `planOnce()` with two `nanoTime` calls since before the coarse tier existed,
+to report *"N plans in T s"*. That makes it a truth rather than a plausibility check, and on
+**foreign code**, which the bench cannot be:
+
+| plan | profiler | harness | diff | harness, exact |
+|---|---|---|---|---|
+| count | 2,751 | 2,751 | **+0.00%** | |
+| mean | 9.08 ms | 9.08 ms | −0.05% | 9.08 ms |
+| p50 | 7.34 ms | 7.34 ms | **+0.00%** | 6.83 ms |
+| p90 | 14.68 ms | 14.68 ms | **+0.00%** | 14.66 ms |
+| p99 | 37.75 ms | 37.75 ms | **+0.00%** | 34.92 ms |
+
+Both sides go through the same histogram, deliberately — the exact column is printed beside them so
+the quantisation is visible, and it is not what is being checked. What is being checked is whether
+the profiler recorded *the same intervals the harness timed*, and it did, to the last bucket.
+
+`waiting 0.0%` and `in flight 1.00/1` are both right: planning is single-threaded and never blocks.
+
+### What it found
+
+**The report tells you to add a coarse label you have already added.** The long-instance detector
+says *"`phase:optimise` … wants a coarse label for its per-execution statistics"* in the very run
+that is measuring `optimise`'s span at 7.73 ms with percentiles. The two tiers have separate id
+spaces and independent names — Calcite registers `phase:optimise` and `optimise` — so nothing
+connects them. [ideas.md](ideas.md) item 21, with three candidate fixes.
+
+**`:trial-calcite:run` had been broken and nobody noticed**, because the documented way to launch this
+trial is `java -cp` and the Gradle `mainClass` pointed at a package the code is not in. Fixed.
+
+| flag | default | what it does |
+|---|---|---|
+| `--coarse true` | off | label `plan` and `optimise` in the coarse tier as well, and check the spans against the loop's own timing |

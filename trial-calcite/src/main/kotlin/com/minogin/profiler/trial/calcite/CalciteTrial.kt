@@ -3,6 +3,10 @@ package com.minogin.profiler.trial.calcite
 import com.minogin.profiler.trial.analyzeJfr
 import com.minogin.profiler.trial.recordExecutionSamples
 import com.minogin.profiler.Profiler
+import com.minogin.profiler.Report
+import com.minogin.profiler.SpanHistogram
+import com.minogin.profiler.coarse
+import com.minogin.profiler.duration
 import com.minogin.profiler.op
 import org.apache.calcite.DataContext
 import org.apache.calcite.adapter.enumerable.EnumerableConvention
@@ -147,6 +151,23 @@ object Phases {
 }
 
 /**
+ * The same two boundaries again, in the coarse tier.
+ *
+ * A plan is what this trial has always been about — `plan.md` records *"one plan is a coarse
+ * operation"* as where the tier's shape came from — and until now nothing measured one. The fine
+ * labels above say which *phase* held the thread-time; they cannot say how long a plan took, and a
+ * planner's user cares about exactly that.
+ *
+ * `optimise` carries both labels on purpose. Fine, it is a share of thread-time; coarse, it is a
+ * duration with a distribution, nested inside `plan`. Having one operation under both is the
+ * cross-check the two tiers otherwise cannot give each other.
+ */
+object CoarsePhases {
+    val plan = Profiler.registerCoarse("plan")
+    val optimise = Profiler.registerCoarse("optimise")
+}
+
+/**
  * One planning cycle, optionally labelled.
  *
  * The labelled and unlabelled paths are the same method rather than two, so that a throughput
@@ -159,6 +180,8 @@ class PlanRunner(
     val mergeJoin: Boolean = true,
     /** Attach a listener that does nothing, to price Calcite's half of the placement mechanism. */
     val emptyListener: Boolean = false,
+    /** Whether a plan and its optimise phase also carry coarse labels. See [CoarsePhases]. */
+    val coarse: Boolean = false,
 ) {
 
     private val chain = ChainSchema(tables)
@@ -192,8 +215,15 @@ class PlanRunner(
             val parsed = op(Phases.parse) { p.parse(sql) }
             val validated = op(Phases.validate) { p.validate(parsed) }
             val rel = op(Phases.sqlToRel) { p.rel(validated).rel }
-            return op(Phases.optimise) {
+            // The coarse label goes outside the fine one, so its span is the whole of the phase
+            // including everything the rules did — which is the quantity a fine label cannot report
+            // and the loop's own stopwatch can check.
+            return if (!coarse) op(Phases.optimise) {
                 p.transform(0, p.emptyTraitSet.replace(EnumerableConvention.INSTANCE), rel)
+            } else coarse(CoarsePhases.optimise) {
+                op(Phases.optimise) {
+                    p.transform(0, p.emptyTraitSet.replace(EnumerableConvention.INSTANCE), rel)
+                }
             }
         } finally {
             p.close()
@@ -275,8 +305,9 @@ private fun load(
     sampler: Boolean,
     mergeJoin: Boolean,
     step: Double,
+    coarse: Boolean = false,
 ) {
-    val runner = PlanRunner(tables, associate, labels, mergeJoin)
+    val runner = PlanRunner(tables, associate, labels, mergeJoin, coarse = coarse)
     println(
         "$tables tables, associate=$associate, labels=$labels, sampler=$sampler; " +
                 "warm-up $warmups plans, then planning for $seconds s"
@@ -298,7 +329,10 @@ private fun load(
     var leaked = 0
     while (System.nanoTime() < deadline) {
         val t0 = System.nanoTime()
-        Sink.keep(runner.planOnce())
+        // The coarse label brackets exactly what the stopwatch above brackets, which is what makes
+        // `times` a truth for it rather than a rough comparison: the two measure the same interval
+        // with the same clock, so what they disagree by is the profiler and nothing else.
+        Sink.keep(if (runner.coarse) coarse(CoarsePhases.plan) { runner.planOnce() } else runner.planOnce())
         times += System.nanoTime() - t0
         // The library's check now, not the trial's own. A plan boundary is the point at which this
         // thread cannot legitimately be inside a rule, which is exactly what expectBalanced wants.
@@ -324,6 +358,68 @@ private fun load(
     )
     println(String.format(Locale.ROOT, "throughput: %.4f plans/s", times.size / (elapsed / 1e9)))
     if (report != null) println("\n" + report.render())
+    if (report != null && runner.coarse) checkPlanSpans(report, times)
+}
+
+/**
+ * The coarse tier against a stopwatch this harness was already keeping.
+ *
+ * The bench can do this because we wrote the bench. Here the *target* is Calcite and the timing is
+ * the trial's own loop, which brackets `planOnce()` with two `nanoTime` calls and has done since
+ * before the coarse tier existed. So the check is not "does the distribution look plausible" but
+ * "does the profiler's p90 equal the p90 of the very same intervals" — on foreign code.
+ *
+ * Compared through the profiler's own histogram on both sides. Comparing a quantised percentile
+ * against an exact one measures the quantiser, which is specified; the exact figure is printed
+ * beside it so a reader can see the quantisation, and it is not what is being checked.
+ */
+private fun checkPlanSpans(report: Report, times: List<Long>) {
+    val plan = report.coarse.firstOrNull { it.name == "plan" } ?: return
+    if (plan.count == 0L || times.isEmpty()) return
+    val sorted = times.sorted()
+    val ref = LongArray(SpanHistogram.BUCKETS)
+    for (v in sorted) ref[SpanHistogram.bucketOf(v)]++
+    val n = sorted.size.toLong()
+    fun exact(p: Double) = sorted[minOf(sorted.size - 1, maxOf(0, Math.ceil(p * sorted.size).toInt() - 1))].toDouble()
+
+    println("\n--- the coarse tier against the trial's own stopwatch ---")
+    println(
+        String.format(
+            Locale.ROOT, "  %-8s %11s %11s %8s %12s", "plan", "profiler", "harness", "diff", "harness,exact"
+        )
+    )
+    println(
+        String.format(
+            Locale.ROOT, "  %-8s %11d %11d %+7.2f%%",
+            "count", plan.count, n, (plan.count.toDouble() / n - 1) * 100
+        )
+    )
+    val rows = listOf(
+        Triple("mean", plan.meanSpanNanos, sorted.sumOf { it } .toDouble() / n),
+        Triple("p50", plan.percentileNanos(0.50), SpanHistogram.percentile(ref, n, 0.50)),
+        Triple("p90", plan.percentileNanos(0.90), SpanHistogram.percentile(ref, n, 0.90)),
+        Triple("p99", plan.percentileNanos(0.99), SpanHistogram.percentile(ref, n, 0.99)),
+    )
+    val exacts = listOf(sorted.sumOf { it }.toDouble() / n, exact(0.50), exact(0.90), exact(0.99))
+    var worst = 0.0
+    for ((i, row) in rows.withIndex()) {
+        val (name, got, want) = row
+        val rel = if (want == 0.0) 0.0 else got / want - 1
+        if (kotlin.math.abs(rel) > worst) worst = kotlin.math.abs(rel)
+        println(
+            String.format(
+                Locale.ROOT, "  %-8s %11s %11s %+7.2f%% %12s",
+                name, duration(got), duration(want), rel * 100, duration(exacts[i])
+            )
+        )
+    }
+    println(
+        String.format(
+            Locale.ROOT, "  worst %.2f%%, tolerance %.1f%% (one histogram bucket)%s",
+            worst * 100, SpanHistogram.PRECISION * 100,
+            if (worst > SpanHistogram.PRECISION) "   OUT OF TOLERANCE" else "   OK"
+        )
+    )
 }
 
 /**
@@ -475,6 +571,7 @@ fun main(args: Array<String>) {
             sampler = opt["sampler"] == "true",
             mergeJoin = opt["mergejoin"] != "false",
             step = opt["step"]?.toDouble() ?: 1.0,
+            coarse = opt["coarse"] == "true",
         )
     }
 }

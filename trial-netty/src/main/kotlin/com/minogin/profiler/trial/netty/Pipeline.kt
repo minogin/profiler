@@ -1,5 +1,6 @@
 package com.minogin.profiler.trial.netty
 
+import com.minogin.profiler.coarse
 import com.minogin.profiler.op
 import io.netty.buffer.Unpooled
 import io.netty.channel.ChannelHandlerContext
@@ -212,9 +213,25 @@ class RenderHandler(@JvmField val opId: Int) : SimpleChannelInboundHandler<Excha
     }
 }
 
-/** Adapts Netty's `FullHttpRequest` into the [Exchange] the rest of the chain speaks. */
-class ExchangeHandler : SimpleChannelInboundHandler<FullHttpRequest>(false) {
+/**
+ * Adapts Netty's `FullHttpRequest` into the [Exchange] the rest of the chain speaks, and carries the
+ * coarse label for the whole request.
+ *
+ * This is the right and only place for it. Netty propagates `fireChannelRead` **synchronously** down
+ * the pipeline on the event loop thread, so everything the request causes — every policy, auth,
+ * route, render and the `writeAndFlush` — happens inside this one call. One handler at the head of
+ * the chain therefore brackets the entire request without any propagation, which is what makes this
+ * a phase 4 workload rather than a phase 5 one.
+ *
+ * **What it is expected to show is nearly no waiting at all**, and that is why it is worth doing. A
+ * request here is pure CPU: Netty's waiting lives in the selector *between* requests, outside any
+ * span. So `mean - busy/exec` must come out near zero. The coarse tier's headline claim is that this
+ * difference is the waiting, and a tool that invents waiting where there is none fails here — which
+ * makes this a negative control rather than a demonstration.
+ */
+class ExchangeHandler(@JvmField val coarseId: Int = -1) : SimpleChannelInboundHandler<FullHttpRequest>(false) {
     override fun channelRead0(ctx: ChannelHandlerContext, request: FullHttpRequest) {
-        ctx.fireChannelRead(Exchange(request))
+        if (coarseId < 0) ctx.fireChannelRead(Exchange(request))
+        else coarse(coarseId) { ctx.fireChannelRead(Exchange(request)) }
     }
 }
