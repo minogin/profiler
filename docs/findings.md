@@ -1373,21 +1373,48 @@ still known.
 so the allocation rate is the execution rate. The boundary `d ≥ max(800 ns, 4 µs × share)` prices the
 ~40 ns of CPU and says nothing about this.
 
-**Open, and recorded as open: `--coarse` makes the bench's own two-truths check fail more often, and
-we do not know why.** Two 60 s runs put the scatter at **18.08%** and **68.43%** against a 6% budget,
-on a *different operation each time*, where the same run without `--coarse` came in at 3.62%.
-Garbage was the first hypothesis and the counters refute it: a run at this rate collects 8 times for
-16 ms, which cannot move a median of trials. A 6 GB young generation did bring one run back to 4.87%,
-which is evidence the other way at a sample size of one. The coarse tier's own four checks pass on
-every run including the failing ones, so this is about the bench's self-measurement and not about the
-numbers the profiler produces — but that is an argument, and this file is for measurements.
+**`--coarse` does not destabilise the bench — that was three unlucky runs, and twenty runs say so.**
+Recorded because it was believed for an afternoon and written into this file as an open question:
+two 60 s coarse runs scattered **18.08%** and **68.43%** against a 6% budget where a control run came
+in at 3.62%, which looked like the coarse tier disturbing the measurement. Ten runs per arm,
+alternating so that drift landed on both equally:
+
+| arm | mean scatter | failed |
+|---|---|---|
+| `--coarse` | **9.56%** | 9 of 10 |
+| control | **13.22%** | 9 of 10 |
+
+The control arm is *worse*. Three runs could not tell a 9.56% distribution from a 13.22% one, and
+reading a difference into them was the error — the same error the `noise` column exists to prevent
+in the report, committed by hand in the harness.
+
+**What the campaign found instead: the bench's own self-check is calibrated for a cold machine.**
+Each arm passed exactly once, on its first run, and failed every run after. `DURATION_TOLERANCE` is
+6%, set from a thread sweep whose worst observation was 2.9%; warm, at 60 s, the scatter sits at
+8–14%. The guard is behaving correctly — this is the heat-soak entry above, reproducing — but the
+consequence is that **the bench is in practice a one-run-per-cooldown instrument at 60 s**, and a
+tolerance taken from cold runs cannot gate warm ones. Clock during the campaign: mean 179% of
+nominal, range 85–220%, a 2.6× swing.
+
+*Caveat on that trace, kept because it is the reason for the rule in CLAUDE.md:* the probe was
+started twelve minutes into a thirty-minute campaign, so it covers the middle only and no per-run
+correlation can be drawn from it.
+
+**The coarse tier's own four checks passed on every one of the twenty runs, including the eighteen
+where the bench declared itself broken.** Not luck: they compare the profiler's spans against the
+workers' stopwatches on *the same intervals*, and counts against counts, so a clock that halves
+mid-run cancels on both sides. The verification is clock-independent by construction, which is a
+stronger property than it was designed for and worth keeping deliberately.
 
 ## Open questions
 
-**Why `--coarse` destabilises the bench's own duration measurement.** See above. What would settle
-it: several runs of each arm rather than three; the scatter recorded per operation rather than only
-its maximum; and `-Xlog:gc` to see whether a collection lands inside a `timeBurnOnce` trial rather
-than inferring it from totals.
+**What the bench's duration tolerance should be on a warm machine.** Settled above that `--coarse` is
+not the cause; unsettled is what to do about a 6% gate that a warm machine cannot meet. Three
+candidates, none measured: raise the tolerance with the temperature stated beside it; require a
+cool-down and fail loudly when the first run of a session is not the one being trusted; or take the
+scatter over a window inside the run so a drifting clock cancels the way it does in the shares. The
+last is the most in keeping with the rest of this project, since it makes the check relative rather
+than absolute — which is exactly why the coarse tier's own checks survive the drift.
 
 **What a coarse label will cost per execution — only two thirds of it is measured.** The tier
 boundary in [profiler.md](profiler.md#where-the-boundary-is) is derived from ~40 ns per coarse

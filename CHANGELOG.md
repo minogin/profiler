@@ -29,11 +29,15 @@ keeping it separate means a propagation bug can never be mistaken for a tier bug
 parallelism column for the same reason: it would be a column of ones. It is measured all the same,
 because a known answer is what an instrument gets calibrated against.
 
-**One open item, recorded rather than explained away:** running the bench with `--coarse` makes the
-bench's *own* two-truths self-check fail more often, on a different operation each time, and the
-cause is not established — garbage was the first hypothesis and the collection counters refute it.
-The coarse tier's own checks pass on every run, including the failing ones. See
-[docs/findings.md](docs/findings.md#the-coarse-tier).
+**Suspected and disproven:** that `--coarse` destabilised the bench's own two-truths self-check.
+Three runs suggested it; twenty say otherwise — 9.56% mean scatter with the coarse tier against
+13.22% without, both failing nine times in ten. The cause is the machine warming up, and the bench's
+6% tolerance was set from cold measurements. Recorded in
+[docs/findings.md](docs/findings.md#the-coarse-tier) because it was believed for an afternoon.
+
+The coarse tier's own four checks passed on all twenty runs including the eighteen where the bench
+declared itself broken — they compare spans against the workers' stopwatches on the same intervals,
+so a drifting clock cancels on both sides.
 
 **Breaking, and deliberately made before the second number exists.** The `threads` column is now
 `in flight`, printed over the threads there were as `3.28/8`, and `OperationStat.concurrency` is now

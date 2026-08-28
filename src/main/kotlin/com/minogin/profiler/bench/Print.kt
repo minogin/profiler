@@ -115,6 +115,17 @@ internal fun printVerdict(o: Outcome, warmedUp: Boolean): Boolean {
             o.maxScatter * 100, OPS[o.worstScatter].name, DURATION_TOLERANCE * 100
         )
     )
+    // The five worst, not only the worst one. A maximum cannot tell "one operation blew up" from
+    // "everything drifted together", and those have different causes: the first is a measurement
+    // that caught something — a pause, a migration — and the second is the machine changing speed
+    // under the run. Printed always, because the question only arises on the runs that fail and by
+    // then the run is over.
+    println(
+        "  scatter, five worst:      " +
+                (0 until OP_COUNT).sortedByDescending { o.scatter[it] }.take(5).joinToString(", ") {
+                    String.format(Locale.ROOT, "%s %.2f%%", OPS[it].name, o.scatter[it] * 100)
+                }
+    )
     println("  warm-up settled:          ${if (warmedUp) "yes" else "NO"}")
 
     val ok = o.ok && warmedUp

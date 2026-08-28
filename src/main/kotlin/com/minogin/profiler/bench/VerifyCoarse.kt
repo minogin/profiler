@@ -247,15 +247,13 @@ internal fun checkCoarse(bench: Bench, o: Outcome, sampler: Sampler, stepMillis:
     // The tier boundary — d >= max(800 ns, 4 us x share) — comes from the ~40 ns of CPU a context
     // costs to make and stamp. It says nothing about the *garbage*, and a context is never recycled
     // by design, so the allocation rate is the execution rate. Printed because it is a real cost the
-    // rule does not price, and because of an open question it does not answer:
+    // boundary rule does not price at all.
     //
-    // **--coarse makes the bench's own two-truths check fail more often, and the cause is not
-    // established.** Measured: 60 s runs with the coarse tier put the scatter at 18.08% and 68.43%
-    // against a 6% budget, on a different operation each time, while the same run without it came in
-    // at 3.62%. Garbage was the first hypothesis and these two counters refute it — a run at this
-    // rate collects 8 times for 16 ms, which cannot move a median of trials. A 6 GB young generation
-    // did bring one run back to 4.87%, which is evidence the other way and may be coincidence at this
-    // sample size. Recorded in findings.md as open rather than explained away.
+    // It is *not* why the bench fails its own two-truths check at 60 s. That was suspected for an
+    // afternoon on three runs and refuted by twenty: ten per arm gave 9.56% mean scatter with the
+    // coarse tier against 13.22% without it, both failing 9 times in 10. The cause is the machine
+    // warming up — each arm passes on its first, cold run and never again — and the 6% tolerance was
+    // set from cold measurements. See findings.md, "The coarse tier".
     var executions = 0L
     for (t in 0 until Profiler.coarseCount()) executions += totals[t]?.count ?: 0L
     val seconds = o.runNanos / 1e9
@@ -272,8 +270,8 @@ internal fun checkCoarse(bench: Bench, o: Outcome, sampler: Sampler, stepMillis:
             "        %,d collections taking %,d ms during the run%s",
             o.gcCollections, o.gcMillis,
             if (o.ok) ""
-            else " - and the bench failed its own two-truths check, which --coarse makes more likely" +
-                    " for reasons not yet established (findings.md)"
+            else " - the bench also failed its own two-truths check, which is the machine warming up" +
+                    " and not this tier: measured over 20 runs, findings.md"
         )
     )
 

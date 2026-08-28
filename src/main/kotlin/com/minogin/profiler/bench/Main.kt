@@ -369,6 +369,9 @@ internal class Outcome(
     val worstShare: Int,
     val maxScatter: Double,
     val worstScatter: Int,
+    /** Scatter per operation, not only the worst. Kept so a run can say whether one operation blew
+     *  up or the whole set drifted - those have different causes, and the maximum alone hides which. */
+    val scatter: DoubleArray = DoubleArray(OP_COUNT),
     val clockDuringRun: DoubleArray,
     /** Calls per operation as counted by the hook itself, for cross-checking the graph expansion. */
     val hookCalls: LongArray,
@@ -477,6 +480,7 @@ internal fun measureOnce(bench: Bench, seconds: Int, sampler: Sampler?): Outcome
         worstShare = worstShare,
         maxScatter = scatter[worstScatter],
         worstScatter = worstScatter,
+        scatter = scatter,
         clockDuringRun = clockDuringRun,
         hookCalls = hookCalls,
         coarseTotals = coarseTotals,

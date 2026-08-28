@@ -70,4 +70,11 @@ Add-Content -Path $out -Value "$((Get-Date).ToString('HH:mm:ss'))`t$line"
 * `Get-Counter` was tested as a way of *keeping* the CPU boosted and did not reproduce here — see
   `docs/findings.md`, "The probe does not keep the CPU warm". Run it for the trace, not for that.
 * Use per-core (`(*)`) rather than `(_Total)` when the question is about which cores the work landed
-  on — this laptop is hybrid, and performance and efficiency cores read very differently. 
+  on — this laptop is hybrid, and performance and efficiency cores read very differently.
+* **Never swap instruments in the middle of a measurement, and stop the old one before starting the
+  new one.** Improving the probe halfway through a campaign left two of them polling the machine
+  being measured, which contaminated the runs that overlapped.
+* **Two runs that differ are not a finding.** The bench fails its own self-check about nine times in
+  ten once the machine is warm, so a difference between a handful of runs is noise. Ten per arm,
+  alternating, before drawing a conclusion — three runs once "showed" a defect that twenty runs
+  disproved. 
