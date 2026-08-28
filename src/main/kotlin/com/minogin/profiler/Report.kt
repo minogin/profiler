@@ -109,13 +109,45 @@ class OperationStat internal constructor(
     val waitingShare: Double get() = if (hits == 0L) 0.0 else waitingHits.toDouble() / hits
 
     /**
-     * Threads inside this operation at once, averaged over the ticks where it was running at all.
+     * **Executions of this operation in flight at once**, averaged over the ticks where any were.
      *
-     * The divisor that turns occupancy into elapsed time, and a diagnosis in its own right: the
-     * same hundred thread-seconds of waiting is a convoy at fifteen threads and mild persistent
-     * contention at 1.7, and the two want opposite fixes.
+     * It counts executions, not threads serving one of them, and the distinction is structural
+     * rather than a convention we have chosen. A fine operation is atomic and never leaves the
+     * thread that entered it — a body that suspends or hands off is by construction not fine — so
+     * one thread inside the label *is* one execution of it, and the two counts are the same count.
+     * The parallelism of a **single** execution across threads is not a quantity this tier can hold at
+     * all: it needs an execution to have an identity that a second thread can be handed, which is
+     * exactly what a coarse context is and what an integer in a slot can never be.
+     *
+     * So this is one factor of a product, and the other factor does not exist yet — it is
+     * **parallelism** in the work-span sense, `work / span` for one execution, and it needs the
+     * coarse tier:
+     *
+     *     threads inside = executions in flight x parallelism per execution
+     *
+     * Here the second factor is 1 by construction, so the product collapses and either reading
+     * gives the same number. That is exactly why the column must stop being called "threads" now
+     * rather than when a coarse column arrives beside it and the two factors come apart. See
+     * plan.md, phase 5.
+     *
+     * **What this number depends on, stated because it is not the code.** Little's law relates the
+     * mean over *all* time to the load — `L = lambda x W` — and this column is not that mean: it
+     * divides by the ticks where the operation was occupied rather than by every tick, so
+     * `column = lambda x W x parallelism / p_active`, and it is capped by the threads there are:
+     *
+     *     threads inside = min(lambda x W x parallelism, P)
+     *
+     * Below the cap it tracks the arrival rate; at the cap it reports the pool size and stops
+     * tracking the load at all. Twice the clients is twice this number with the code unchanged, so
+     * it is a property of the deployment in both regimes. It earns its place because [elapsedNanosOf]
+     * cannot be computed without it, and because printed over the thread count — see
+     * [Report.inFlightOf] — the ratio says which of the two regimes produced it.
+     *
+     * The divisor that turns occupancy into elapsed time: the same hundred thread-seconds of
+     * waiting is a convoy at fifteen executions in flight and mild persistent contention at 1.7,
+     * and the two want opposite fixes.
      */
-    val concurrency: Double get() = if (activeTicks == 0L) Double.NaN else hits.toDouble() / activeTicks
+    val inFlight: Double get() = if (activeTicks == 0L) Double.NaN else hits.toDouble() / activeTicks
 }
 
 /**
@@ -225,6 +257,28 @@ class Report internal constructor(
      * counterfactual — see the warning at the foot of the report.
      */
     fun elapsedNanosOf(op: OperationStat): Double = op.activeTicks * stepNanos
+
+    /**
+     * [OperationStat.inFlight] printed **over the threads it could have been**, as `3.28/8`.
+     *
+     * The denominator is not decoration and it is not there to save the reader an arithmetic step.
+     * The numerator alone invites the one reading it cannot support — *"this operation used 3.28
+     * threads"*, as though that were a property of the operation — when it is a property of the
+     * deployment, and of two different parts of it depending on which regime the run is in:
+     *
+     * - **below saturation** it tracks the arrival rate, so twice the clients is twice the number
+     *   and the code is unchanged;
+     * - **at the ceiling** it stops tracking the load at all and reports the pool size, because
+     *   there is nothing left to spread the work onto.
+     *
+     * The ratio is the only part of the column that survives that objection: it says which of the
+     * two regimes produced the number. `3.28/8` is *tracking your load*; `7.9/8` is *the pool is
+     * pinned inside this label*, which is a finding — about the pool, not about the operation.
+     */
+    fun inFlightOf(op: OperationStat): String {
+        val n = op.inFlight
+        return if (n.isNaN()) "-" else String.format(Locale.ROOT, "%.2f/%d", n, threads)
+    }
 
     /** Thread-time spent inside any label. */
     val labelledNanos: Double get() = labelledHits * stepNanos
@@ -555,8 +609,8 @@ class Report internal constructor(
         appendLine("=".repeat(WIDTH))
         appendLine(
             String.format(
-                Locale.ROOT, "%-26s %8s %10s %8s %9s %7s %13s %8s %6s %10s %7s",
-                "operation", "share", "occupancy", "waiting", "elapsed", "threads",
+                Locale.ROOT, "%-26s %8s %10s %8s %9s %11s %13s %8s %6s %10s %7s",
+                "operation", "share", "occupancy", "waiting", "elapsed", "in flight",
                 "calls", "hits", "noise", "impl/call", "over 1t"
             )
         )
@@ -569,9 +623,9 @@ class Report internal constructor(
         for (op in seen.sortedByDescending { it.hits }) {
             appendLine(
                 String.format(
-                    Locale.ROOT, "%-26s %7.3f%% %10s %7.1f%% %9s %7.2f %,13d %8d %5.2f%% %10s %6.2f%%",
+                    Locale.ROOT, "%-26s %7.3f%% %10s %7.1f%% %9s %11s %,13d %8d %5.2f%% %10s %6.2f%%",
                     op.name, shareOf(op) * 100, threadTime(occupancyNanosOf(op)),
-                    op.waitingShare * 100, threadTime(elapsedNanosOf(op)), op.concurrency,
+                    op.waitingShare * 100, threadTime(elapsedNanosOf(op)), inFlightOf(op),
                     op.calls, op.hits, noiseFloorOf(op) * 100,
                     duration(impliedNanosOf(op)), op.stuckShare * 100
                 )
@@ -596,10 +650,14 @@ class Report internal constructor(
         appendLine("  label is added, moved or removed — which makes it the column to compare between two runs")
         appendLine("waiting is the share of those samples whose thread was parked, blocked or waiting; a thread")
         appendLine("  the scheduler merely preempted still reads runnable, so this is waiting on another thread")
-        appendLine("elapsed is wall clock with at least one thread inside, and threads is occupancy / elapsed —")
+        appendLine("elapsed is wall clock with at least one thread inside, and in flight is occupancy / elapsed —")
         appendLine("  occupancy sums across threads and elapsed does not, so 100 s of waiting is a convoy to be")
-        appendLine("  broken up at 15 threads and steady contention to be designed out at 1.7. Not latency: it")
+        appendLine("  broken up at 15 in flight and steady contention to be designed out at 1.7. Not latency: it")
         appendLine("  is every execution's interval unioned, so it says nothing about any single one of them")
+        appendLine("in flight counts EXECUTIONS at once, over the threads there were — never threads spent on one")
+        appendLine("  execution. It tracks your arrival rate until it saturates at your pool, so it is a property")
+        appendLine("  of this run and not of your code; read it against the denominator, where near the ceiling")
+        appendLine("  means the pool is pinned in this label. It is here because elapsed needs it as the divisor")
         appendLine("noise is 1/sqrt(hits), the error chance alone gives")
         appendLine(
             String.format(
@@ -703,7 +761,7 @@ class Report internal constructor(
         const val COVERAGE_GAP = 0.005
 
         /** How wide the report's rules and column layout are. */
-        const val WIDTH = 126
+        const val WIDTH = 130
 
         /** The short-operation bias, so the check cannot accuse an operation of the sampler's own error. */
         const val FLOOR_BIAS_ALLOWANCE = 1.2

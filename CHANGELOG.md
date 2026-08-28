@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+**Breaking, and deliberately made before the second number exists.** The `threads` column is now
+`in flight`, printed over the threads there were as `3.28/8`, and `OperationStat.concurrency` is now
+`OperationStat.inFlight`.
+
+It always counted *executions of a label running at once*, never threads spread over one execution —
+for a fine operation those are the same count, because a fine operation is atomic and never leaves
+the thread that entered it. They stop being the same when the coarse tier arrives and a span can
+cross a thread, where `threads inside = executions in flight × parallelism per execution`. Eight threads
+in a label is then either eight serial requests or two requests on four threads each, which want
+opposite fixes. Renamed now rather than then, because a reader who has learned `threads` to mean
+per-request parallelism will not un-learn it when a second column appears beside it. `parallelism` is
+reserved for that second column: it is `work ÷ span` for one execution, the word's textbook meaning.
+
+**And the ratio is not cosmetic.** The number is a property of your deployment rather than of your
+code — by Little's law twice the arrival rate is twice the number with nothing changed, and it caps
+at the pool size, since `threads inside = min(λ·W·parallelism, P)`. Below the ceiling it tracks your
+load, at the ceiling it reports your pool. The ratio is what says which regime produced it, and it is
+the only part of the column that is a finding. It stays in the table because `elapsed = occupancy ÷
+in flight` cannot be computed without it.
+
 ## v0.1.0 — 2026-08-28
 
 First release. The **fine tier**: operations identified by an integer in a thread-local slot, written

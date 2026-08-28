@@ -128,7 +128,7 @@ column and warning means is [output.md](output.md).
 
 Not built: the coarse tier, following work across thread hand-offs and coroutines, the
 whole-application parallelism coefficient, the annotation and agent surface, JFR output. Thread
-state and per-operation concurrency *are* built — they are the waiting, elapsed and threads columns.
+state and per-operation concurrency *are* built — they are the waiting, elapsed and in-flight columns.
 Coroutines and virtual threads are untested and so unclaimed. [plan.md](plan.md) has the order.
 
 One thing worth carrying away, because it cost a day to learn: **a share is not a counterfactual.**

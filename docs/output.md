@@ -100,11 +100,11 @@ labelled occupancy and the bound becomes tight again.
 ## The table
 
 ```
-operation                     share  occupancy  waiting   elapsed threads         calls     hits  noise  impl/call over 1t
-flushBatch                  44.250%    38.54 s     0.0%   11.75 s    3.28   288,514,362    38319  0.51%   133.6 ns   0.01%
-validateRecord              41.222%    35.91 s     0.0%   11.68 s    3.07   288,514,362    35697  0.53%   124.5 ns   0.00%
-parseRecord                  9.478%     8.26 s     0.3%    6.14 s    1.34   288,514,362     8208  1.10%    28.6 ns   0.27%
-indexRecord                  5.050%     4.40 s     0.0%    3.73 s    1.18   288,514,362     4373  1.51%    15.2 ns   0.05%
+operation                     share  occupancy  waiting   elapsed   in flight         calls     hits  noise  impl/call over 1t
+flushBatch                  44.250%    38.54 s     0.0%   11.75 s      3.28/8   288,514,362    38319  0.51%   133.6 ns   0.01%
+validateRecord              41.222%    35.91 s     0.0%   11.68 s      3.07/8   288,514,362    35697  0.53%   124.5 ns   0.00%
+parseRecord                  9.478%     8.26 s     0.3%    6.14 s      1.34/8   288,514,362     8208  1.10%    28.6 ns   0.27%
+indexRecord                  5.050%     4.40 s     0.0%    3.73 s      1.18/8   288,514,362     4373  1.51%    15.2 ns   0.05%
 ```
 
 | column | what it is | what to watch for |
@@ -113,7 +113,7 @@ indexRecord                  5.050%     4.40 s     0.0%    3.73 s    1.18   288,
 | **occupancy** | `hits × step`, as summed thread-time | **absolute**, so unlike share it does not move when a label is added, moved or removed. This is the column to compare between two runs |
 | **waiting** | the share of those samples whose thread was parked, blocked or waiting | a thread the scheduler merely preempted still reads runnable, so this is waiting that *another thread* caused. Blind to native waits |
 | **elapsed** | wall clock with at least one thread inside | not latency: it is every execution's interval unioned, so it says the operation had *somebody* in it for this long and nothing about any single execution |
-| **threads** | `occupancy ÷ elapsed` — mean concurrency while it was running | the number that turns occupancy back into real cost. 100 s of waiting at 15 threads is a convoy to break up; at 1.7 it is steady contention to design out |
+| **in flight** | `occupancy ÷ elapsed`, over the threads there were — **executions of this operation running at once**, averaged over the ticks where any were | **a property of your load, not of your code** — see below. It is the number that turns occupancy back into real cost: 100 s of waiting at 15 in flight is a convoy to break up; at 1.7 it is steady contention to design out |
 | **calls** | exact, counted by the hook | a share cannot tell *200M calls at 8 ns* from *1000 calls at 1.6 ms*, and those want opposite fixes |
 | **hits** | samples that caught this operation | the evidence behind the share |
 | **noise** | `1/√hits` — the error chance alone gives | **if two rows differ by less than their noise, they are not ranked, they are tied** |
@@ -123,6 +123,74 @@ indexRecord                  5.050%     4.40 s     0.0%    3.73 s    1.18   288,
 Operations that were never sampled are folded into one line rather than printed as a screen of
 zeroes — but a *called* operation with no samples is itself a finding, so the count and the names
 are kept.
+
+### `in flight` counts executions, not the threads spent on one of them
+
+This column used to be called `threads`, and for a fine operation the two are the same number — but
+they are not the same question, and the name was the wrong one of the two.
+
+A fine operation is atomic and never leaves the thread that entered it: a body that suspends or
+hands work off is, by construction, not fine. So one thread inside the label *is* one execution of
+it. `3.28/8` above means **3.28 executions of `flushBatch` were running at once, out of 8 threads** —
+3.28 unrelated pieces of work, on 3.28 different threads.
+
+What it emphatically does not mean is *"this operation used 3.28 threads"* in the sense of one piece
+of work spread over three. That quantity is **parallelism** in its textbook sense — `work ÷ span` for
+one execution — and it cannot exist in this tier at all, because it needs an execution to have an
+identity that a second thread can be handed, and a fine operation is an integer in a thread's slot.
+The two are factors of one product:
+
+```
+threads inside an operation = executions in flight  ×  parallelism per execution
+```
+
+Here the second factor is 1 by construction, so the product collapses and either reading gives the
+same number. It stops collapsing the moment a coarse span can cross a thread, and then eight threads
+in a label means either *eight requests, each serial* or *two requests on four threads each* — the
+same 8, opposite fixes. The fine tier measures the first factor. Only a coarse context can measure
+the second.
+
+### And the first factor is about your load, which is why it is printed as a ratio
+
+Here is the objection this column has to survive: **it is not a property of your code.** Sales bring
+twice as many clients tomorrow and it doubles, with not a line changed. That is Little's law,
+`L = λ·W` — the mean number in a system is the arrival rate times the time each one spends there.
+
+Two corrections to that, because the loose version of it is wrong in both directions:
+
+**It is not `L`.** Little's law is the mean over *all* time; this column divides by the ticks where
+the operation was occupied, not by every tick. Writing `p_active` for the fraction of ticks it was
+occupied at all:
+
+```
+column = λ · W · parallelism / p_active
+```
+
+For a label that is nearly always busy the two coincide. For a rare one the column is several times
+`L`, which is the right behaviour — it answers *"when this ran, how many ran at once"* and not *"how
+much of the run was this"*, which is what `share` is for.
+
+**And it cannot grow forever.** There are only so many threads, so past saturation the extra arrivals
+do not go inside the label — they queue outside it, or `W` grows:
+
+```
+threads inside = min( λ · W · parallelism ,  P )
+```
+
+So below the ceiling the column tracks your arrival rate, and at the ceiling it stops tracking the
+load altogether and reports your pool size. Both regimes are about the deployment. **Neither is
+about the operation.**
+
+The ratio is what tells you which one you are looking at, and it is the only part of the column that
+survives the objection:
+
+| reading | regime | what it means |
+|---|---|---|
+| `3.28/8` | below saturation | tracking your load. Not a finding about this operation |
+| `7.9/8` | pinned at the ceiling | the pool is inside this label — a finding, but about the pool |
+
+It is in the table at all because `elapsed` cannot be computed without it: `elapsed = occupancy ÷ in
+flight` is the one thing that turns summed thread-time back into wall time.
 
 ---
 

@@ -158,11 +158,11 @@ threads were on CPU 98.68% of sampled wall time
 at most 1.47 pp of any share is a thread waiting rather than working
 so the ranking is trustworthy
 ================================================================================================
-operation            share  occupancy  waiting   elapsed threads         calls    hits  noise  impl/call
-flushBatch         44.250%    38.54 s     0.0%   11.75 s    3.28   288,514,362   38319  0.51%   133.6 ns
-validateRecord     41.222%    35.91 s     0.0%   11.68 s    3.07   288,514,362   35697  0.53%   124.5 ns
-parseRecord         9.478%     8.26 s     0.3%    6.14 s    1.34   288,514,362    8208  1.10%    28.6 ns
-indexRecord         5.050%     4.40 s     0.0%    3.73 s    1.18   288,514,362    4373  1.51%    15.2 ns
+operation            share  occupancy  waiting   elapsed   in flight         calls    hits  noise  impl/call
+flushBatch         44.250%    38.54 s     0.0%   11.75 s      3.28/8   288,514,362   38319  0.51%   133.6 ns
+validateRecord     41.222%    35.91 s     0.0%   11.68 s      3.07/8   288,514,362   35697  0.53%   124.5 ns
+parseRecord         9.478%     8.26 s     0.3%    6.14 s      1.34/8   288,514,362    8208  1.10%    28.6 ns
+indexRecord         5.050%     4.40 s     0.0%    3.73 s      1.18/8   288,514,362    4373  1.51%    15.2 ns
 ```
 
 Three things to know before you trust a table like that:
@@ -360,7 +360,7 @@ samples across every thread, the span from the context, and their ratio is how w
 actually spread out.
 
 **Built since:** thread state beside every sample, per-operation concurrency, and a per-thread bound
-on the error of every share — the `waiting`, `elapsed` and `threads` columns are those. And the
+on the error of every share — the `waiting`, `elapsed` and `in-flight` columns are those. And the
 library surface enough to publish: **v0.1.0**, Apache-2.0, on JitPack.
 
 **Still to build:** the coarse tier, propagation across thread boundaries (executors, coroutines,

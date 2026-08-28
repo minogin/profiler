@@ -273,7 +273,7 @@ photographs, and everything the tier cannot do follows from the same two sentenc
 photograph contributes three. Lucene ran eight workers and needed no new machinery for it.
 
 **The mean is taken; the distribution is not.** Each photograph says *how many* threads were inside
-operation X at that instant, and the report keeps the average of that — the `threads` column, which
+operation X at that instant, and the report keeps the average of that — the `in-flight` column, which
 is what turns occupancy back into elapsed time below. What is still discarded is the *shape*:
 *"one thread 18% of the time, eight threads 4% of the time"* distinguishes steady contention from a
 sawtooth, and those want different fixes. No stack profiler can produce either — they sample each
@@ -317,20 +317,41 @@ Thread state answers *what was this thread doing*. The question here is *how man
 the same instant* — and each tick already knows that, because the sampler photographs every thread
 in one pass. Kept rather than summed away, it closes the gap arithmetically:
 
-> **elapsed = occupancy ÷ mean concurrency while active**
+> **elapsed = occupancy ÷ mean executions in flight while active**
+
+**"In flight", precisely, and it is not a hedge.** The divisor counts *executions of this label
+running at once*, not threads spread over one of them. For a fine operation those are the same
+count — it is atomic and never leaves the thread that entered it, so one thread inside is one
+execution — and they stop being the same the moment a coarse span can cross a thread, where
+`threads inside = executions in flight × parallelism per execution`, parallelism being `work ÷ span`
+for one execution. The fine tier measures the first factor and cannot hold the second; see
+[plan.md](plan.md#two-parallelisms-and-the-identity-that-relates-them--settled-before-any-of-it-was-built).
+
+**And the divisor is a property of the run, not of the code**, which is why it is printed over the
+thread count as `3.28/8` rather than alone. Little's law gives the mean over all time as `L = λ·W`,
+so twice the arrival rate is twice the number with nothing changed in the program. This is not quite
+`L` — it divides by the ticks where the operation was occupied rather than by all of them, giving
+`λ·W·parallelism / p_active` — and it is capped, since there are only so many threads:
+
+> **threads inside = min(λ · W · parallelism, P)**
+
+Below the cap it tracks the load; at the cap it reports the pool size. The ratio against `P` is
+therefore the only part of it that is a finding: near the ceiling says the pool is pinned inside this
+label. It is in the report because `elapsed` cannot be computed without it, not because it diagnoses
+anything on its own.
 
 **Worked, because the two answers are opposite.** A sixty-second run on sixteen threads, and
 `lockAcquire` holding 100 thread-seconds of waiting occupancy:
 
-| | mean concurrency while active | elapsed | the diagnosis |
+| | mean executions in flight while active | elapsed | the diagnosis |
 |---|---|---|---|
 | **convoy** — fifteen threads pile on at once, in bursts | 15 | **6.7 s** | worth at most 11% of the run; break up the convoy |
 | **drizzle** — persistent mild contention | 1.7 | **59 s** | spans essentially the whole run; design the contention out |
 
-Same occupancy, opposite fix. So **thread state and per-operation concurrency are halves of one
+Same occupancy, opposite fix. So **thread state and per-operation in-flight parallelism are halves of one
 feature**, and neither is much use alone: the first says which part of the total is fiction, the
 second says by how much. Both come from photographs already being taken, and **both are built** —
-the `waiting`, `elapsed` and `threads` columns are the three of them. It also detects the bimodal
+the `waiting`, `elapsed` and `in-flight` columns are the three of them. It also detects the bimodal
 operation of case **A** and answers case **C** outright: one mechanism, three rows. What phase 6
 still owes is the whole-application coefficient, and what item 16 still owes is the histogram behind
 the mean.
@@ -474,7 +495,7 @@ analysis does not go anywhere.
 
 **That half is recorded now**, per sample and per operation, and it is what the `waiting` column and
 the per-thread duty bound are built on. The coefficient itself is still not computed: what exists is
-concurrency *per operation* — `occupancy ÷ elapsed`, one number per label — and what phase 6 owes is
+in-flight parallelism *per operation* — `occupancy ÷ elapsed`, one number per label — and what phase 6 owes is
 the same reading taken across the whole application, which is the quantity that came out at ~3 on
 the workload this project started from.
 

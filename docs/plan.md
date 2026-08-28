@@ -1046,6 +1046,82 @@ why it cannot substitute for pointing the tool at somebody else's.
 
 **What this unlocks:** per-operation parallelism becomes real rather than trivially 1.
 
+### Two parallelisms, and the identity that relates them · settled before any of it was built
+
+There will be two numbers in the report that both look like "parallelism", and they are different
+groupings of the *same* sample stream. Naming them apart is not cosmetic — it is the difference
+between two findings that want opposite fixes.
+
+- **In flight** — group samples by the *label*. How many executions of it were running at once.
+  This is the fine tier's `occupancy ÷ elapsed`, and it is what the column called `threads` has
+  always been. The standard name for it is the queueing one: the number in the system, `L`.
+- **Parallelism** — group samples by the *context instance*. How many threads were working on one
+  execution: `work ÷ span`, which is the work-span model's `T₁/T∞` and the word's textbook meaning.
+  Phase 5, and it does not exist before then.
+
+Both names are taken from the literature rather than invented here, and the second one is what
+anybody already means by "parallelism" — which is exactly why the fine column must not use the word.
+"Fan-out" was the first candidate and was dropped: common in distributed systems, but it is not what
+the quantity is called where it is defined.
+
+**The fine-tier number is in-flight parallelism, and it is structurally incapable of being
+anything else.** A fine operation is atomic and never leaves the thread that entered it — a
+suspending or handing-off body is by construction not fine — so one thread inside the label is
+exactly one execution of it, and counting threads and counting concurrent executions are the same
+count. Fan-out needs an execution to have an identity a second thread can be handed; a fine
+operation is an integer in a slot and can never have one.
+
+The two compose exactly, being the same sum sliced two ways:
+
+```
+threads inside a coarse type = executions in flight  ×  parallelism per execution
+```
+
+Eight threads in a label is `8 × 1` — eight serial requests, so parallelise a request, the machine is
+already full — or `2 × 4` — two requests on four threads each, so look elsewhere for the latency.
+The fine tier cannot tell those apart and does not claim to; it measures the first factor, and only
+a coarse context can measure the second.
+
+**Only the second factor is about the code, and the report has to say so.** The first tracks the
+deployment and nothing else: by Little's law the mean number in a system is `L = λ·W`, so twice the
+clients is twice the number with the program unchanged. Two corrections to that, both needed for the
+statement to be true — the column is not `L`, because it divides by the ticks where the operation was
+occupied rather than by all of them, giving `λ·W·parallelism / p_active`; and it cannot grow without
+limit, because there are only so many threads and the surplus queues outside the label instead:
+
+```
+threads inside = min( λ · W · parallelism , P )
+```
+
+Below the ceiling it tracks the arrival rate; at the ceiling it reports the pool size. So it is
+printed as a ratio — `3.28/8` — because the ratio is the one part of it that is a finding: near the
+ceiling means the pool is pinned inside this label. It stays in the table because `elapsed` cannot be
+computed without it, not because it diagnoses anything alone.
+
+Parallelism does not move under any of that: a request that splits four ways splits four ways for one
+client or a thousand. The honest caveat is that what gets *measured* is `min(what the code could do,
+threads actually free)`, so a saturated pool reads it low — a real limit on the number, and one the
+report will have to state rather than a defect in the naming.
+
+**Done already, on the coarse-tier branch:** the column is named `in flight` rather than `threads`
+and printed over the thread count as `3.28/8`, in `render()`, in
+[output.md](output.md#in-flight-counts-executions-not-the-threads-spent-on-one-of-them) and in
+`OperationStat.inFlight`, which was `concurrency`. Renamed *before* the second number exists, because
+a reader who has learned `threads` to mean per-request parallelism will not un-learn it when a second
+column appears beside it. `parallelism` is reserved for that column and used for nothing else.
+
+**What it buys phase 4 and phase 5.** The identity is a cross-check, not just a naming rule. Phase 4
+is same-thread, so parallelism must come out **exactly 1.0** — a known answer to measure against, in the
+same build-the-truth-first discipline as everything else here. Anything else means the instance
+stamping is broken, and we find that out while the truth is still known. In phase 5 the same counter
+starts saying something, and a missed hand-off has a signature it cannot hide: parallelism that stays
+stubbornly at 1.0.
+
+Measuring it costs one counter. The sampler already does `if (seenAt[op] != ticks) activeTicks[op]++`
+to count an operation's ticks rather than its slots; counting *occupied instances* per tick is the
+identical idiom with the stamp on the context object instead of in an array — one write per live
+context per tick, on the thread that has a core to itself.
+
 ## Phase 6 — thread state and the whole-application coefficient · partly done
 
 ### What is built · **done**
@@ -1057,7 +1133,7 @@ The fine-tier half — thread state per operation, and per-operation concurrency
 pinning a thread that dies without releasing. Each tick the walk reads that state and, for a slot
 inside a label, counts the hit as waiting when the thread is not runnable; separately it stamps the
 operation as *seen this tick*, which counts ticks and not slots and so measures the operation's
-wall-clock footprint. Three columns follow: **waiting**, **elapsed**, and **threads** — the last two
+wall-clock footprint. Three columns follow: **waiting**, **elapsed**, and **in-flight** — the last two
 being `activeTicks × step` and `hits / activeTicks`.
 
 **Verified against a second truth that shares nothing with it.** Under the contended lock at 1.60
