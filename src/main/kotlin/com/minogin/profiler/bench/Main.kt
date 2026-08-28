@@ -207,7 +207,7 @@ fun main(args: Array<String>) {
     // The cost of a busy-loop iteration is not a constant: it is taken at runtime, and only
     // after a warm-up.
     registerOperations()
-    if (coarseLabels) registerCoarseOperations()
+    if (coarseLabels) registerCoarseOperations(violate = opt["coarse"] == "violate")
     // After the catalogue, so it takes the id straight after the bench's twenty and none of the
     // truth machinery — which is indexed by operation id up to OP_COUNT — has to know about it.
     // Its truth is not the configured one anyway: it is whatever the workers measured.

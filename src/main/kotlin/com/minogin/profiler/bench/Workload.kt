@@ -112,8 +112,19 @@ val REQUEST_CHUNKS = IntArray(64).also {
  * Registers the coarse catalogue. Separate from [registerOperations] because the coarse tier is a
  * separate id space, and because the bench can run entirely without it.
  */
-fun registerCoarseOperations() {
+/**
+ * The operation the boundary rule rejects, labelled on purpose. `--coarse=violate`.
+ *
+ * `traverse` is 905 ns and holds 65.2% of the run, so condition 1 demands 2610 ns and it misses by
+ * a factor of three. Labelling it is how the floor check gets exercised end to end rather than only
+ * in a unit test: the report must name it, say what a context costs as a fraction of it, and say
+ * what to do instead. A check nobody has watched fire is a check nobody knows is wired up.
+ */
+const val COARSE_VIOLATOR = 19
+
+fun registerCoarseOperations(violate: Boolean = false) {
     for (id in COARSE_OPS) coarseTypeOf[id] = Profiler.registerCoarse(OPS[id].name)
+    if (violate) coarseTypeOf[COARSE_VIOLATOR] = Profiler.registerCoarse(OPS[COARSE_VIOLATOR].name)
     requestType = Profiler.registerCoarse("request")
 }
 

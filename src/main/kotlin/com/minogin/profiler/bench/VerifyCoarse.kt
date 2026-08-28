@@ -243,6 +243,40 @@ internal fun checkCoarse(bench: Bench, o: Outcome, sampler: Sampler, stepMillis:
         )
     }
 
+    // --- 5. the tier boundary, checked from the coarse side --------------------------
+    // Through the library's own coarseFloorNanos and coarseTooSmallMessage, not a copy of the rule:
+    // a check written twice is a check that drifts, and this bench has already had that happen once
+    // within an hour of the second copy being written.
+    val observed = sampler.totalSamples() * stepNanos
+    println("\n  the tier boundary, from the coarse side - d >= max(800 ns, 4 us x share)")
+    var violations = 0
+    for (t in 0 until Profiler.coarseCount()) {
+        val a = totals[t] ?: continue
+        if (a.count == 0L) continue
+        val hits = sampler.coarseInclusiveHits[t]
+        val share = if (observed <= 0.0) 0.0 else hits * stepNanos / observed
+        val noise = if (hits <= 0L) 1.0 else 1.0 / Math.sqrt(hits.toDouble())
+        val floor = coarseFloorNanos((share * (1 - noise)).coerceAtLeast(0.0))
+        val mean = a.sumNanos.toDouble() / a.count
+        val bad = mean < floor
+        if (bad) violations++
+        println(
+            String.format(
+                Locale.ROOT, "    %-14s mean %10s, share %5.1f%%, needs %10s   %s",
+                Profiler.coarseNameOf(t), duration(mean), share * 100, duration(floor),
+                if (bad) "TOO SMALL" else "ok"
+            )
+        )
+        if (bad) {
+            for (line in coarseTooSmallMessage(Profiler.coarseNameOf(t), a.count, mean, floor).lines()) {
+                println("      $line")
+            }
+        }
+    }
+    // Not a failure of the run. --coarse=violate exists precisely to make this fire, and a check
+    // that turned its own demonstration red would be unusable as a demonstration.
+    if (violations > 0) println("    ($violations label(s) outside the boundary - expected under --coarse=violate)")
+
     // --- what it cost, which is not what the boundary rule prices ---------------------
     // The tier boundary — d >= max(800 ns, 4 us x share) — comes from the ~40 ns of CPU a context
     // costs to make and stamp. It says nothing about the *garbage*, and a context is never recycled

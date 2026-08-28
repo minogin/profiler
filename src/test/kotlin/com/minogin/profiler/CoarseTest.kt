@@ -147,6 +147,26 @@ class CoarseTest {
         LongArray(MAX_OPERATIONS + 1),
     )
 
+    /**
+     * A report with a 1 ms step, so that a hit is a millisecond and the arithmetic in these tests
+     * can be done in one's head. [labelled] sets the denominator every coarse share is taken over.
+     */
+    private fun report(coarse: List<CoarseStat>, labelled: Long = 1_000_000) = Report(
+        operations = listOf(OperationStat(0, "fine", labelled, labelled, 0, 0, 0, 0, labelled)),
+        idleHits = 0,
+        ticks = 1_000_001,
+        samplingSpanNanos = 1_000_000_000_000,
+        durationNanos = 1_000_000_000_000,
+        threads = 8,
+        duty = DutyReport(
+            labelledDuty = 0.99, invisibleOffCpu = 0.0, labelledFraction = 1.0, reason = null,
+            resolutionNanos = 15_625_000, windowNanos = 1_000_000_000, windows = 20, threads = 8,
+            cpuNanos = 990_000_000, wallNanos = 1_000_000_000,
+            minWindowDuty = 0.99, maxWindowDuty = 0.99, anomalies = 0, maxSampleNanos = 200_000,
+        ),
+        coarse = coarse,
+    )
+
     @Test
     fun `parallelism is one when every occupied execution has one thread in it`() {
         // What phase 4 must produce, by construction: instanceTicks moves in lockstep with hits
@@ -168,6 +188,60 @@ class CoarseTest {
         assertEquals(
             c.inclusiveHits.toDouble() / c.activeTicks, c.inFlight * c.parallelism,
             "the identity threads = in flight x parallelism does not hold"
+        )
+    }
+
+    // --- the tier boundary, checked rather than documented ---------------------------
+
+    @Test
+    fun `the floor is flat below twenty percent share and rises above it`() {
+        // From profiler.md's table. Condition 1 only binds above ~20%, which is why the flat 800 ns
+        // is the rule in practice and the share term is the exception.
+        assertEquals(800.0, coarseFloorNanos(0.01))
+        assertEquals(800.0, coarseFloorNanos(0.20))
+        assertEquals(2000.0, coarseFloorNanos(0.50))
+        assertEquals(4000.0, coarseFloorNanos(1.0))
+    }
+
+    @Test
+    fun `a coarse label on a 200 ns operation is reported`() {
+        val r = report(coarse = listOf(stat(count = 1_000_000, sumNanos = 200_000_000, hits = 200, running = 200)))
+        assertEquals(listOf("req"), r.coarseTooSmall().map { it.name })
+        val msg = coarseTooSmallMessage("req", 1_000_000, 200.0, r.coarseFloorNanosOf(r.coarse[0]))
+        assertTrue(msg.contains("200.0 ns"), "the message does not name the measured duration: $msg")
+        assertTrue(msg.contains("op(id)"), "the message does not say what to do instead: $msg")
+    }
+
+    @Test
+    fun `a legitimate coarse label is not accused`() {
+        // A millisecond apiece at a 0.1% share. Nothing here is borderline and the check must stay
+        // silent — a floor check that cries wolf is worse than none, which is why the fine one was
+        // demoted from fatal to a warning.
+        val r = report(coarse = listOf(stat(count = 1_000, sumNanos = 1_000_000_000, hits = 1_000, running = 1_000)))
+        assertTrue(r.coarseTooSmall().isEmpty())
+    }
+
+    /**
+     * The share term is the only sampled input, and it is taken a standard error low before it can
+     * accuse. An operation sitting just the wrong side of the line must not be told off on the
+     * strength of counting noise — this check prints an accusation, and manufacturing one is the
+     * failure this project spends its effort on.
+     */
+    @Test
+    fun `the share condition does not accuse on counting noise alone`() {
+        // 2.5 us apiece, 25 hits out of 36 labelled: a 69.4% share, so the raw rule would demand
+        // 2778 ns and accuse. 25 hits is a 20% standard error, and at 55.6% the rule demands 2222 ns
+        // and lets it go. The operation is not exonerated — its share is simply not established.
+        val noisy = stat(count = 400, sumNanos = 1_000_000, hits = 25, running = 25)
+        assertTrue(
+            report(coarse = listOf(noisy), labelled = 36).coarseTooSmall().isEmpty(),
+            "accused an operation whose share is not established"
+        )
+        // The same operation with the same share, measured a thousand times over, is accused —
+        // it is the uncertainty that spared it, not the share being innocent.
+        val settled = stat(count = 400_000, sumNanos = 1_000_000_000, hits = 25_000, running = 25_000)
+        assertEquals(
+            listOf("req"), report(coarse = listOf(settled), labelled = 36_000).coarseTooSmall().map { it.name }
         )
     }
 

@@ -618,6 +618,27 @@ cross-checking as a first-class feature.
 
 ---
 
+## 20. The report's own punctuation is unreadable on a Windows console · open
+
+Every em-dash in `render()` prints as `�` here. Confirmed on a plain `--demo` run:
+
+```
+elapsed is wall clock with at least one thread inside, and in flight is occupancy / elapsed �
+in flight counts EXECUTIONS at once, over the threads there were � never threads spent on one
+```
+
+The cause is the JVM writing UTF-8 to a console on a legacy codepage, and **the library cannot fix
+it by setting an encoding**: `render()` returns a `String` and the caller does the printing. So the
+only reliable fix is at the source — ASCII punctuation in every string the report emits.
+
+Not acted on because it is a decision about the project's typography rather than a defect to patch:
+the alternative is to keep the dashes and tell users to run `chcp 65001`, which is a worse answer
+for a tool whose whole output is a block of text somebody reads in a terminal. The report is the
+product; a mangled character in every user's terminal is not cosmetic.
+
+Noticed while adding the coarse floor check, whose own message now uses plain hyphens so as not to
+add to it. Roughly forty strings in `Report.kt`, plus the bench's own printing.
+
 ## Promoted to plan.md
 
 **Phase 3.5** is item 9 above, reframed from detecting bad operations to bounding the error on every

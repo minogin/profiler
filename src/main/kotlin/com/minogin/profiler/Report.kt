@@ -29,6 +29,58 @@ fun tooSmallMessage(name: String, calls: Long, upperNanos: Double): String = Str
 )
 
 /**
+ * The shortest a coarse operation may be, given how much of the run it holds. See [Report.coarseTooSmall].
+ *
+ * The tier boundary from profiler.md, as arithmetic rather than a rule of thumb. Two conditions,
+ * protecting different things and neither implying the other:
+ *
+ * 1. `40 ns x executions <= 1% of the run` protects **the program** — that you are measuring what
+ *    you started with. In terms of share this is `d >= 4 us x share`.
+ * 2. `40 ns <= 5% of the operation's own duration` protects **the number** — that it describes the
+ *    code and not the instrument. This is the flat `d >= 800 ns`, and it is what binds below about
+ *    20% share, which is nearly always.
+ *
+ * A 40 ns operation called rarely passes the first comfortably and is then reported at 80 ns: the
+ * program is undisturbed and the measurement is 100% wrong. That is why both are needed.
+ */
+fun coarseFloorNanos(share: Double): Double =
+    maxOf(Report.COARSE_FLOOR_NANOS, Report.COARSE_SHARE_NANOS * share)
+
+/**
+ * What to tell someone whose coarse label is on something too small to carry a context.
+ *
+ * Names the measured duration rather than an inferred one, and says which of the two conditions
+ * bound, because the remedies differ: below the flat floor the label is simply in the wrong tier,
+ * while an operation that fails only the share condition is big enough to measure and too big a
+ * fraction of the run to afford measuring.
+ */
+fun coarseTooSmallMessage(name: String, count: Long, meanNanos: Double, requiredNanos: Double): String {
+    // Which of the two conditions bound decides what the reader is being told, and they are
+    // different complaints with different remedies. Saying "the number would describe the
+    // instrument" about an operation whose per-execution overhead is a comfortable 4% is simply
+    // false, and a warning that misdiagnoses is worse than one that does not fire.
+    val shareBound = requiredNanos > Report.COARSE_FLOOR_NANOS
+    val why = if (shareBound) String.format(
+        Locale.ROOT,
+        "    It runs often enough that %,d contexts at about %.0f ns come to over 1%% of the whole run,%n" +
+                "    so the program you measured is not the program you started with. Per execution the%n" +
+                "    overhead is only %.1f%%, so the label is accurate - there is just too much of it.",
+        count, Report.COARSE_CONTEXT_NANOS, Report.COARSE_CONTEXT_NANOS / meanNanos * 100
+    ) else String.format(
+        Locale.ROOT,
+        "    A context costs about %.0f ns to allocate, timestamp and stamp, which is %.0f%% of an%n" +
+                "    operation this size - the number would describe the instrument as much as the code.",
+        Report.COARSE_CONTEXT_NANOS, Report.COARSE_CONTEXT_NANOS / meanNanos * 100
+    )
+    return String.format(
+        Locale.ROOT,
+        "%s: %,d executions averaging %s, under the %s a coarse label needs here.%n%s%n" +
+                "    Use a fine label, op(id) { }, or move the coarse label out to a batch of these.",
+        name, count, duration(meanNanos), duration(requiredNanos), why
+    )
+}
+
+/**
  * What to tell someone whose label leaked. Names the operation that was open, because that is the
  * one whose share is now wrong and the reader has no other way to know which.
  */
@@ -621,6 +673,42 @@ class Report internal constructor(
     fun busyPerExecutionNanos(c: CoarseStat): Double =
         if (c.count == 0L) Double.NaN else c.runningInclusiveHits * stepNanos / c.count
 
+    /** How much of the observed thread-time happened anywhere under [c]. */
+    fun shareOf(c: CoarseStat): Double =
+        if (observedNanos <= 0.0) 0.0 else c.inclusiveHits * stepNanos / observedNanos
+
+    /**
+     * The shortest [c] was allowed to be, from the tier boundary. See [coarseFloorNanos].
+     *
+     * The share is **reduced by its own sampling noise** before the share condition is applied.
+     * `d ≥ 4 µs × share` only binds above about 20%, so an operation near that line could be pushed
+     * over it by counting error alone — and this check prints an accusation. Taking the share a
+     * standard error low means an operation is told off for holding too much of the run only when it
+     * confidently does. The flat 800 ns floor needs no such treatment, which is the point of the
+     * whole tier: **the duration here is measured, not inferred.**
+     */
+    fun coarseFloorNanosOf(c: CoarseStat): Double {
+        val noise = if (c.inclusiveHits <= 0L) 1.0 else 1.0 / sqrt(c.inclusiveHits.toDouble())
+        return coarseFloorNanos((shareOf(c) * (1 - noise)).coerceAtLeast(0.0))
+    }
+
+    /**
+     * Coarse labels on something too small to carry a context.
+     *
+     * The counterpart of [tooSmall], and it can be strict where that one cannot. The fine floor has
+     * to *infer* an operation's duration from hits ÷ calls, so it carries a statistical bound —
+     * `hits + 2√hits + 3` — and a bias allowance, because accusing an innocent label is the failure
+     * that matters. Here the duration is **measured**, two timestamps per execution, so the
+     * comparison is exact and needs no slack at all. The only sampled input is the share, and that
+     * is handled in [coarseFloorNanosOf].
+     *
+     * A warning and never fatal, for the reason the fine floor was demoted to one: a check that
+     * stops a run has to be right about a machine it has never seen.
+     */
+    fun coarseTooSmall(): List<CoarseStat> = coarse
+        .filter { it.count > 0 && it.meanSpanNanos < coarseFloorNanosOf(it) }
+        .sortedByDescending { it.count }
+
     /**
      * The coarse table, or nothing at all when no coarse label was placed.
      *
@@ -838,6 +926,13 @@ class Report internal constructor(
         for (op in tooSmall()) {
             appendLine("  ! " + tooSmallMessage(op.name, op.calls, impliedUpperNanosOf(op)))
         }
+        // The same boundary from the other side. Unlike the fine floor this one is exact, because
+        // the duration it compares is measured rather than inferred — see coarseTooSmall.
+        for (c in coarseTooSmall()) {
+            appendLine(
+                "  ! " + coarseTooSmallMessage(c.name, c.count, c.meanSpanNanos, coarseFloorNanosOf(c))
+            )
+        }
         if (reclaimedSlots > 0) {
             appendLine("    ! $reclaimedSlots threads exited without Profiler.release() and were reclaimed —")
             appendLine("      call it when a thread finishes; until a slot is reclaimed it reads as an idle")
@@ -901,6 +996,21 @@ class Report internal constructor(
          * C2 will shuffle work across the boundaries of adjacent short labels altogether.
          */
         const val FLOOR_NANOS = 50.0
+
+        /**
+         * What one coarse context costs: an allocation, two `nanoTime` calls and the accumulate.
+         *
+         * 21.5 ns of it is measured — the timed-wrapper fit from the Lucene trial — and the
+         * allocation is not, so this is the tier boundary's working figure rather than a
+         * measurement. See findings.md, "What a coarse label will cost per execution".
+         */
+        const val COARSE_CONTEXT_NANOS = 40.0
+
+        /** `40 ns ≤ 5% of the operation`. The flat floor, and the one that binds below ~20% share. */
+        const val COARSE_FLOOR_NANOS = 800.0
+
+        /** `40 ns × executions ≤ 1% of the run`, rewritten as `d ≥ this × share`. */
+        const val COARSE_SHARE_NANOS = 4000.0
 
         /**
          * How far coverage-over-runnable must sit from plain coverage before it is worth a line of
