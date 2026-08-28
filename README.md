@@ -139,8 +139,45 @@ println(Profiler.stop().render())
 ```
 
 `./gradlew :run --args="--demo"` runs exactly that against a toy workload and prints the report, so
-there is a working example to copy. Up to 256 operations, registered by name at runtime. Call
-`Profiler.release()` when a thread exits, or dead threads keep reading as idle ones.
+there is a working example to copy. Up to 256 operations, registered by name at runtime.
+
+`Profiler.start()` also takes `strict` (below), `sampleState = false` to switch off the per-sample
+thread-state read, and `stepMillis` — a smaller step is more samples and more sampler CPU.
+
+Call `Profiler.release()` when a thread exits. There is a safety net — the sampler reclaims the
+slots of threads that have died — but it waits on a garbage collection, and until then a dead
+thread reads as an idle one and inflates the denominator every share is taken over.
+
+### What comes out
+
+```
+86,597 labelled samples over 12.1 s, 11,933 ticks at 1.006 ms, 8 threads
+labels cover 87.10 s of the 95.97 s of thread-time observed (90.8%); 8.87 s was outside every label
+threads were on CPU 98.68% of sampled wall time
+  inside labelled work it was 98.55%, and that is what bounds the shares
+at most 1.47 pp of any share is a thread waiting rather than working
+so the ranking is trustworthy
+================================================================================================
+operation            share  occupancy  waiting   elapsed threads         calls    hits  noise  impl/call
+flushBatch         44.250%    38.54 s     0.0%   11.75 s    3.28   288,514,362   38319  0.51%   133.6 ns
+validateRecord     41.222%    35.91 s     0.0%   11.68 s    3.07   288,514,362   35697  0.53%   124.5 ns
+parseRecord         9.478%     8.26 s     0.3%    6.14 s    1.34   288,514,362    8208  1.10%    28.6 ns
+indexRecord         5.050%     4.40 s     0.0%    3.73 s    1.18   288,514,362    4373  1.51%    15.2 ns
+```
+
+Three things to know before you trust a table like that:
+
+- **`at most 1.47 pp`** is an error bar that holds for every row at once. It is the report telling
+  you how much of the shares is waiting rather than working, and it can come out saying *nothing
+  here bounds the shares* — which is honest, and means your labels do not cover where the time went.
+- **`noise` is `1/√hits`.** Two rows differing by less than their noise are tied, not ranked.
+- **The top row of that specimen is wrong**, and the report says so forty lines further down. The
+  demo leaks a label on purpose; `flushBatch` at 44% is other operations' time billed to it. The
+  number looks completely plausible, which is the point.
+
+**[docs/output.md](docs/output.md) explains every column and every warning**, using that same run.
+The report also prints a short legend at its own foot, so you need neither this file nor a browser
+to read one.
 
 **When the boundary is not a block** — a listener, a before/after callback, a span across several
 methods — there is an explicit form. Reach for it second, because it has no `finally` and so it can
@@ -255,24 +292,34 @@ jitter, and in the whole project it never produced a measurement.
 ## What is here
 
 ```
-src/main/kotlin/com/minogin/profiler/
+src/main/kotlin/com/minogin/profiler/        the library — this, and nothing else, is the artifact
+  Profiler.kt   the slot, the registry, op { } / enter / exit
+  Sampler.kt    the sampling thread: the tick loop and the slot walk
+  Report.kt     what a session collected, and how it is rendered
+  Duty.kt       how much of the occupancy was CPU, and the bound that puts on every share
+src/main/kotlin/com/minogin/profiler/bench/  the harness — never shipped
   Workload.kt   the twenty operations, the call graph, the schedule
   Burn.kt       the busy loop, calibration, iteration fitting
   Bench.kt      worker threads and the stages they are driven through
-  Sampler.kt    slots, the hook, the sampling thread
   StackCost.kt  what a cross-thread stack costs, which decides whether we may ever take one
-  Main.kt       orchestration, the two truths, the verdicts
-trial/          the fine tier pointed at Apache Calcite, and the harness that did it
+  Main.kt       the modes, the run, and the bench's own tolerance table
+  Verify.kt     the sampler against the truth, and the observer effect
+  Print.kt      every report the bench prints about itself
+src/test/kotlin/                             the arithmetic, checked in ~3 s — ./gradlew test
+trial-calcite/  the fine tier pointed at Apache Calcite, and the harness that did it
 trial-lucene/   the same pointed at Apache Lucene: the corpus, the wrappers, four configurations
-trial-common/   shared by both trials, JDK only: the JFR recording and stack analysis
+trial-netty/    the same pointed at Netty: event loops, and time that is mostly not CPU
+trial-common/   shared by every trial, JDK only: the JFR recording and stack analysis
 docs/
   index.md      what each document is for — start here
   tldr.md       the whole project in plain words, for a five-minute read
+  output.md     how to read the report, column by column and warning by warning
   profiler.md   the idea, and what was known about prior art
   plan.md       phases and where each one stands
   findings.md   what we learned, with the measurement behind every claim
   trial-calcite.md  the trial on Apache Calcite: the finding, and where the tool got in the way
-  trial-lucene.md  the trial on Apache Lucene: concurrent, and against a timed-wrapper profiler
+  trial-lucene.md   the trial on Apache Lucene: concurrent, and against a timed-wrapper profiler
+  trial-netty.md    the trial on Netty: event loops, and what a flame graph does with a handler chain
   case.md       where existing tools fall short, and therefore what this one is for
   ideas.md      things worth doing that are not yet decided
 ```
@@ -312,13 +359,22 @@ spans say where the time went but not why. The parallelism figure needs both —
 samples across every thread, the span from the context, and their ratio is how well that operation
 actually spread out.
 
+**Built since:** thread state beside every sample, per-operation concurrency, and a per-thread bound
+on the error of every share — the `waiting`, `elapsed` and `threads` columns are those. And the
+library surface enough to publish: **v0.1.0**, Apache-2.0, on JitPack.
+
 **Still to build:** the coarse tier, propagation across thread boundaries (executors, coroutines,
-futures), thread state and a whole-application parallelism coefficient, the library surface
-(annotations plus a bytecode agent, and explicit calls where operations do not align with methods),
-and JFR as an output format.
+futures), the whole-application parallelism coefficient, annotations plus a bytecode agent, and JFR
+as an output format.
+
+**Untested, and therefore unclaimed:** coroutines and virtual threads. The design argues the fine
+tier is structurally safe with the first and the registry is now bounded for the second, but no
+trial here creates either, so both are arguments rather than measurements.
 
 **Constraint carried throughout:** it must not require you to hand over your thread creation. That
 ruled out an otherwise attractive optimisation, and it is why the sampler is built the way it is.
+
+Release notes are in [CHANGELOG.md](CHANGELOG.md).
 
 See `docs/plan.md` for where things stand, `docs/trial-calcite.md` and `docs/trial-lucene.md` for the tool
 used in anger on somebody else's code, `docs/case.md` for the case against the existing tools built out of observed failures,

@@ -3,14 +3,20 @@
 Each one has a job, and nothing is written in two places. Start with [tldr.md](tldr.md) if you have
 five minutes, or with [profiler.md](profiler.md) if you want the design.
 
-**Where we are right now.** The fine tier is built and verified, on our own bench and on **three**
-foreign codebases: Apache Calcite, Apache Lucene, and Netty. Phases 1, 2, 3, 3.5 and 3.75 are done;
-phase 6 is half done — thread state and per-operation concurrency exist, the whole-application
-coefficient does not.
+**Where we are right now.** The fine tier is built, verified and **released as v0.1.0** — Apache-2.0,
+one dependency, Java 21+. Verified on our own bench and on **three** foreign codebases: Apache
+Calcite, Apache Lucene, and Netty. Phases 1, 2, 3, 3.5 and 3.75 are done; phase 6 is half done —
+thread state and per-operation concurrency exist, the whole-application coefficient does not; phase 7
+is far enough for a 0.x but has no annotations and no agent.
+
+Since the trials: the three small fixes and the pause after them are **done**, and the pause earned
+its place — it caught the new error bound being sound and useless on a thread pool. There is a test
+suite now (48 tests, ~3 s) whose expectations are the numbers in findings.md, two code reviews have
+been through every file, and `D₂` — the one outright defect the design carried — is fixed.
 
 **What to do next is [plan.md § What happens next](plan.md#what-happens-next-in-order)**, and it is
-three small fixes, a look at what they turn up, and then the coarse tier. The three are not
-tidying — each is a number the report gets wrong today, and each is now backed by measurement.
+the coarse tier, starting with bench work rather than tool work: promote some bench operations to
+coarse so there is a known truth to cross-tabulate against.
 
 **Two things worth knowing before reading anything else**, because they govern the rest:
 
@@ -24,6 +30,7 @@ tidying — each is a number the report gets wrong today, and each is now backed
 | document | what belongs in it | read it when |
 |---|---|---|
 | [tldr.md](tldr.md) | the whole project in plain words, no jargon | you want to know what this is |
+| [output.md](output.md) | how to read the report — every column, every warning, and what to do about each | you have run it and want to know what you are looking at |
 | [profiler.md](profiler.md) | the design and the prior art — and the **tier boundary**: which operations can be coarse, what the fine tier measures, and where it breaks | you want to know how it works and why it is shaped this way |
 | [plan.md](plan.md) | work we committed to, phase by phase, rewritten as each closes to say what was actually built | you want to know where we are |
 | [findings.md](findings.md) | only things we measured, each with the measurement that produced it | you want to know what is true, and why we believe it |
@@ -72,8 +79,8 @@ tidying — each is a number the report gets wrong today, and each is now backed
 
 ## Running the three trials
 
-Each is a separate Gradle module and none of them can reach the profiler's own dependencies,
-because the profiler has none.
+Each is a separate Gradle module, so nothing a trial needs — Calcite, Lucene, Netty, a logging
+binding — can reach the profiler, which depends on nothing but the Kotlin stdlib.
 
 ```bash
 # the bench — the workload whose true answer is known
@@ -90,6 +97,12 @@ CP=$(cat trial-netty/build/classpath.txt)
 java -cp "$CP" com.minogin.profiler.trial.netty.NettyTrialKt --qualify --seconds=45
 java -cp "$CP" com.minogin.profiler.trial.netty.NettyTrialKt --labels  --seconds=45
 java -cp "$CP" com.minogin.profiler.trial.netty.NettyTrialKt --ab --rounds=8 --seconds=5
+
+# Calcite — the growth curve, then the labelled run
+./gradlew :trial-calcite:classpathFile
+CP=$(cat trial-calcite/build/classpath.txt)
+java -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt --scale --from 3 --to 12 --associate true
+java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt \n     --tables 4 --associate true --warmups 1 --seconds 60 --labels true --sampler true
 
 # Lucene — the index is already built under trial-lucene/index
 ./gradlew :trial-lucene:classpathFile

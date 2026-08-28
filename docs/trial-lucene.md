@@ -427,7 +427,7 @@ java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement PRODU
 # the Elasticsearch-style alternative, and the naive wrapper
 java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement TIME --sampler false --seconds 20
 java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement NAIVE --seconds 20
-java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement NAIVE --strict true --seconds 20
+java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement NAIVE --seconds 20
 
 # does a triggered stack name a missing label? PRODUCT against LABEL as the control
 java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement PRODUCT --seconds 30 --gaps 2

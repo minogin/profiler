@@ -31,16 +31,27 @@ words, is [tldr.md](tldr.md).
 applications with hot short operations. Not tied to any one system — the graph-flavoured operation
 names in the bench are a synthetic workload, nothing more.
 
-Stack: Kotlin/JVM, Gradle, no dependencies. Output to the console for now; see phase 8.
+Stack: Kotlin/JVM, Gradle, nothing beyond the Kotlin stdlib. Output to the console for now; see phase 8.
 
 ---
 ---
 
 ## What happens next, in order
 
-Three small fixes first, then a decision point, then the coarse tier. The three are not tidying:
-each one is a number in the report that is currently **wrong or misleading**, and each is now backed
-by measurement rather than by argument. Together they are the accumulated interest on three trials.
+**Steps 1 and 2 are done, and so is what came after them.** What remains here is step 3, the coarse
+tier. The record of the first two is kept below rather than deleted, because step 2 was a pause
+written on the argument that *"nothing is expected to break is exactly when this project has been
+wrong before"* — and it caught the new error bound being sound and vacuous on a thread pool. A
+pause that earns its place deserves to stay in the record.
+
+Since then, and not in the original plan: a test suite whose expectations are the measurements in
+[findings.md](findings.md), two code reviews across every file, `D₂` fixed, and **v0.1.0 released**.
+What the reviews turned up is in findings.md; the short version is that four real defects were
+sitting in shipped code, one of which printed a negative percentage.
+
+The three fixes were not tidying: each was a number in the report that was **wrong or misleading**,
+and each was backed by measurement rather than by argument. Together they were the accumulated
+interest on three trials.
 
 ### Step 1 — the three small things
 
@@ -887,7 +898,7 @@ A trial that ends in "async-profiler would have told you this in ten seconds" is
 belongs there.
 
 Each trial gets its own module beside [`trial-calcite/`](../trial-calcite), so nothing it depends on can reach the
-profiler, which still takes no dependencies at all.
+profiler, which still takes nothing beyond the Kotlin stdlib.
 
 ### Running one — what the first two trials say to do, in order
 
@@ -959,7 +970,7 @@ not. Instances are absorbed into their type's statistics and forgotten.
 | parallelism | avg, p50/p90/p99 | sampled — see the caveat |
 
 Percentiles come from a logarithmic-bucket histogram: fixed memory, roughly 1.6 KB per type, any
-percentile to a known precision. About forty lines, since we take no dependencies. p99 is included
+percentile to a known precision. About forty lines, since we take no third-party dependencies. p99 is included
 because it costs nothing extra and the tail is usually where the interesting behaviour is.
 
 **The caveat that must reach the output.** A coarse operation's duration is measured; its CPU is

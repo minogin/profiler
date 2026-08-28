@@ -117,12 +117,19 @@ that and their numbers were correct.
 ## Where it stands
 
 Built and verified: the bench, the fine tier, the check of the sampler against known truth,
-bounding what a share is worth, and two trials on foreign code — Calcite, and Lucene, where eight
+bounding what a share is worth, and three trials on foreign code — Calcite; Lucene, where eight
 clauses of one query were separated that a flame graph could not tell apart at all, on eight
-threads, at a cost of 6.5% against 35% for the way a production search engine does it.
+threads, at a cost of 6.5% against 35% for the way a production search engine does it; and Netty,
+where four handlers sharing one class are four rows here and one indistinguishable blob in a flame
+graph.
 
-Not built: the coarse tier, following work across thread hand-offs and coroutines, whole-application
-parallelism, the annotation and agent surface, JFR output. [plan.md](plan.md) has the order.
+Released as v0.1.0 — Apache-2.0, one dependency, Java 21+, and a report you can read: what every
+column and warning means is [output.md](output.md).
+
+Not built: the coarse tier, following work across thread hand-offs and coroutines, the
+whole-application parallelism coefficient, the annotation and agent surface, JFR output. Thread
+state and per-operation concurrency *are* built — they are the waiting, elapsed and threads columns.
+Coroutines and virtual threads are untested and so unclaimed. [plan.md](plan.md) has the order.
 
 One thing worth carrying away, because it cost a day to learn: **a share is not a counterfactual.**
 The rule holding 46% of the time was worth 275× when removed, because it was creating work for

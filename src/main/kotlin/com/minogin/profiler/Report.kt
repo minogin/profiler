@@ -476,6 +476,21 @@ class Report internal constructor(
         }
     }
 
+    /**
+     * The whole report as text.
+     *
+     * ## ⚠ CHANGING THE OUTPUT? UPDATE `docs/output.md` IN THE SAME COMMIT ⚠
+     *
+     * Three things say what these numbers mean and they must agree: this method, the legend it
+     * prints at the foot of every report, and [docs/output.md](../../../../../../docs/output.md).
+     * The legend stays — a reader with a terminal and no browser needs the short version — so the
+     * duplication is deliberate and the drift is the risk. It has already happened twice in this
+     * codebase: a KDoc that described a function it had been moved away from, and a `1c` reword
+     * that changed the duty lines and missed the column footer thirty lines below.
+     *
+     * The rule: **a line you add here needs a paragraph there, and a line you reword here needs
+     * that paragraph reworded.** `output.md` carries the same warning pointing back at this file.
+     */
     fun render(): String = buildString {
         val achieved = if (ticks > 1) samplingSpanNanos.toDouble() / (ticks - 1) / 1e6 else Double.NaN
         if (failure != null) {
@@ -573,6 +588,8 @@ class Report internal constructor(
                                 (if (called.size > 4) ", …" else ""))
             )
         }
+        // ⚠ THE LEGEND. Every line below is also a paragraph in docs/output.md § The table.
+        // Reword one, reword the other, in the same commit. See the note on render().
         appendLine("share is of labelled samples and is occupancy: waiting counts in full, which is what the")
         appendLine("  latency question wants — the duty cycle above bounds how much of it was waiting")
         appendLine("occupancy is hits x step as thread-time: absolute, so unlike share it does not move when a")
