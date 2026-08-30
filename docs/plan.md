@@ -21,7 +21,8 @@ words, is [tldr.md](tldr.md).
 | — | Trial 2 — Lucene: concurrent, and identity by instance rather than by class | **done** |
 | — | Trial 3 — Netty: few event loops, many tasks, time that is mostly not CPU | **done** |
 | — | The coarse tier on all three trials — Calcite, Netty, Lucene | **done** |
-| — | Trials 4+ — a compiler, two negative controls | after Netty |
+| — | **Trial 4 — PostgreSQL over a socket: the first workload here with waiting in it** | **in progress** |
+| — | Trials 5+ — a compiler, two negative controls | later |
 | 4 | The coarse tier — contexts, spans, cross-tabulation | **done** |
 | 5 | Crossing threads — propagation, and per-operation parallelism | next |
 | 6 | Thread state and the whole-application parallelism coefficient | **partly done** |
@@ -1380,6 +1381,47 @@ Measuring it costs one counter. The sampler already does `if (seenAt[op] != tick
 to count an operation's ticks rather than its slots; counting *occupied instances* per tick is the
 identical idiom with the stamp on the context object instead of in an array — one write per live
 context per tick, on the thread that has a core to itself.
+
+## Trial 4 — PostgreSQL over a socket · in progress
+
+**Three trials in and nothing has ever waited.** Calcite plans on one thread and is pure CPU. Lucene's
+index is page-cached, so its clauses read `waiting 0.0%`. Netty's request is loopback and
+`mean - busy/exec` reads 0.0% — this document calls it the negative control. So the coarse tier's
+headline claim, *"`mean - busy/exec` is the waiting, which is the one thing a fine label can never
+tell you"*, has never been checked against foreign code whose answer was anything but zero. The only
+waiting with a known truth anywhere in the project is our own `ContendedLock` in the bench.
+
+**And phase 5b made that gap urgent rather than merely untidy.** `working` is now a printed column,
+and it is built on `Thread.getState`, which [findings.md](findings.md#the-column-is-blind-to-native-waiting-and-an-event-loop-is-native-waiting)
+already records as blind to native waits: a thread stopped inside a socket read is `RUNNABLE` as far
+as Java is concerned. If that blindness bites, `working` counts blocked threads as working and
+`waiting` under-reports — on exactly the workload where the distinction is the reason anyone opened
+the report. This is not a coverage exercise; it is a test of whether a column shipped four commits
+ago is honest.
+
+**The truth is the operating system's, which is what makes the question answerable.**
+`ThreadMXBean.getThreadCpuTime` counts time on a processor and sees through the JNI boundary that
+thread state cannot. So:
+
+```
+working x mean span x executions      what the profiler says the requests spent on a CPU
+CPU the process actually used         what the OS says it spent
+```
+
+Both directions are informative and only one is a defect. The OS figure should be the larger — it
+counts threads the span does not cover, the JIT and the sampler included. A profiler figure *above*
+it is thread-time the machine never spent, and the only way to get that is by counting threads that
+were stopped.
+
+**What is built:** `trial-jdbc`, a fourth module. PostgreSQL in a container driven by plain
+`docker run` rather than Testcontainers, because Testcontainers would bring its own threads into the
+process being profiled and every share in the report is taken over the threads the sampler can see.
+Five million rows generated server-side and reused between runs. A request fans out across a
+HikariCP pool and an executor wrapped with `.propagating()`, behind `--propagate` so the before and
+after are one binary, as on Lucene. Fine labels separate `acquire` — queueing on ourselves — from
+`execute`, which is the database taking its time.
+
+**Not yet run.** The container needs a Docker daemon.
 
 ## Phase 6 — thread state and the whole-application coefficient · partly done
 

@@ -22,3 +22,11 @@ include("trial-lucene")
 // workload where the thread-state column has anything to say, and the first that can test whether
 // it says the wrong thing: a selector wait is native, and a thread in native code reads RUNNABLE.
 include("trial-netty")
+
+// The fourth trial, and the first with any waiting in it. Calcite is single-threaded and pure CPU,
+// Lucene's index is page-cached, and Netty's loopback request never blocks — so `mean - busy/exec`,
+// the quantity the coarse tier exists to produce, has never been checked on foreign code against an
+// answer that is not zero. A database over a socket is waiting that is real, parallel and somebody
+// else's, and it is the one workload that can say whether `working` counts a blocked thread as
+// working: Java thread state is blind to native waits, and a socket read is a native wait.
+include("trial-jdbc")

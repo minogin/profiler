@@ -10,6 +10,7 @@
             <option value="$PROJECT_DIR$" />
             <option value="$PROJECT_DIR$/trial-calcite" />
             <option value="$PROJECT_DIR$/trial-common" />
+            <option value="$PROJECT_DIR$/trial-jdbc" />
             <option value="$PROJECT_DIR$/trial-lucene" />
             <option value="$PROJECT_DIR$/trial-netty" />
           </set>
