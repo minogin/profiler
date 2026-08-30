@@ -169,6 +169,29 @@ it. `enterCoarse(id)` / `exitCoarse()` exist for a boundary that is two callback
 — they have no `finally`, so pair them with `Profiler.expectBalanced()` at a point the thread should
 be quiescent, which for a coarse label means *between* requests and not inside one.
 
+**If the work is handed to a pool, carry the context with it.** A context lives in the slot of the
+thread that made it, so a request that fans out leaves it behind: the helper threads run under no
+context, and the caller's span reports the time they spent as *waiting*. Wrap the pool once —
+
+```kotlin
+val pool = Executors.newFixedThreadPool(8).propagating()
+
+coarse(request) {
+    pool.invokeAll(shards.map { Callable { search(it) } })   // each shard runs inside `request`
+}
+```
+
+`Runnable.propagating()` and `Callable.propagating()` wrap a single task, and `captureCoarse()` /
+`withCoarse(ctx) { }` are the two calls everything here is built from — for a thread you created
+yourself, which nothing can wrap for you. Capture happens where you **wrap**, not where the task
+runs, so wrap on the thread that is forking.
+
+`schedule()` on a scheduled pool deliberately does *not* propagate: a task that runs in five minutes
+will usually outlive the execution that scheduled it, and crediting it there invents attribution
+rather than losing it. A hand-off you simply forget fails the recoverable way instead — the work
+loses its attribution and turns up in the report's *"inside NO coarse span"* line, which names the
+operations it caught.
+
 **Do not put one on something small.** A context costs about 40 ns; the rule is
 `d ≥ max(800 ns, 4 µs × share)`, and the report tells you when a label breaks it — exactly, because
 unlike the fine floor it is comparing a duration it measured rather than one it inferred.
@@ -289,6 +312,7 @@ workload and checks itself against the truth.
 | `--hook` | what the instrumentation costs per call, labels on against labels off |
 | `--stackcost` | what a cross-thread stack walk costs — the measurement that decides whether the tool may ever take one |
 | `--leakcheck` | stages a leaked label on purpose and asserts it stops the session, and *only* under strict |
+| `--fanout=N` | requests hand their chunks to a pool of N helpers, at one driver and at `--threads` of them. Checks the sampled threads-per-request against the bench's own stopwatch. Needs `--coarse`; add `--propagate=off` to run the same thing with the context left behind, which is what the defect looks like |
 
 The rest shape the run:
 
@@ -394,17 +418,24 @@ actually spread out.
 on the error of every share — the `waiting`, `elapsed` and `in-flight` columns are those. And the
 library surface enough to publish: **v0.1.0**, Apache-2.0, on JitPack.
 
-**And the coarse tier is built, same-thread.** `coarse(type) { }` around a logical operation gives
+**And the coarse tier is built, and contexts now cross threads.** `coarse(type) { }` around a logical operation gives
 executions, mean, p50/p90/p99 and max — **measured**, two timestamps per execution, the only numbers
 in the report that are not sampled — plus busy time per execution, so `mean − busy/exec` is the
 waiting quantified, and the breakdown by fine operation underneath it. Verified by a truth that is an
 identity rather than an estimate: the bench times every one of its own requests, and over half a
 million of them the profiler's p50, p90 and p99 agree to **+0.00%**.
 
-**Still to build:** propagation across thread boundaries (executors, coroutines, futures) — which is
-what turns per-operation parallelism from 1.0-by-construction into a real number — the
-whole-application parallelism coefficient, annotations plus a bytecode agent, and JFR as an output
-format.
+Propagation across executors landed after that: `.propagating()` on a pool, and work handed to it
+stays inside the execution that forked it. Measured on the bench against its own stopwatch, a request
+fanned across eight helpers reports **4.00** threads inside against **4.00** measured, and the
+labelled thread-time falling outside every span drops from **76.4%** to **0.0%**. Two columns rather
+than one, because they answer different questions: `inside` counts the threads a request ties up,
+`working` counts the ones on a CPU — and on that run the difference is 0.99 of a thread, which is the
+caller parked on its own join.
+
+**Still to build:** propagation through coroutines and futures, a detector for a context that
+outlives its span, the whole-application parallelism coefficient, annotations plus a bytecode agent,
+and JFR as an output format.
 
 **Untested, and therefore unclaimed:** coroutines and virtual threads. The design argues the fine
 tier is structurally safe with the first and the registry is now bounded for the second, but no

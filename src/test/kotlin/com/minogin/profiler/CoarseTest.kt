@@ -168,27 +168,57 @@ class CoarseTest {
     )
 
     @Test
-    fun `parallelism is one when every occupied execution has one thread in it`() {
-        // What phase 4 must produce, by construction: instanceTicks moves in lockstep with hits
-        // because a context never leaves the thread that made it.
+    fun `inside is one when every occupied execution has one thread in it`() {
+        // What a same-thread run must produce, by construction: instanceTicks moves in lockstep with
+        // hits because a context never leaves the thread that made it. With propagation this is the
+        // number that moves, so pinning it here keeps the same-thread case honest afterwards.
         val c = stat(count = 100, sumNanos = 1_000_000, hits = 400, running = 400)
-        assertEquals(1.0, c.parallelism)
+        assertEquals(1.0, c.inside)
     }
 
     @Test
-    fun `parallelism and in flight factorise the threads inside`() {
+    fun `inside and in flight factorise the threads inside`() {
         // 8 threads inside, as two executions of four threads each — the case the fine tier cannot
-        // tell from eight serial ones. inclusive / activeTicks = 8 = inFlight x parallelism.
+        // tell from eight serial ones. inclusive / activeTicks = 8 = inFlight x inside.
+        //
+        // The identity is on `inside` and not on `working`, and that is why the pair exists: inFlight
+        // counts an execution whether or not its threads are running, so only the half that counts
+        // threads the same way can factorise it.
         val c = stat(
             count = 10, sumNanos = 1_000_000, hits = 800, running = 800,
             instanceTicks = 200, activeTicks = 100,
         )
-        assertEquals(4.0, c.parallelism)
+        assertEquals(4.0, c.inside)
         assertEquals(2.0, c.inFlight)
         assertEquals(
-            c.inclusiveHits.toDouble() / c.activeTicks, c.inFlight * c.parallelism,
-            "the identity threads = in flight x parallelism does not hold"
+            c.inclusiveHits.toDouble() / c.activeTicks, c.inFlight * c.inside,
+            "the identity threads = in flight x inside does not hold"
         )
+    }
+
+    @Test
+    fun `working excludes the threads that were parked`() {
+        // Five threads in the execution, four of them on a CPU — one driver fanning work out to four
+        // helpers and then blocking on the join. Both numbers are wanted: five is what the request
+        // ties up, four is what splitting it bought.
+        val c = stat(
+            count = 10, sumNanos = 1_000_000, hits = 500, running = 400,
+            instanceTicks = 100, activeTicks = 100,
+        )
+        assertEquals(5.0, c.inside)
+        assertEquals(4.0, c.working)
+    }
+
+    @Test
+    fun `working is inside less the waiting share`() {
+        // The relation the report's legend states, so a reader who does the arithmetic by hand gets
+        // the printed number back. It is also why the two columns sit either side of `waiting`.
+        val c = stat(
+            count = 10, sumNanos = 1_000_000, hits = 800, running = 600,
+            instanceTicks = 200, activeTicks = 100,
+        )
+        val waiting = c.waitingHits.toDouble() / c.inclusiveHits
+        assertEquals(c.working, c.inside * (1 - waiting), 1e-12)
     }
 
     // --- the tier boundary, checked rather than documented ---------------------------

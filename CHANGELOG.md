@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+### Crossing threads
+
+Work handed to a pool no longer leaves its logical operation behind. `captureCoarse()` on the thread
+that forks, `withCoarse(ctx) { }` on the thread that receives, and wrappers over the pair:
+`Runnable.propagating()`, `Callable.propagating()`, and `.propagating()` on `Executor`,
+`ExecutorService` and `ScheduledExecutorService`. No new dependency — the published POM still says
+this library has none.
+
+Prefer wrapping the **pool** to wrapping tasks: wrap it once and you cannot forget a task. Capture
+happens where you wrap and not where the task runs, so wrap on the forking thread. `schedule()` on a
+scheduled pool deliberately does not propagate — a task that runs in five minutes will usually
+outlive the execution that scheduled it, and crediting it there invents attribution rather than
+losing it.
+
+The sampler was not changed. It already counted an instance once per tick while counting every thread
+in it, so the ratio moved on its own the moment two threads held one context.
+
+**Two new columns, and they are one measurement answering two questions.** `inside` is the threads in
+one execution with a parked one counted in full — what a request ties up, and the half that keeps
+`threads inside = in flight × inside` exact. `working` is the ones a sample caught on a CPU — what
+splitting the request bought, the work-span model's `T₁/T∞`. They differ by exactly the `waiting`
+column: `working = inside × (1 − waiting)`.
+
+**Measured against the bench's own stopwatch**, one driver fanning across eight helpers, 60 s:
+`inside` reads **4.00** against **4.00** measured, within **0.1%**; `working` reads 3.01, so 0.99 of
+those threads were parked — the driver, recovered from thread state alone. The span goes from
+accounting for **0.2%** of the work its own request did to **105%**, and labelled thread-time outside
+every span collapses from **76.4%** to **0.0%**. Root calls are conserved exactly in both arms, and
+the escaping arm is still runnable as `--propagate=off`, so the before and after are an A/B in one
+binary.
+
 ### The coarse tier
 
 The half the fine tier could not reach: **how long did one execution take.** A `coarse(type) { }`

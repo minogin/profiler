@@ -1169,9 +1169,9 @@ Six steps. Each one is a commit, and each has a number that must move before the
 | | | what it must show |
 |---|---|---|
 | **5a** | fork/join in the bench, **propagation off** · **done** | the defect reproduced where the truth is known: parallelism pinned at 1.0, the span accounting for 0.3% of its own work, 76% outside every span. [findings.md](findings.md#crossing-threads) |
-| **5b** | `captureCoarse` / `withCoarse` and the wrappers | parallelism rises to the bench's known fan-out; `busy/exec` returns to its one-thread value; outside-coarse collapses |
+| **5b** | `captureCoarse` / `withCoarse` and the wrappers · **done** | `inside` rises to the bench's measured fan-out — 4.00 against 4.00, within 0.1%; the span goes from accounting for 0.2% of its own work to 105%; outside-coarse collapses 76.4% → 0.0%. [findings.md](findings.md#propagation-and-the-same-three-numbers-inverted) |
 | **5c** | the stale-context detector | a bench mode that stages an escape on purpose, asserting **both** directions the way `--leakcheck` does |
-| **5d** | the `parallelism` column | the identity `in flight × parallelism` becomes printable; [output.md](output.md) gains the paragraph |
+| **5d** | the `inside` and `working` columns · **done in 5b** | landed with the mechanism rather than after it, because the pair is what the measurement is read through. See "Two parallelisms" below, which needed amending: there are three groupings, not two |
 | **5e** | Lucene at eight threads, clock trace beside it | 88.5% outside-coarse collapses; Calcite and Netty stay silent |
 | **5f** | `profiler-coroutines`, a second module | the core POM keeps saying it has no dependencies; the suspended-span decision written down deliberately |
 
@@ -1203,6 +1203,59 @@ hand-off you miss then shows up as *lost* attribution — outside-coarse rises, 
 names that — rather than as work silently billed to the wrong operation. An auto-wrapping helper is
 the convenient version and its failure mode is the silent one, so the decision on whether it earns
 its place waits until 5e says what Lucene actually needed.
+
+*What 5b built.* `captureCoarse()` on the forking thread, `withCoarse(ctx) { }` on the receiving one,
+and wrappers over them: `Runnable`, `Callable`, `Executor`, `ExecutorService` and
+`ScheduledExecutorService`. No dependency added, so the core POM still says it has none. **The
+sampler was not touched** — `tickStamp` already counted an instance once per tick while
+`inclusiveHits` counted every thread in it, so the ratio moved on its own the moment two threads held
+one context.
+
+*Wrapping the pool beat wrapping the task, and the first recommendation had it backwards.* The
+argument against `ExecutorService.propagating()` was fifteen methods of boilerplate, "each a place a
+hand-off can be missed" — but most of those methods carry no task at all and only eight accept work.
+The safety runs the other way: wrap the pool once and you cannot forget a task, wrap tasks and every
+new call site is a fresh chance to. `submit` is also what people actually write.
+
+*Capture is at wrap time, and that is the one way to get this wrong that still compiles.* Capturing
+when the task runs would pick up the pool thread's context, which is empty, and propagate nothing —
+silently. `PropagateTest` has a test whose only job is to fail if somebody moves it.
+
+*`schedule` deliberately does not propagate.* A task that runs in five minutes will usually outlive
+the execution that scheduled it, and crediting it there **invents** attribution rather than losing
+it. The undelayed methods on the same pool still propagate, so it is a property of the method and
+not of the wrapper giving up on scheduled pools.
+
+*The escaping arm survives as a switch.* `--propagate=off` still runs 5a's three assertions, and the
+mount is branched around rather than passed a null, so that arm executes the code 5a measured. The
+before and the after are an A/B inside one binary rather than a claim about a build nobody can run.
+
+### Two parallelisms, and the identity that relates them · settled before any of it was built, amended in 5b
+
+**Amendment, 2026-08-30: there are three groupings of the sample stream, not two, and the third was
+missed here because it does not exist until a context can cross a thread.** Everything below stands;
+what it calls "parallelism" turned out to be two numbers rather than one.
+
+Group by the context instance and a *further* split appears — whether the thread a sample caught was
+on a CPU. Both halves are wanted, and they answer questions that lead to opposite decisions:
+
+- **`inside`** — threads in one execution, a parked one counted. What a request *ties up*. This is
+  the half that keeps the identity below exact, because `in flight` counts an execution whether or
+  not its threads are running and a factorisation has to count both sides the same way.
+- **`working`** — of those, the ones on a CPU. What splitting the request *bought*: `work / span`,
+  the `T₁/T∞` this section already describes, and what the literature means by the word.
+
+`working = inside × (1 - waiting)`, so they differ by exactly a column the coarse table already
+printed. The bench makes the gap concrete: a driver that fans work out and parks on the join is one
+thread inside and zero working, and `working` recovers that from thread state without being told —
+4.00 inside against 3.01 working, the difference being 0.99 of a driver.
+
+**Why one number would not have done.** The text below reserves "parallelism" for the code-not-load
+quantity, which is `working`. But the report is occupancy-based everywhere else — `share`,
+`occupancy` and `in flight` all count a waiting thread in full — so printing only `working` would
+have made this column the odd one out in its own table *and* broken the identity. Printing only
+`inside` would have answered the capacity question and silently mis-answered the speedup one, which
+is the question the section below is mostly about.
 
 ### Two parallelisms, and the identity that relates them · settled before any of it was built
 

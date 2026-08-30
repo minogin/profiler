@@ -582,6 +582,8 @@ class Bench(
      * has always been, with no pool constructed and no extra thread in the process.
      */
     val helpers: Int = 0,
+    /** Whether a fanned-out chunk carries the coarse execution its driver was inside. See [Fanout]. */
+    val propagate: Boolean = true,
 ) {
     private val barrier = CyclicBarrier(threads + helpers + 1)
 
@@ -590,7 +592,7 @@ class Bench(
      * bench. Helpers take part in the measure stage as well as the run, which is what keeps the
      * two-truths check valid when the work has moved off the workers — see [Fanout].
      */
-    val fanout = if (helpers > 0) Fanout(helpers, workload, labeled, barrier) else null
+    val fanout = if (helpers > 0) Fanout(helpers, workload, labeled, barrier, propagate) else null
 
     val workers = List(threads) {
         Worker(it, it < activeThreads, labeled, workload, barrier, contended, lockOpId, fanout)

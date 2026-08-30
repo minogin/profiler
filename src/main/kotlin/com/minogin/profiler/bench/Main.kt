@@ -125,6 +125,11 @@ fun main(args: Array<String>) {
     // roughly one thread, so parallelism legitimately falls back to 1 and the defect goes quiet.
     // Seeing both is what stops the check being read as a statement about fan-out in general.
     val fanoutHelpers = opt["fanout"]?.toInt()
+
+    // --propagate=off puts the fan-out run back to what 5a measured, so the phase 5 checks are an
+    // A/B in one binary rather than a claim about a build that no longer exists. On by default,
+    // because from 5b onwards the tool having propagation is the normal state of affairs.
+    val propagate = opt["propagate"] != "off"
     require(fanoutHelpers == null || (coarseLabels && labels)) {
         "--fanout needs --coarse and labels: the context it is trying to cross is a coarse one"
     }
@@ -343,7 +348,7 @@ fun main(args: Array<String>) {
     } else if (sweep != null) {
         runSweep(sweep, labels, workload, seconds, warmedUp)
     } else if (fanoutHelpers != null) {
-        runFanout(fanoutHelpers, threads, labels, workload, seconds, stepMillis, sampleState)
+        runFanout(fanoutHelpers, threads, labels, workload, seconds, stepMillis, sampleState, propagate)
     } else {
         val bench = Bench(threads, activeThreads, labels, workload, contended, lockOpId)
         bench.start()
@@ -539,12 +544,13 @@ private fun runFanout(
     seconds: Int,
     stepMillis: Double,
     sampleState: Boolean,
+    propagate: Boolean,
 ): Boolean {
     val configs = listOf(1, drivers).distinct()
     val rows = ArrayList<FanoutRow>()
     for (d in configs) {
         println("\n--- Fan-out: $d driver(s) x $helpers helpers, $seconds s ---")
-        val bench = Bench(d, d, labels, workload, helpers = helpers)
+        val bench = Bench(d, d, labels, workload, helpers = helpers, propagate = propagate)
         bench.start()
         // The helpers are threads the JIT has never seen run this code. Without a re-warm the first
         // entry would measure compilation and the second would not, and the difference would be
@@ -564,7 +570,7 @@ private fun runFanout(
         if (!Profiler.expectBalanced()) println("  ! a label was left open at the end of this entry")
         bench.stop()
     }
-    return reportFanout(rows)
+    return reportFanout(rows, propagate)
 }
 
 /**

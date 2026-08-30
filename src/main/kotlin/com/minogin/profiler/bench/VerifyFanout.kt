@@ -4,31 +4,76 @@ import com.minogin.profiler.NO_OP_INDEX
 import com.minogin.profiler.Sampler
 import com.minogin.profiler.duration
 import java.util.Locale
+import kotlin.math.abs
 
 /**
  * Below this the pool was saturated and the run genuinely had no fan-out to see, so nothing is
  * asserted about it.
  *
- * Two drivers' worth of threads on one request. It is a threshold on the **bench's own stopwatch**,
- * not on anything the profiler said, which is what makes it safe to gate the checks with: a
- * configuration where fan-out did not happen cannot be evidence either way about propagation, and
+ * Two helpers' worth of threads on one request, and it is a threshold on the **bench's own
+ * stopwatch** rather than on anything the profiler said — which is what makes it safe to gate with.
+ * A configuration where fan-out did not happen cannot be evidence either way about propagation, and
  * asserting on it would turn a scheduling accident into a failed run.
  */
 private const val MIN_FANOUT = 2.0
 
 /**
  * At most this much of the truth may show up as the request's busy time before the escape stops
- * looking like an escape.
+ * looking like an escape. Propagation off only.
  *
  * Half, and generously so. With no propagation the driver is parked on a join for nearly all of
- * every request and contributes almost no running samples at all, so the honest expectation is
- * close to zero — the slack is here to absorb a driver that happened to be scheduled during the
- * dispatch loop, not to make a marginal result pass.
+ * every request and contributes almost no running samples at all, so the honest expectation is close
+ * to zero — measured at 0.3%. The slack is here to absorb a driver that happened to be scheduled
+ * during its dispatch loop, not to make a marginal result pass.
  */
 private const val ESCAPED_WORK_MAX = 0.5
 
 /** Below this share of labelled thread-time outside every span, work is not visibly escaping. */
 private const val OUTSIDE_MIN_SHARE = 0.5
+
+/**
+ * How far the sampled `inside` may sit from the bench's own count of the threads in a request, as a
+ * fraction. Propagation on.
+ *
+ * Set from measurement, as everything here is, and the agreement is far closer than expected:
+ * **-0.1% on a 60 s run and -0.3% on a 10 s one**, 4.00 sampled against 4.00 measured. So this is a
+ * factor of ten on the worst observed, and it is deliberately not tighter — two runs is two runs.
+ *
+ * They agree that closely because they are genuinely the same quantity by two routes: the bench sums
+ * stopwatch intervals over helpers, the profiler counts slot samples at 1 ms against a mean span of
+ * about 300 us. What makes the comparison honest is that both count a thread that is *in* the
+ * execution, running or not — which is why the bench side has to add its parked driver, and why
+ * [FanoutRow.benchInside] is `1 + helpers` rather than `helpers`.
+ */
+private const val INSIDE_TOLERANCE = 0.03
+
+/**
+ * How far the request's sampled busy time may sit from the work its requests actually did, as a
+ * fraction. Propagation on.
+ *
+ * The plan's *"work per execution must not depend on thread count"* invariant, and the coarsest of
+ * the three checks — because unlike `inside` it is a **sampled** quantity against a **computed** one,
+ * so it carries truth B's error as well as its own.
+ *
+ * Set from measurement, and the two observations are far apart for a reason worth stating:
+ * **5.1% on the 60 s run, 20.2% on the 10 s smoke.** Truth B is measured in a stage where every
+ * thread is busy, while a fanned-out run has its driver parked, so the two do not price an operation
+ * under quite the same load — and on a short run there is not enough of either for that to average
+ * out. 25% passes both with the 60 s figure, which is the configuration this check is for, having
+ * five times the margin.
+ */
+private const val WORK_TOLERANCE = 0.25
+
+/**
+ * The most labelled thread-time that may fall outside every span once propagation is on.
+ *
+ * Not zero on principle: the bench leaves `traverse` and the operations under it in the fine tier on
+ * purpose, and a driver between `exitCoarse` and its next `enterCoarse` is briefly outside
+ * everything. Measured, it rounds to **0.0%** in both configurations — against **76.4%** with
+ * propagation off, on the same binary minutes apart. That is the collapse this phase exists to
+ * produce, and it is the same signal that reads 88.5% on Lucene.
+ */
+private const val OUTSIDE_MAX_SHARE = 0.10
 
 /**
  * One fan-out configuration, as the bench measured it and as the profiler reported it.
@@ -45,10 +90,15 @@ internal class FanoutRow(
     val rootCalls: Long,
     /** Root calls the drivers asked for: chunks dispatched times [CLOCK_CHUNK]. Exact. */
     val expectedRootCalls: Long,
-    /** Helper occupancy over request span, by the bench's own stopwatch. */
-    val benchParallelism: Double,
-    /** `inclusiveHits / instanceTicks` for the request type, by the sampler. */
-    val profilerParallelism: Double,
+    /**
+     * Helper occupancy over request span, by the bench's own stopwatch. The fan-out the pool
+     * achieved, and the gate for every check below.
+     */
+    val benchHelperThreads: Double,
+    /** `inclusiveHits / instanceTicks` — threads in the execution, a parked one counted. */
+    val profilerInside: Double,
+    /** `runningInclusiveHits / instanceTicks` — of those, the ones a sample caught on a CPU. */
+    val profilerWorking: Double,
     /** Total work the run did, over the requests that did it. Thread-nanoseconds per execution. */
     val truthWorkPerExecNanos: Double,
     /** What the profiler thinks one execution's busy time was. */
@@ -58,7 +108,18 @@ internal class FanoutRow(
     val meanSpanNanos: Double,
 ) {
     /** Whether this configuration achieved enough fan-out for anything to be asserted about it. */
-    val fannedOut: Boolean get() = benchParallelism >= MIN_FANOUT
+    val fannedOut: Boolean get() = benchHelperThreads >= MIN_FANOUT
+
+    /**
+     * Threads in one request, by the bench's own reckoning: its helpers, **plus the driver**.
+     *
+     * The driver holds the context for the whole of its own span — it opened it, and it is parked
+     * inside it waiting on the join — so it contributes exactly one thread per tick the span is
+     * live. That is what the profiler's `inside` counts, and comparing against helper occupancy
+     * alone would report a one-thread disagreement that is not a disagreement at all. It is also why
+     * `inside` reads exactly 1.0000 with propagation off: the driver, and nothing else.
+     */
+    val benchInside: Double get() = 1.0 + benchHelperThreads
 
     /** How much of the work the request did that the request's own busy time can account for. */
     val workAccounted: Double
@@ -73,17 +134,18 @@ internal fun fanoutRow(bench: Bench, o: Outcome, sampler: Sampler, stepMillis: D
     val requests = bench.workers.sumOf { it.requestCount.toLong() }
     val count = maxOf(1L, o.coarseTotals[t]?.count ?: 1L)
     val labelled = sampler.totalSamples() - sampler.counters[NO_OP_INDEX]
-    val instanceTicks = sampler.coarseInstanceTicks[t]
+    val ticks = sampler.coarseInstanceTicks[t]
     return FanoutRow(
         drivers = bench.activeThreads,
         helpers = bench.helpers,
         requests = requests,
         rootCalls = o.rootCalls,
         expectedRootCalls = bench.workers.sumOf { it.fanoutChunks } * CLOCK_CHUNK,
-        benchParallelism = bench.measuredParallelism(),
-        profilerParallelism =
-            if (instanceTicks == 0L) Double.NaN
-            else sampler.coarseInclusiveHits[t].toDouble() / instanceTicks,
+        benchHelperThreads = bench.measuredParallelism(),
+        profilerInside = if (ticks == 0L) Double.NaN
+        else sampler.coarseInclusiveHits[t].toDouble() / ticks,
+        profilerWorking = if (ticks == 0L) Double.NaN
+        else sampler.coarseRunningInclusiveHits[t].toDouble() / ticks,
         truthWorkPerExecNanos = if (requests == 0L) Double.NaN else o.totB / requests,
         profilerBusyPerExecNanos = sampler.coarseRunningInclusiveHits[t] * stepNanos / count,
         outsideShare = if (labelled == 0L) 0.0 else sampler.labelledOutsideCoarse.toDouble() / labelled,
@@ -92,51 +154,56 @@ internal fun fanoutRow(bench: Bench, o: Outcome, sampler: Sampler, stepMillis: D
 }
 
 /**
- * The phase 5a verdict: fan-out happens, the bench can measure it, and the profiler cannot see it.
+ * The phase 5 verdict, and it runs in whichever direction the switch is set.
  *
- * **This asserts that a defect is present, which is a strange thing for a test to do and is
- * deliberate.** The whole discipline of this project is to build the truth before the instrument,
- * and the one chance to establish that the bench really reproduces Lucene's problem is while the
- * fix does not exist. Every one of these checks is inverted in 5b: `parallelism` stops being 1.0,
- * the work comes back inside the span, and the outside-coarse share collapses. They are written to
- * be inverted rather than deleted, so the same numbers keep being watched from both sides.
+ * **With propagation off it asserts that the defect is present**, which is a strange thing for a test
+ * to do and is deliberate: the discipline here is to build the truth before the instrument, and the
+ * one chance to establish that the bench really reproduces Lucene's problem was while the fix did not
+ * exist. Those checks were not deleted when 5b landed — `--propagate=off` still runs them, so the
+ * before and the after are an A/B inside one binary rather than a claim about a build nobody can run.
  *
- * The two checks that are **not** about the defect stay true in both phases, and they are the ones
- * that are clock-independent — counts against counts:
+ * **With propagation on it asserts the same three statements inverted**: the sampled `inside` matches
+ * the bench's own count of threads per request, the span accounts for the work its request did, and
+ * the outside-every-span share has collapsed.
  *
- * 1. **Root calls are conserved.** The helpers ran exactly the chunks the drivers dispatched, no
- *    more and no fewer. Fan-out must move work, never invent or lose it, and a bench that quietly
- *    dropped a chunk would make every share below wrong in a way nothing else here would catch.
+ * Two checks belong to neither direction and hold in both, and they are the clock-independent ones —
+ * counts against counts:
+ *
+ * 1. **Root calls are conserved.** The helpers ran exactly the chunks the drivers dispatched, no more
+ *    and no fewer. Fan-out must move work, never invent or lose it, and a bench that quietly dropped
+ *    a chunk would make every share below wrong in a way nothing else here would catch.
  * 2. **Fan-out actually happened**, by the bench's own stopwatch, in at least one configuration.
  *    Without that the rest is vacuous — a run where nothing was handed anywhere would pass every
- *    "the profiler cannot see it" check trivially, which is exactly the shape of vacuous pass this
- *    project has already been caught by once.
+ *    "the profiler cannot see it" check trivially, which is the shape of vacuous pass this project
+ *    has already been caught by once.
  */
-internal fun reportFanout(rows: List<FanoutRow>): Boolean {
+internal fun reportFanout(rows: List<FanoutRow>, propagate: Boolean): Boolean {
     var ok = true
-    println("\n" + "=".repeat(110))
-    println("PHASE 5a — FAN-OUT, WITH NO PROPAGATION")
-    println("=".repeat(110))
+    println("\n" + "=".repeat(118))
+    println("PHASE 5 - FAN-OUT, PROPAGATION " + if (propagate) "ON" else "OFF")
+    println("=".repeat(118))
     println(
         String.format(
-            Locale.ROOT, "%9s %9s %12s %11s %11s %12s %12s %10s",
-            "drivers", "helpers", "requests", "bench par", "prof par", "work/exec", "busy/exec", "outside"
+            Locale.ROOT, "%9s %9s %12s %10s %10s %10s %12s %12s %9s",
+            "drivers", "helpers", "requests", "bench in", "inside", "working",
+            "work/exec", "busy/exec", "outside"
         )
     )
-    println("-".repeat(110))
+    println("-".repeat(118))
     for (r in rows) {
         println(
             String.format(
-                Locale.ROOT, "%9d %9d %,12d %11.2f %11.4f %12s %12s %9.1f%%",
-                r.drivers, r.helpers, r.requests, r.benchParallelism, r.profilerParallelism,
+                Locale.ROOT, "%9d %9d %,12d %10.2f %10.2f %10.2f %12s %12s %8.1f%%",
+                r.drivers, r.helpers, r.requests, r.benchInside, r.profilerInside, r.profilerWorking,
                 duration(r.truthWorkPerExecNanos), duration(r.profilerBusyPerExecNanos),
                 r.outsideShare * 100
             )
         )
     }
-    println("-".repeat(110))
-    println("bench par is helper occupancy / request span, measured by the bench's own clock")
-    println("prof par  is inclusiveHits / instanceTicks, sampled - it is what propagation will move")
+    println("-".repeat(118))
+    println("bench in  is 1 + helper occupancy / request span, by the bench's own clock - the driver")
+    println("            holds the context for its whole span, so it is one of the threads inside")
+    println("inside    is inclusiveHits / instanceTicks, sampled; working is the running half of it")
     println("work/exec is the run's total work over its requests; busy/exec is what the span could see")
     println("outside   is labelled thread-time that fell under no coarse span at all")
 
@@ -149,7 +216,7 @@ internal fun reportFanout(rows: List<FanoutRow>): Boolean {
             String.format(
                 Locale.ROOT, "    %d x %d   %,14d executed, %,14d dispatched   %s",
                 r.drivers, r.helpers, r.rootCalls, r.expectedRootCalls,
-                if (bad) "MISMATCH — fan-out lost or invented work" else "exact"
+                if (bad) "MISMATCH - fan-out lost or invented work" else "exact"
             )
         )
     }
@@ -157,73 +224,119 @@ internal fun reportFanout(rows: List<FanoutRow>): Boolean {
     // --- 2. did fan-out happen at all --------------------------------------------------
     val fanned = rows.filter { it.fannedOut }
     if (fanned.isEmpty()) {
-        ok = false
         println(
             String.format(
                 Locale.ROOT,
-                "\n  ! no configuration reached %.1f threads per request by the bench's own stopwatch,",
+                "%n  ! no configuration reached %.1f helper threads per request by the bench's own",
                 MIN_FANOUT
             )
         )
-        println("    so nothing below would mean anything and the checks are not run")
+        println("    stopwatch, so nothing below would mean anything and the checks are not run")
         println("\n  fan-out: FAILED")
         return false
     }
 
-    // --- 3. the defect, where fan-out actually happened ---------------------------------
-    println("\n  the defect, asserted only where the bench says fan-out happened (5b inverts all three)")
+    // --- 3. the direction the switch selected -------------------------------------------
     for (r in fanned) {
-        // Exactly 1.0, not approximately, and for the same structural reason the same-thread check
-        // uses equality: with no propagation every occupied instance is occupied by the one thread
-        // that made it, so the two counters move in lockstep. A tolerance would let a partly working
-        // propagation look like no propagation at all.
-        val parBad = r.profilerParallelism != 1.0
-        val workBad = !(r.workAccounted < ESCAPED_WORK_MAX)
-        val outsideBad = r.outsideShare < OUTSIDE_MIN_SHARE
-        if (parBad || workBad || outsideBad) ok = false
-        println(String.format(Locale.ROOT, "    %d drivers x %d helpers, mean span %s:", r.drivers, r.helpers, duration(r.meanSpanNanos)))
         println(
             String.format(
                 Locale.ROOT,
-                "      bench measured %.2f threads per request, the profiler reports %.4f   %s",
-                r.benchParallelism, r.profilerParallelism,
-                if (parBad) "UNEXPECTED — propagation is not supposed to exist yet" else "as expected"
+                "%n    %d drivers x %d helpers, mean span %s, %.2f threads per request measured:",
+                r.drivers, r.helpers, duration(r.meanSpanNanos), r.benchInside
             )
         )
-        println(
-            String.format(
-                Locale.ROOT,
-                "      the span accounts for %.1f%% of the work its request did                %s",
-                r.workAccounted * 100,
-                if (workBad) "UNEXPECTED — too much work is still inside the span" else "as expected"
-            )
-        )
-        println(
-            String.format(
-                Locale.ROOT,
-                "      %.1f%% of labelled thread-time is under no span at all                   %s",
-                r.outsideShare * 100,
-                if (outsideBad) "UNEXPECTED — the escape is not visible" else "as expected"
-            )
-        )
+        val good = if (propagate) checkPropagated(r) else checkEscaped(r)
+        if (!good) ok = false
     }
 
-    // Reported and never gated. It is the honest answer rather than a defect: with as many drivers
-    // as helpers there is nothing left to fan out to, so a request gets about one thread and the
-    // parallelism the code could have had is invisible for want of a free core. That is the caveat
-    // CoarseStat.parallelism already carries in its own documentation, observed.
-    val saturated = rows.filter { !it.fannedOut }
-    for (r in saturated) {
+    // Reported and never gated. It is the honest answer rather than a defect: with as many drivers as
+    // helpers there is nothing left to fan out to, so a request gets about one thread and whatever
+    // parallelism the code could have had is invisible for want of a free one. That is the caveat
+    // CoarseStat.working carries in its own documentation, observed.
+    for (r in rows.filter { !it.fannedOut }) {
         println(
             String.format(
                 Locale.ROOT,
-                "%n  %d drivers x %d helpers reached only %.2f threads per request: the pool is saturated,",
-                r.drivers, r.helpers, r.benchParallelism
+                "%n  %d drivers x %d helpers reached only %.2f helper threads per request: the pool is",
+                r.drivers, r.helpers, r.benchHelperThreads
             )
         )
-        println("    so there was no fan-out to miss and nothing is asserted about it")
+        println("    saturated, so there was no fan-out to miss and nothing is asserted about it")
     }
 
-    println("\n  fan-out: ${if (ok) "OK — the defect reproduces against a measured truth" else "FAILED"}")
+    println(
+        "\n  fan-out: " + if (!ok) "FAILED" else if (propagate)
+            "OK - the context crosses the thread and the span sees the work"
+        else "OK - the defect reproduces against a measured truth"
+    )
     return ok
+}
+
+/** Propagation off: the three statements of the defect, as 5a established them. */
+private fun checkEscaped(r: FanoutRow): Boolean {
+    // Exactly 1.0, not approximately, and for the same structural reason the same-thread check uses
+    // equality: with no propagation every occupied instance is occupied by the one thread that made
+    // it, so the two counters move in lockstep. A tolerance would let a partly working propagation
+    // look like no propagation at all.
+    val insideBad = r.profilerInside != 1.0
+    val workBad = !(r.workAccounted < ESCAPED_WORK_MAX)
+    val outsideBad = r.outsideShare < OUTSIDE_MIN_SHARE
+    println(
+        String.format(
+            Locale.ROOT, "      inside reports %.4f against the %.2f measured               %s",
+            r.profilerInside, r.benchInside,
+            if (insideBad) "UNEXPECTED - propagation is off, so only the driver should count"
+            else "as expected"
+        )
+    )
+    println(
+        String.format(
+            Locale.ROOT, "      the span accounts for %.1f%% of the work its request did     %s",
+            r.workAccounted * 100,
+            if (workBad) "UNEXPECTED - too much work is still inside the span" else "as expected"
+        )
+    )
+    println(
+        String.format(
+            Locale.ROOT, "      %.1f%% of labelled thread-time is under no span at all       %s",
+            r.outsideShare * 100,
+            if (outsideBad) "UNEXPECTED - the escape is not visible" else "as expected"
+        )
+    )
+    return !insideBad && !workBad && !outsideBad
+}
+
+/** Propagation on: the same three statements, inverted. */
+private fun checkPropagated(r: FanoutRow): Boolean {
+    val insideBad = abs(r.profilerInside / r.benchInside - 1.0) > INSIDE_TOLERANCE
+    val workBad = abs(r.workAccounted - 1.0) > WORK_TOLERANCE
+    val outsideBad = r.outsideShare > OUTSIDE_MAX_SHARE
+    println(
+        String.format(
+            Locale.ROOT, "      inside reports %.2f against the %.2f measured, %+.1f%%         %s",
+            r.profilerInside, r.benchInside, (r.profilerInside / r.benchInside - 1.0) * 100,
+            if (insideBad) "OUT OF TOLERANCE" else "agrees"
+        )
+    )
+    println(
+        String.format(
+            Locale.ROOT, "      the span accounts for %.1f%% of the work its request did     %s",
+            r.workAccounted * 100,
+            if (workBad) "OUT OF TOLERANCE - work is still escaping" else "agrees"
+        )
+    )
+    println(
+        String.format(
+            Locale.ROOT, "      %.1f%% of labelled thread-time is under no span at all       %s",
+            r.outsideShare * 100,
+            if (outsideBad) "TOO HIGH - work is still escaping its context" else "collapsed"
+        )
+    )
+    println(
+        String.format(
+            Locale.ROOT, "      working reports %.2f, so %.2f of the %.2f threads inside were parked",
+            r.profilerWorking, r.profilerInside - r.profilerWorking, r.profilerInside
+        )
+    )
+    return !insideBad && !workBad && !outsideBad
 }

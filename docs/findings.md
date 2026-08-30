@@ -1513,6 +1513,55 @@ measures where the *labelled work* ran rather than how many threads were on a re
 more sensitive of the two signals, exactly as it was on Lucene (88.5% outside against 24.5%
 waiting).
 
+### Propagation, and the same three numbers inverted
+
+**The context crosses the thread and everything the escape had broken comes back.** Phase 5b, same
+binary and the same configuration minutes apart, `--fanout=8 --threads=7 --seconds=60`, run
+2026-08-30. Clock: **184.0%** of nominal over the propagating run (123.9–229.2, 122 samples) and
+**165.3%** over the escaping one (96.9–227.8, 119 samples), none failed.
+
+| 1 driver x 8 helpers | propagation off | propagation on |
+|---|---|---|
+| threads per request, bench stopwatch | 5.31 | 4.00 |
+| `inside`, sampled | **1.0000** | **4.00** (−0.1%) |
+| `working`, sampled | 0.01 | 3.01 |
+| span accounts for | **0.2%** of its work | **105.1%** |
+| outside every span | **76.4%** | **0.0%** |
+
+**`inside` agrees with the bench's own stopwatch to 0.1%.** Two routes to the same quantity — the
+bench sums stopwatch intervals over helpers, the profiler counts slot samples at 1 ms against a
+300 µs mean span — and they land on 4.00 against 4.00. The tolerance was set at 3%, a factor of ten
+on the worst of two runs, rather than at the observed value.
+
+**The comparison only works because the bench counts its parked driver.** A driver holds its context
+for the whole of its own span, so it contributes exactly one thread per tick, and the bench's truth
+has to be `1 + helpers` rather than `helpers`. That is not an adjustment made to fit: it is the same
+fact that makes `inside` read exactly **1.0000** with propagation off — the driver, and nothing else.
+Getting this wrong would have reported a one-thread disagreement that was not a disagreement.
+
+**`working` names the parked thread without being told about it.** It reads 3.01 against `inside`'s
+4.00, so 0.99 of the four threads in the request were not on a CPU. That is the driver, recovered
+from thread state alone. It is the clearest demonstration so far that the two columns are worth
+having separately: 4.00 is what the request ties up, 3.01 is what splitting it bought.
+
+**The work invariant, and why its tolerance is loose.** The span accounts for 105.1% of the work its
+request did at 60 s, against 79.8% on a 10 s smoke of the same build. Unlike `inside`, this compares
+a **sampled** quantity to a **computed** one, so it carries truth B's error too — and truth B is
+measured in a stage where every thread is busy, while a fanned-out run has its driver parked. The
+tolerance is 25%, set on the 5.1% the intended 60 s configuration produced.
+
+**The saturated row corroborates without being asked to.** Seven drivers against eight helpers is
+below the fan-out gate, so nothing is asserted about it — and `inside` reads 2.13 against a measured
+2.13 anyway, in both arms.
+
+**What did not move, and had to not move:** root calls conserved exactly, dispatched against
+executed, in every configuration of both arms — 602,663,424 against 602,663,424 with propagation
+off, 447,320,320 against 447,320,320 with it on.
+
+**The escaping arm is still runnable and still checked.** `--propagate=off` keeps the 5a assertions
+alive rather than deleting them, so the before and the after are an A/B inside one binary. The mount
+is branched around rather than passed a null, so the off arm runs the code 5a measured.
+
 ## Open questions
 
 **What the bench's duration tolerance should be on a warm machine.** Settled above that `--coarse` is

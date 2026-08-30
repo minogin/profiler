@@ -200,10 +200,10 @@ Present only if you placed a coarse label. It answers the question the table abo
 cannot: **how long did one execution take.**
 
 ```
-coarse operation            executions       mean        p50        p90        p99        max  busy/exec  waiting   in flight
-----------------------------------------------------------------------------------------------------------------------------
-request                      3,203,348    29.9 us    20.5 us    45.1 us   180.2 us   17.01 ms    29.8 us     0.0%      7.96/8
-----------------------------------------------------------------------------------------------------------------------------
+coarse operation        executions      mean       p50       p90       p99       max busy/exec  waiting inside working   in flight
+----------------------------------------------------------------------------------------------------------------------------------
+request                  3,203,348   29.9 us   20.5 us   45.1 us  180.2 us  17.01 ms   29.8 us     0.0%   1.00    1.00      7.96/8
+----------------------------------------------------------------------------------------------------------------------------------
   request was: flushBatch 38.7%, validateRecord 37.9%, parseRecord 10.3%, unlabelled 7.2%, indexRecord 5.9%
 ```
 
@@ -213,6 +213,8 @@ request                      3,203,348    29.9 us    20.5 us    45.1 us   180.2 
 | **mean, p50, p90, p99, max** | **measured**, two timestamps per execution | the only numbers in the whole report that are not sampled. Percentiles come from a log-bucket histogram: **at most 12.5% high, never low** |
 | **busy/exec** | thread-time on a CPU inside one execution — sampled | **`mean − busy/exec` is the waiting**, quantified. This is the pair the fine tier cannot give you |
 | **waiting** | that gap as a share | 0.0% here because the demo never blocks. On anything with I/O or a lock it is the finding |
+| **inside** | threads in one execution at once, a parked one counted in full | what a request *ties up*. 1.00 here because this demo hands nothing between threads |
+| **working** | of those, the ones a sample caught on a CPU | what splitting the work *bought*. `working = inside × (1 − waiting)` |
 | **in flight** | executions at once, over the threads there were | the same load-not-code caveat as the fine table's column |
 | **`… was:` line** | the cross-tabulation | which fine operations ran under this one. Neither tier produces this alone |
 
@@ -228,10 +230,49 @@ context costs tens of nanoseconds to allocate and stamp, so the label goes aroun
 the tier boundary — `d ≥ max(800 ns, 4 µs × share)` — and it is why the fine tier exists at all.
 Put a coarse label on something too small and you are measuring the instrument.
 
-**What is not here, deliberately.** There is no parallelism column. Until a context can cross a
-thread, every occupied execution is occupied by exactly one thread, so the number is 1.00 by
-construction and would be a column of ones. It is measured all the same, because a known answer is
-what an instrument gets calibrated against — see `plan.md`, phase 5.
+### `inside` and `working` are one measurement answering two questions
+
+They are the same sum over the same ticks, split by whether the thread was on a CPU. Both are here
+because the two answers lead to different decisions, and picking one would have thrown away a
+question somebody needs.
+
+Take a request that fans out to helpers while its caller waits on the join. Measured on the bench,
+one driver against eight helpers:
+
+```
+inside   5.24     five threads are in this execution
+working  4.24     four of them are doing something
+```
+
+**`working` is the speedup answer.** Splitting this request made it about 4× faster than doing it
+serially. This is `work ÷ span` — the work-span model's `T₁/T∞`, and what the literature means by
+*parallelism*. Invert it through Amdahl to ask whether more threads would help. The caller parked on
+its own join contributes nothing here, correctly: it made the request no faster.
+
+**`inside` is the capacity answer.** That sleeping caller is a real thread and is not available for
+anything else. With sixteen threads and five tied up per request you can serve three requests at
+once, not four. This is also the number that keeps the identity exact —
+
+```
+threads inside a coarse type = executions in flight  ×  inside
+```
+
+— because `in flight` counts an execution whether or not its threads are running, and a
+factorisation has to count both sides the same way.
+
+**They differ by exactly the `waiting` column**, which is why the three sit together:
+`working = inside × (1 − waiting)`. A wide gap between them means the request is waiting on itself.
+
+**Both read 1.00 until a context crosses a thread**, as in the demo above: every occupied execution
+is occupied by the one thread that created it. That made it a known answer to calibrate the instance
+stamping against before propagation existed, and it is still what pins the same-thread case now that
+it does.
+
+**The caveat on `working`, and it is a real limit rather than a defect.** What gets measured is
+`min(what the code could do, threads actually free)`. A saturated pool reads it low: on the bench,
+seven drivers against the same eight helpers leaves nothing to fan out to and `working` falls back
+to about 1. That is the truth about *that run*, not about the code — which is why the counterfactual
+sweep in `ideas.md` item 22 survives this and is not replaced by it.
 
 ### `N% of labelled thread-time was inside NO coarse span`
 

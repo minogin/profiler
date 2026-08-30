@@ -1,7 +1,10 @@
 package com.minogin.profiler.bench
 
+import com.minogin.profiler.CoarseContext
 import com.minogin.profiler.OpSlot
 import com.minogin.profiler.Profiler
+import com.minogin.profiler.captureCoarse
+import com.minogin.profiler.withCoarse
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CyclicBarrier
 import java.util.concurrent.LinkedBlockingQueue
@@ -21,15 +24,20 @@ import java.util.concurrent.atomic.AtomicLong
  * it did. The price is that the process holds `threads + helpers` threads, which is why the
  * configuration this is meant to be read at is few drivers and many helpers.
  *
- * **No propagation, on purpose.** Nothing here carries the driver's context to a helper. That is 5a:
- * reproduce the defect against a truth the bench measures for itself, before the mechanism that
- * fixes it exists. See `plan.md`, phase 5, "The order".
+ * **Propagation is a switch, and both settings are kept.** With [propagate] off this is exactly what
+ * 5a measured: the driver's context stays behind and the request's own span sees almost none of the
+ * work. With it on, each chunk carries the context it was forked under. Keeping both means the
+ * phase 5 checks are an A/B inside one binary rather than a claim about a build that no longer
+ * exists — and the off arm is byte-identical to what 5a ran, because the mount is branched around
+ * rather than passed a null.
  */
 class Fanout(
     val helpers: Int,
     private val w: Workload,
     private val labeled: Boolean,
     barrier: CyclicBarrier,
+    /** Whether a dispatched chunk carries the coarse execution its driver was inside. */
+    val propagate: Boolean = true,
 ) {
     /**
      * One request's worth of fan-out, and the bench's own stopwatch on it.
@@ -53,6 +61,14 @@ class Fanout(
         @JvmField val start: Int,
         @JvmField val calls: Int,
         @JvmField val req: Request,
+        /**
+         * The coarse execution this chunk was forked under, or null when propagation is off.
+         *
+         * Captured on the **driver** at submit time and not on the helper at run time, which is the
+         * one way to get this wrong that still compiles: by the time a helper picks the chunk up,
+         * the driver's context is not reachable from it and its own is empty.
+         */
+        @JvmField val ctx: CoarseContext?,
     )
 
     private val queue = LinkedBlockingQueue<Chunk>()
@@ -92,7 +108,7 @@ class Fanout(
     /** Hands one window of the schedule to whichever helper takes it first. */
     fun submit(start: Int, calls: Int, req: Request) {
         pending.incrementAndGet()
-        queue.put(Chunk(start, calls, req))
+        queue.put(Chunk(start, calls, req, if (propagate) captureCoarse() else null))
     }
 
     /** Blocks the driver until every chunk of [req] has been run. This is the join. */
@@ -158,7 +174,9 @@ class Fanout(
                     continue
                 }
                 val t0 = System.nanoTime()
-                runChunk(c)
+                // Branched rather than always mounting, so that with propagation off the helper runs
+                // precisely the code 5a measured and the A/B differs by the mount and nothing else.
+                if (propagate) withCoarse(c.ctx) { runChunk(c) } else runChunk(c)
                 // Timed around the work and nothing else, so this is how long the helper was inside
                 // the driver's request — which is what the driver's span has to be divided by.
                 c.req.occupancyNanos.addAndGet(System.nanoTime() - t0)

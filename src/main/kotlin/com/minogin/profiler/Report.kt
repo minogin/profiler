@@ -244,20 +244,51 @@ class CoarseStat internal constructor(
     val waitingHits: Long get() = inclusiveHits - runningInclusiveHits
 
     /**
-     * **Threads working on one execution at once** — `work / span`, the work-span model's `T1/T8`.
+     * **Threads inside one execution at once**, waiting ones counted in full.
+     *
+     * This and [working] are the same sum over the same ticks, split by whether the thread was on a
+     * CPU, and both are needed because they answer different questions. This one is the **capacity**
+     * answer: how many threads one execution ties up. A caller parked on its own join is not doing
+     * work, but it is not available for anything else either, so with sixteen threads and five tied
+     * up per request you can serve three at once and not four.
+     *
+     * It is the number that keeps the identity in [Report.inFlightOf]'s note exact — `threads inside
+     * = executions in flight x this` — because [inFlight] counts an execution whether or not its
+     * threads are running, and a factorisation has to count both sides the same way. It is also
+     * consistent with the rest of the report, where `share`, `occupancy` and `in flight` all count a
+     * waiting thread in full.
+     *
+     * **1.0 by construction until contexts cross threads.** Without propagation a context lives on
+     * the thread that made it, so every occupied instance is occupied by exactly one — which made it
+     * a known answer to check the instance stamping against before phase 5 could move it. Measured
+     * at exactly 1.0000 on the bench with propagation off, and at 5.24 with it on, against a
+     * stopwatch that said 4.24 helpers plus the one parked driver.
+     */
+    val inside: Double
+        get() = if (instanceTicks == 0L) Double.NaN else inclusiveHits.toDouble() / instanceTicks
+
+    /**
+     * **Threads actually working on one execution at once** — `work / span`, the work-span model's
+     * `T1/T8`, and what the literature means by *parallelism*.
+     *
+     * The **speedup** answer, and the sibling of [inside]: of the threads in the execution, the ones
+     * a sample caught on a CPU. This is the one that says what splitting the work bought you, and
+     * the one to invert through Amdahl when asking whether more threads would help. A caller parked
+     * on a join contributes nothing here, correctly — it made the request no faster.
+     *
+     * `working = inside x (1 - waiting)`, so the two differ by exactly the waiting share the coarse
+     * table already prints. They are shown side by side rather than one being derived by the reader,
+     * because the arithmetic is not the point and both readings are wanted at a glance.
      *
      * This is the number the fine tier structurally cannot produce, and the one that is a property
-     * of the code rather than of the load. It is **1.0 by construction until contexts cross threads**
-     * (phase 5): a context lives on the thread that created it, so every occupied instance is
-     * occupied by exactly one thread. That makes it a known answer to measure against rather than a
-     * useless one — anything but 1.0 here means the instance stamping is broken, and we find that
-     * out while the truth is still known. It is deliberately not printed for the same reason.
-     *
-     * The honest caveat for when it does start moving: what gets measured is
-     * `min(what the code could do, threads actually free)`, so a saturated pool reads it low.
+     * of the code rather than of the load — a request that splits four ways splits four ways for one
+     * client or a thousand. The honest caveat: what gets measured is
+     * `min(what the code could do, threads actually free)`, so a saturated pool reads it low. On the
+     * bench, seven drivers against eight helpers leaves nothing to fan out to and it falls back to
+     * about 1 — which is the truth about that run, not a defect in the number.
      */
-    val parallelism: Double
-        get() = if (instanceTicks == 0L) Double.NaN else inclusiveHits.toDouble() / instanceTicks
+    val working: Double
+        get() = if (instanceTicks == 0L) Double.NaN else runningInclusiveHits.toDouble() / instanceTicks
 
     /**
      * Executions of this operation running at once — the same quantity as [OperationStat.inFlight]
@@ -763,9 +794,11 @@ class Report internal constructor(
         appendLine("=".repeat(WIDTH))
         appendLine(
             String.format(
-                Locale.ROOT, "%-26s %11s %10s %10s %10s %10s %10s %10s %8s %11s",
+                // 130 columns exactly, to the report's WIDTH. Two new columns had to come out of
+                // the existing ones rather than out of the page: this table is read on a console.
+                Locale.ROOT, "%-22s %11s %9s %9s %9s %9s %9s %9s %8s %6s %7s %11s",
                 "coarse operation", "executions", "mean", "p50", "p90", "p99", "max",
-                "busy/exec", "waiting", "in flight"
+                "busy/exec", "waiting", "inside", "working", "in flight"
             )
         )
         appendLine("-".repeat(WIDTH))
@@ -775,12 +808,14 @@ class Report internal constructor(
                 else (c.inclusiveHits - c.runningInclusiveHits).toDouble() / c.inclusiveHits
             appendLine(
                 String.format(
-                    Locale.ROOT, "%-26s %,11d %10s %10s %10s %10s %10s %10s %7.1f%% %11s",
+                    Locale.ROOT, "%-22s %,11d %9s %9s %9s %9s %9s %9s %7.1f%% %6s %7s %11s",
                     c.name, c.count,
                     duration(c.meanSpanNanos), duration(c.percentileNanos(0.50)),
                     duration(c.percentileNanos(0.90)), duration(c.percentileNanos(0.99)),
                     duration(c.spanMaxNanos.toDouble()), duration(busyPerExecutionNanos(c)),
                     waitShare * 100,
+                    if (c.inside.isNaN()) "-" else String.format(Locale.ROOT, "%.2f", c.inside),
+                    if (c.working.isNaN()) "-" else String.format(Locale.ROOT, "%.2f", c.working),
                     if (c.inFlight.isNaN()) "-" else String.format(Locale.ROOT, "%.2f/%d", c.inFlight, threads)
                 )
             )
@@ -810,6 +845,11 @@ class Report internal constructor(
         appendLine("  high and never low, because a latency figure may overstate and must not understate")
         appendLine("busy/exec is thread-time on a CPU per execution, sampled: mean - busy/exec is the WAITING,")
         appendLine("  which is the one thing a fine label can never tell you. waiting is that as a share")
+        appendLine("inside is THREADS in one execution at once, a parked one counted: what a request ties up.")
+        appendLine("  working is the ones on a CPU - what splitting the work bought you, the T1/T8 of the")
+        appendLine("  work-span model. working = inside x (1 - waiting), and a caller parked on its own join")
+        appendLine("  is the gap between them. A saturated pool reads working low: it is min(what the code")
+        appendLine("  could do, threads actually free)")
         appendLine("in flight is executions at once out of the threads there were — your load, not your code")
         appendLine("the 'was:' lines are the cross-tabulation: which fine operations ran under this one")
         // The one signal for work escaping its context, which neither the floor check nor the

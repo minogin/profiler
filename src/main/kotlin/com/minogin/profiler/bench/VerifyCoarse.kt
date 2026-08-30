@@ -50,10 +50,11 @@ private const val BREAKDOWN_TOLERANCE_PP = 3.0
  * 2. **Percentiles match the workers' own stopwatches**, to the histogram's stated precision.
  * 3. **The breakdown matches `subtree x selfNanos`** — the cross-tabulation, which is the one thing
  *    neither tier produces alone.
- * 4. **Parallelism is exactly 1.0.** Contexts do not cross threads until phase 5, so every occupied
+ * 4. **`inside` is exactly 1.0.** Nothing in this mode hands work between threads, so every occupied
  *    execution is occupied by the one thread that created it. A known answer, which is the point:
- *    anything else means the instance stamping is broken, and we find that out here rather than in
- *    phase 5, where the true answer is no longer known.
+ *    anything else means the instance stamping is broken, or a context has crossed a thread
+ *    somewhere it was not meant to. Propagation exists from 5b onwards, so this check is now what
+ *    holds the same-thread case still while the fanned-out one moves — see `--fanout`.
  */
 internal fun checkCoarse(bench: Bench, o: Outcome, sampler: Sampler, stepMillis: Double): Boolean {
     // The snapshot taken when the sampler stopped, not a fresh read: the batch measurement that
@@ -220,25 +221,28 @@ internal fun checkCoarse(bench: Bench, o: Outcome, sampler: Sampler, stepMillis:
     )
     if (breakdownBad && o.ok) ok = false
 
-    // --- 4. parallelism, whose answer is known --------------------------------------
-    println("\n  parallelism - 1.0000 by construction until contexts cross threads (phase 5)")
+    // --- 4. inside, whose answer is known ---------------------------------------
+    // Propagation exists from 5b onwards, so this is no longer "until phase 5": it is the
+    // check that holds the same-thread case at exactly 1 while --fanout watches the other
+    // one move.
+    println("\n  inside - 1.0000 by construction: this mode hands nothing between threads")
     for (t in 0 until Profiler.coarseCount()) {
         val instTicks = sampler.coarseInstanceTicks[t]
         if (instTicks == 0L) continue
-        val par = sampler.coarseInclusiveHits[t].toDouble() / instTicks
+        val inside = sampler.coarseInclusiveHits[t].toDouble() / instTicks
         val inFlight = instTicks.toDouble() / sampler.coarseActiveTicks[t]
         val count = maxOf(1L, totals[t]?.count ?: 1L)
         // Exactly 1.0, not approximately. Every occupied execution is occupied by the thread that
         // created it, so the two counters move in lockstep; a tolerance here would hide the very
         // defect the check exists to catch.
-        val bad = par != 1.0
+        val bad = inside != 1.0
         if (bad) ok = false
         println(
             String.format(
-                Locale.ROOT, "    %-14s parallelism %.4f, in flight %.2f/%d, busy/exec %s%s",
-                Profiler.coarseNameOf(t), par, inFlight, bench.activeThreads,
+                Locale.ROOT, "    %-14s inside %.4f, in flight %.2f/%d, busy/exec %s%s",
+                Profiler.coarseNameOf(t), inside, inFlight, bench.activeThreads,
                 duration(sampler.coarseRunningInclusiveHits[t] * stepNanos / count),
-                if (bad) "   NOT 1.0 — the instance stamping is wrong" else ""
+                if (bad) "   NOT 1.0 - the instance stamping is wrong, or a context crossed a thread" else ""
             )
         )
     }
