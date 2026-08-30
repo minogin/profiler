@@ -272,7 +272,7 @@ fun qualify(seconds: Int, threads: Int, connections: Int, inFlight: Int) {
     }
     println(
         String.format(
-            Locale.ROOT, "\nserved %,d responses in %.2f s — %,.0f req/s", served, elapsed, served / elapsed
+            Locale.ROOT, "\nserved %,d responses in %.2f s - %,.0f req/s", served, elapsed, served / elapsed
         )
     )
     // Deep enough to reach our own handlers: Netty puts twenty frames of its own above them, so a
@@ -287,9 +287,9 @@ fun qualify(seconds: Int, threads: Int, connections: Int, inFlight: Int) {
     println("=".repeat(78))
     println("WHAT A FLAME GRAPH CAN NAME HERE")
     println("=".repeat(78))
-    println("distinct classes — these it names, and that is the control:")
+    println("distinct classes - these it names, and that is the control:")
     println("    AuthHandler, RouteHandler, RenderHandler")
-    println("shared class — these it cannot separate, and there are ${POLICIES.size} of them:")
+    println("shared class - these it cannot separate, and there are ${POLICIES.size} of them:")
     for ((name, header, depth) in POLICIES) {
         println(String.format(Locale.ROOT, "    %-20s reads %-10s hashes %,5d bytes", name, header, depth))
     }
@@ -306,7 +306,7 @@ fun main(args: Array<String>) {
     val inFlight = opt["inflight"]?.toInt() ?: 8
 
     println("=".repeat(96))
-    println("TRIAL 3 — Netty: $threads event loops, $connections connections, $inFlight in flight")
+    println("TRIAL 3 - Netty: $threads event loops, $connections connections, $inFlight in flight")
     println("JVM: ${System.getProperty("java.vm.name")} ${System.getProperty("java.version")}, " +
             "cores: ${Runtime.getRuntime().availableProcessors()}")
     println("=".repeat(96))
@@ -329,7 +329,7 @@ fun main(args: Array<String>) {
     val (served, elapsed) = drive(seconds, threads, connections, inFlight)
     println(
         String.format(
-            Locale.ROOT, "\nserved %,d responses in %.2f s — %,.0f req/s, %.1f us per request per loop",
+            Locale.ROOT, "\nserved %,d responses in %.2f s - %,.0f req/s, %.1f us per request per loop",
             served, elapsed, served / elapsed, elapsed * 1e6 * threads / served
         )
     )
@@ -358,7 +358,7 @@ fun profile(seconds: Int, threads: Int, connections: Int, inFlight: Int, coarse:
         val report = Profiler.stop()
         println(
             String.format(
-                Locale.ROOT, "\nserved %,d responses in %.2f s — %,.0f req/s (%.2f us of loop time each)",
+                Locale.ROOT, "\nserved %,d responses in %.2f s - %,.0f req/s (%.2f us of loop time each)",
                 served, elapsed, served / elapsed, elapsed * 1e6 * threads / served
             )
         )
@@ -410,7 +410,7 @@ private fun printPolicyFit(report: com.minogin.profiler.Report) {
     val intercept = my - slope * mx
 
     println("\n" + "=".repeat(78))
-    println("CONFIGURATION AGAINST MEASUREMENT — do the four policies fall on a line?")
+    println("CONFIGURATION AGAINST MEASUREMENT - do the four policies fall on a line?")
     println("=".repeat(78))
     println(String.format(Locale.ROOT, "  fitted: %.1f ns fixed + %.3f ns per byte hashed", intercept, slope))
     println(
@@ -482,7 +482,7 @@ fun runAb(rounds: Int, seconds: Int, threads: Int, connections: Int, inFlight: I
     for (a in Arm.entries) totals[a] = ArrayList()
 
     println("\n" + "=".repeat(96))
-    println("A/B AGAINST THE BARE WORKLOAD — $rounds rounds of ${seconds}s per arm, order reversed every other round")
+    println("A/B AGAINST THE BARE WORKLOAD - $rounds rounds of ${seconds}s per arm, order reversed every other round")
     println("=".repeat(96))
 
     // One server, one client, one set of connections, alive for the whole comparison. Only
@@ -553,7 +553,7 @@ fun runAb(rounds: Int, seconds: Int, threads: Int, connections: Int, inFlight: I
     println(
         String.format(
             Locale.ROOT,
-            "\n  full against inert: %.2f%% +/- %.2f%% (1 s.e. over %d rounds) — %s",
+            "\n  full against inert: %.2f%% +/- %.2f%% (1 s.e. over %d rounds) - %s",
             (ratios[Arm.FULL]!!.average() - base) / base * 100, se, rounds,
             if (effect > 2 * se) "readable, the effect is over twice its own error"
             else "INCONCLUSIVE: inside twice its own error, so this run does not separate them"

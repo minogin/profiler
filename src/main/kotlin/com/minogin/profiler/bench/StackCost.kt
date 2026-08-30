@@ -82,7 +82,7 @@ private fun stop(victims: List<Victim>) {
  */
 private fun callerCost(depths: List<Int>, victimCount: Int, iters: Int, samplesPerDepth: Int) {
     println()
-    println("CALLER COST — one Thread.getStackTrace against a running victim")
+    println("CALLER COST - one Thread.getStackTrace against a running victim")
     println("-".repeat(102))
     println(String.format(Locale.ROOT, "%8s %10s %10s %10s %10s %10s %10s", "asked", "reached", "samples", "median", "mean", "p99", "max"))
     for (depth in depths) {
@@ -113,7 +113,7 @@ private fun callerCost(depths: List<Int>, victimCount: Int, iters: Int, samplesP
             stop(victims)
         }
     }
-    println("'reached' is the depth a real trace came back with — recursion is only as deep as C2 leaves it")
+    println("'reached' is the depth a real trace came back with - recursion is only as deep as C2 leaves it")
 }
 
 /**
@@ -140,7 +140,7 @@ private fun victimCost(rates: List<Int>, victimCount: Int, depth: Int, iters: In
         val configs = listOf(-1) + rates + listOf(-2)
 
         println()
-        println("VICTIM COST — worker throughput while its stack is being taken")
+        println("VICTIM COST - worker throughput while its stack is being taken")
         println("-".repeat(102))
         println("$victimCount victims at stack depth $reached, $rounds rounds of $roundMillis ms each, order reversed every other round")
         println("the control spins in the same loop and takes no stack, so the difference is the walk and nothing else")
@@ -187,7 +187,7 @@ private fun victimCost(rates: List<Int>, victimCount: Int, depth: Int, iters: In
         println()
         println(
             String.format(
-                Locale.ROOT, "control: %,.0f laps/s, and it moves %.2f%% between rounds on its own — that is the floor",
+                Locale.ROOT, "control: %,.0f laps/s, and it moves %.2f%% between rounds on its own - that is the floor",
                 control, floor
             )
         )
@@ -241,7 +241,7 @@ private fun allStacksCost(victimCount: Int, depth: Int, iters: Int, samples: Int
         }
         val s = Spread(taken)
         println()
-        println("FOR COMPARISON — Thread.getAllStackTraces (a global safepoint, not a handshake)")
+        println("FOR COMPARISON - Thread.getAllStackTraces (a global safepoint, not a handshake)")
         println("-".repeat(102))
         println(
             String.format(

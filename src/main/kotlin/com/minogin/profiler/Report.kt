@@ -113,7 +113,7 @@ fun mismatchMessage(closed: String, open: String): String = String.format(
     "exit(%s) was called while %s was the operation open on this thread.%n" +
             "    One of them now covers work that was never inside it, and the number that comes " +
             "out of%n" +
-            "    that is plausible rather than obviously wrong — which is the direction that costs " +
+            "    that is plausible rather than obviously wrong - which is the direction that costs " +
             "you a day.%n" +
             "    The thread was unwound anyway, so this is one bad label and not every label after " +
             "it.",
@@ -129,7 +129,7 @@ fun leakMessage(open: String, thread: String = Thread.currentThread().name): Str
     "%s was still open on thread %s at a point the caller said should be quiescent.%n" +
             "    Every sample taken on that thread between the leak and this check was billed to " +
             "%s,%n" +
-            "    which does not look like an error — it looks like a finding, with a plausible " +
+            "    which does not look like an error - it looks like a finding, with a plausible " +
             "number beside it.%n" +
             "    A label placed with enter/exit has no finally: a body that throws leaves it set.",
     open, thread, open
@@ -714,7 +714,7 @@ class Report internal constructor(
                 // cycle above bounds that second kind, and only in aggregate.
                 waiting <= WAITING_NONE -> String.format(
                     Locale.ROOT,
-                    "and %.1f%% of those long samples caught the thread runnable — it is not waiting on anything, " +
+                    "and %.1f%% of those long samples caught the thread runnable - it is not waiting on anything, " +
                             "so the share is honest and the operation wants a coarse label for its per-execution " +
                             "statistics (runnable is not the same as scheduled: see the duty cycle above)",
                     (1 - waiting) * 100
@@ -724,7 +724,7 @@ class Report internal constructor(
                 // this operation rather than an alibi drawn from the whole run's budget.
                 waiting >= WAITING_MOSTLY -> String.format(
                     Locale.ROOT,
-                    "and %.1f%% of those long samples caught the thread parked or blocked — it is *waiting*, " +
+                    "and %.1f%% of those long samples caught the thread parked or blocked - it is *waiting*, " +
                             "not working. Read this share as occupancy: it does not add up across threads the " +
                             "way CPU does, and %s of wall clock had anyone inside it at all",
                     waiting * 100, threadTime(elapsedNanosOf(op))
@@ -732,7 +732,7 @@ class Report internal constructor(
 
                 else -> String.format(
                     Locale.ROOT,
-                    "and %.1f%% of those long samples caught the thread parked — part working, part waiting, " +
+                    "and %.1f%% of those long samples caught the thread parked - part working, part waiting, " +
                             "and the split is measured rather than bounded",
                     waiting * 100
                 )
@@ -758,7 +758,7 @@ class Report internal constructor(
             // nothing here can be mostly waiting, at 35% something is.
             else -> String.format(
                 Locale.ROOT,
-                "cannot say which — state sampling is off. The run's whole off-CPU time is %.1f%% of occupancy, " +
+                "cannot say which - state sampling is off. The run's whole off-CPU time is %.1f%% of occupancy, " +
                         "and that is enough to account for all of it. Read this share as occupancy rather than " +
                         "as time on a core",
                 (1 - duty.duty) * 100
@@ -1155,7 +1155,7 @@ class Report internal constructor(
         val achieved = if (ticks > 1) samplingSpanNanos.toDouble() / (ticks - 1) / 1e6 else Double.NaN
         if (failure != null) {
             appendLine("!".repeat(WIDTH))
-            appendLine("PROFILING STOPPED — these numbers were not going to be right:")
+            appendLine("PROFILING STOPPED - these numbers were not going to be right:")
             appendLine("  $failure")
             appendLine("Everything below is what led to that verdict, not a result. Pass strict=false to")
             appendLine("profile anyway, which is what to do when the code is not yours to change.")
@@ -1242,7 +1242,7 @@ class Report internal constructor(
         if (seen.isEmpty()) {
             appendLine(
                 if (labelledHits == 0L && ticks < MIN_TICKS_FOR_A_TABLE)
-                    "  nothing was sampled — $ticks ticks is too few for the sampler to catch anything. " +
+                    "  nothing was sampled - $ticks ticks is too few for the sampler to catch anything. " +
                             "Run for longer, or lower stepMillis."
                 else "  nothing was sampled."
             )
@@ -1266,7 +1266,7 @@ class Report internal constructor(
                         (if (called.isEmpty()) " (none of them ran at all)"
                         else "; ${called.size} of them did run: " +
                                 called.sortedByDescending { it.calls }.take(4).joinToString { it.name } +
-                                (if (called.size > 4) ", …" else ""))
+                                (if (called.size > 4) ", ..." else ""))
             )
         }
         renderCoarse()
@@ -1303,12 +1303,12 @@ class Report internal constructor(
             )
         }
         if (reclaimedSlots > 0) {
-            appendLine("    ! $reclaimedSlots threads exited without Profiler.release() and were reclaimed —")
+            appendLine("    ! $reclaimedSlots threads exited without Profiler.release() and were reclaimed -")
             appendLine("      call it when a thread finishes; until a slot is reclaimed it reads as an idle")
             appendLine("      thread and inflates the denominator every share above is taken over")
         }
         if (untrackedSlots > 0) {
-            appendLine("    ! $untrackedSlots threads arrived past the $MAX_SLOTS-slot ceiling and were NOT SAMPLED —")
+            appendLine("    ! $untrackedSlots threads arrived past the $MAX_SLOTS-slot ceiling and were NOT SAMPLED -")
             appendLine("      their occupancy is missing from every number above, including the denominators")
         }
         // A leaked label does not look like an error. It looks like a finding: one operation
@@ -1316,7 +1316,7 @@ class Report internal constructor(
         if (imbalances > 0 || openAtEnd > 0) {
             appendLine("-".repeat(WIDTH))
             if (imbalances > 0) appendLine(
-                "! $imbalances labels were still open at a point the caller said should be quiescent — " +
+                "! $imbalances labels were still open at a point the caller said should be quiescent - " +
                         "everything after each leak was billed to the leaked operation"
             )
             if (openAtEnd > 0) appendLine(

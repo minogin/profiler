@@ -100,7 +100,7 @@ internal fun checkCoarse(bench: Bench, o: Outcome, sampler: Sampler, stepMillis:
     }
     val reqAgg = totals[requestType]
     if (n == 0 || reqAgg == null || reqAgg.count == 0L) {
-        println("  ! no request spans were recorded — the coarse labels did not run")
+        println("  ! no request spans were recorded - the coarse labels did not run")
         return false
     }
     val sorted = LongArray(n)

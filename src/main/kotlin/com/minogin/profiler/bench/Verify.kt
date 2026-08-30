@@ -91,7 +91,7 @@ internal fun compare(cell: Cell, outcome: Outcome, sampler: Sampler): Comparison
 /** Phase 3: run the sampler over the bench and put the measured shares beside the true ones. */
 internal fun runVerify(threads: Int, workload: Workload): Boolean {
     println("\n" + "=".repeat(96))
-    println("PHASE 3 — THE SAMPLER AGAINST THE TRUTH")
+    println("PHASE 3 - THE SAMPLER AGAINST THE TRUTH")
     println("=".repeat(96))
 
     val comparisons = ArrayList<Comparison>()
@@ -120,7 +120,7 @@ internal fun runVerify(threads: Int, workload: Workload): Boolean {
     // run happens at a different clock, every operation is stretched by that ratio — uniform, so
     // it cancels in the shares, but the workload is no longer the one that was specified.
     println("\n" + "=".repeat(96))
-    println("CLOCK PER PHASE — ns per busy-loop iteration")
+    println("CLOCK PER PHASE - ns per busy-loop iteration")
     println("=".repeat(96))
     println(String.format(Locale.ROOT, "  fitting (workers parked): %.4f", FIT_CLOCK))
     println(String.format(Locale.ROOT, "  %-10s %10s %10s %10s %10s", "run", "early", "middle", "late", "vs fit"))
@@ -139,7 +139,7 @@ internal fun runVerify(threads: Int, workload: Workload): Boolean {
 
     // --- Hypothesis 1: does it work on nanosecond operations? --------------------------
     println("\n" + "=".repeat(96))
-    println("HYPOTHESIS 1 — the method works on operations four orders shorter than a tick")
+    println("HYPOTHESIS 1 - the method works on operations four orders shorter than a tick")
     println("=".repeat(96))
     println(
         String.format(
@@ -182,7 +182,7 @@ internal fun runVerify(threads: Int, workload: Workload): Boolean {
 
     // --- Hypothesis 3 ------------------------------------------------------------------
     println("\n" + "=".repeat(96))
-    println("HYPOTHESIS 3 — reading another thread's slot without synchronisation")
+    println("HYPOTHESIS 3 - reading another thread's slot without synchronisation")
     println("=".repeat(96))
     println("  The sampler reads slots it does not own, with no fence and no lock, so it may see a")
     println("  value a few nanoseconds stale. There is no separate experiment for this: if stale")
@@ -203,12 +203,12 @@ internal fun runVerify(threads: Int, workload: Workload): Boolean {
     println(
         String.format(
             Locale.ROOT, "  1. nanosecond operations:  top %d of %d ranked correctly (need %d), " +
-                    "worst gap %.3f pp at %,d samples — %s",
+                    "worst gap %.3f pp at %,d samples - %s",
             agree, OP_COUNT, RANKED_CORRECTLY, richest.maxDiffPp, richest.labelled,
             if (hyp1) "HOLDS" else "FAILS"
         )
     )
-    println("     self time only — whether self is the right quantity is a separate question")
+    println("     self time only - whether self is the right quantity is a separate question")
     println("  2. observer effect:        ${if (observerOk) "HOLDS" else "FAILS"}")
     println("  3. unsynchronised reads:   ${if (hyp1) "HOLDS" else "FAILS"} (follows from 1)")
     println("=".repeat(96))
@@ -218,7 +218,7 @@ internal fun runVerify(threads: Int, workload: Workload): Boolean {
 /** Every operation, what the truth says and what the sampler said, worst disagreement first. */
 internal fun printComparisonDetail(c: Comparison) {
     println("\n" + "=".repeat(96))
-    println("SAMPLER AGAINST TRUTH — ${c.cell.stepMillis} ms step, ${c.cell.seconds} s, ${"%,d".format(c.labelled)} labelled samples")
+    println("SAMPLER AGAINST TRUTH - ${c.cell.stepMillis} ms step, ${c.cell.seconds} s, ${"%,d".format(c.labelled)} labelled samples")
     println("=".repeat(96))
     println(
         String.format(
@@ -263,7 +263,7 @@ internal fun printComparisonDetail(c: Comparison) {
             c.outcome.maxShareDiff
         )
     )
-    println("  comparison here can resolve — a smaller gap than that is not measurable, only lucky")
+    println("  comparison here can resolve - a smaller gap than that is not measurable, only lucky")
 }
 
 /**
@@ -276,7 +276,7 @@ private fun observerEffect(
     workload: Workload,
 ): Boolean {
     println("\n" + "=".repeat(96))
-    println("HYPOTHESIS 2 — the observer does not disturb the observed")
+    println("HYPOTHESIS 2 - the observer does not disturb the observed")
     println("=".repeat(96))
 
     // Round-robin, not one configuration after another. Sequentially, minutes separate the first
@@ -324,7 +324,7 @@ private fun observerEffect(
     val hookCost = (rates[1] / baseline - 1.0) * 100
     val samplerCost = (rates[2] / rates[1] - 1.0) * 100
     println(String.format(Locale.ROOT, "\n  apparent hook cost %+.2f%%, apparent sampler cost %+.2f%%", hookCost, samplerCost))
-    println("  INCONCLUSIVE — read the signs: these two disagree about which direction the effect")
+    println("  INCONCLUSIVE - read the signs: these two disagree about which direction the effect")
     println("  goes, and across runs the same comparison has swung by seventeen points. The clock")
     println("  drifts by more than the thing being measured, so no arrangement of rounds can")
     println("  resolve it. The verdict below rests on the direct measurement instead.")

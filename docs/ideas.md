@@ -618,7 +618,7 @@ cross-checking as a first-class feature.
 
 ---
 
-## 20. The report's own punctuation is unreadable on a Windows console · open
+## 20. The report's own punctuation is unreadable on a Windows console · **done**
 
 Every em-dash in `render()` prints as `�` here. Confirmed on a plain `--demo` run:
 
@@ -638,6 +638,27 @@ product; a mangled character in every user's terminal is not cosmetic.
 
 Noticed while adding the coarse floor check, whose own message now uses plain hyphens so as not to
 add to it. Roughly forty strings in `Report.kt`, plus the bench's own printing.
+
+**Done, 2026-08-30, after it was hit for real.** It sat here as *open* on the grounds that it was
+cosmetic. It is not, and the screenshot is the argument: the mangled character lands exactly where a
+sentence explains *why*, because that is what a dash is for.
+
+```
+CPU duty cycle: unavailable ? no window completed
+nothing was sampled ? 4 ticks is too few
+```
+
+Sixteen printed strings in the library and fifty-three in the bench and trials carried an em-dash, an
+ellipsis or a `×`. All replaced with ASCII.
+
+**The library cannot fix this at the other end.** `render()` returns a `String` and the caller decides
+what encoding it is printed with, so forcing UTF-8 is not available to us — the only reliable answer
+is to emit nothing that needs an encoding.
+
+**Guarded by a test rather than by discipline.** `every line the report can print is ASCII` runs
+every message builder and a report carrying every optional block, and fails on any character above
+127. That is what stops it coming back, since the next em-dash will be typed by somebody who never
+read this entry.
 
 ## 21. The report tells you to add a coarse label you have already added · open
 

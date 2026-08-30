@@ -47,6 +47,27 @@ something to do, it graduates into [ideas.md](ideas.md) and is marked here as ha
 
 ---
 
+### The report prints characters a Windows console cannot show
+*2026-08-30, Andrey, with a screenshot. **Fixed the same day.***
+
+```
+CPU duty cycle: unavailable ? no window completed
+nothing was sampled ? 4 ticks is too few
+```
+
+Em-dashes, arriving as a replacement glyph because a Windows console is not UTF-8 by default. This
+was **already recorded** as [ideas.md](ideas.md) item 20, open, filed as cosmetic — and the
+screenshot is why it was not: the character that breaks is the one introducing the clause that says
+*why*, every time, because that is what a dash is for. A reader loses precisely the explanation.
+
+Sixteen printed strings in the library and fifty-three across the bench and trials. All ASCII now,
+with a test that renders every message builder and every optional block and fails on any character
+above 127 — because the next em-dash will be typed by somebody who never read the entry.
+
+*Worth noting for the log's own sake:* this is the first item here that was already known and
+deferred. Using the tool did not discover it, it **re-prioritised** it — which is a different and
+cheaper kind of value than finding something new.
+
 ### The report is a wall of text, and the order is wrong
 *2026-08-30, Andrey, second run. **Fixed the same day.***
 

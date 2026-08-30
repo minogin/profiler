@@ -440,13 +440,13 @@ class DutyReport internal constructor(
 
     fun lines(): List<String> {
         if (reason != null) return listOf(
-            "CPU duty cycle: unavailable — $reason",
+            "CPU duty cycle: unavailable - $reason",
             "  nothing here bounds how much of the occupancy was not CPU",
         )
         if (!available) return listOf(
             String.format(
                 Locale.ROOT,
-                "CPU duty cycle: unavailable — no window completed (the run is shorter than %.3f s)",
+                "CPU duty cycle: unavailable - no window completed (the run is shorter than %.3f s)",
                 windowNanos / 1e9
             )
         )
@@ -475,7 +475,7 @@ class DutyReport internal constructor(
                 "  nothing here bounds the shares: %.1f%% of thread-time was off the CPU while the thread",
                 invisibleOffCpu * 100
             )
-            out += "  still read runnable — a native call, an event loop in a poll, or the scheduler — and"
+            out += "  still read runnable - a native call, an event loop in a poll, or the scheduler - and"
             out += String.format(
                 Locale.ROOT,
                 "  labels cover %.1f%% of these threads, so the worst case is that all of it was inside them",
@@ -500,7 +500,7 @@ class DutyReport internal constructor(
                 "so a share is still roughly time, but small gaps between operations are not resolved"
 
             else ->
-                "so read a share as where threads SIT, not where cycles GO — and beware of adding two " +
+                "so read a share as where threads SIT, not where cycles GO - and beware of adding two " +
                         "of them up, since one wait can be counted once per thread waiting on it"
         }
         if (anomalies > 0) out += "$anomalies thread readings went backwards and were dropped"

@@ -171,7 +171,7 @@ internal fun runCpuCost(victims: Int) {
         }
 
         walk > stepNanos * 0.1 ->
-            println("  VERDICT: the resolution allows it and the cost does not — a walk is over 10% of the step.")
+            println("  VERDICT: the resolution allows it and the cost does not - a walk is over 10% of the step.")
 
         else ->
             println("  VERDICT: both constraints allow it. CPU per label is affordable at this step and this")

@@ -17,6 +17,73 @@ import kotlin.test.assertTrue
  */
 class ReportTest {
 
+
+    /**
+     * Everything the report can print is ASCII.
+     *
+     * Not a style rule. A Windows console does not run in UTF-8 by default, and an em-dash arrives
+     * there as `?` in a black diamond — which is what a reader actually saw:
+     *
+     * ```
+     * CPU duty cycle: unavailable ? no window completed
+     * nothing was sampled ? 4 ticks is too few
+     * ```
+     *
+     * It was recorded as `ideas.md` item 20 and left open on the grounds that it was cosmetic. It is
+     * not: the mangled character always lands exactly where a sentence explains *why*, because that
+     * is what a dash is for. Sixteen strings carried one.
+     *
+     * The library cannot fix this at the other end — [Report.render] returns a `String` and somebody
+     * else decides the encoding it is printed with — so the only reliable answer is to emit nothing
+     * that needs an encoding.
+     */
+    @Test
+    fun `every line the report can print is ASCII`() {
+        val offenders = mutableListOf<String>()
+        fun check(what: String, text: String) {
+            for (line in text.lines()) {
+                val bad = line.filter { it.code > 127 }
+                if (bad.isNotEmpty()) offenders += "$what: [$bad] in: ${line.trim().take(70)}"
+            }
+        }
+        // The message builders, each of which is a path the render only reaches under a fault.
+        check("tooSmall", tooSmallMessage("op", 1_000, 25.0))
+        check("coarseTooSmall", coarseTooSmallMessage("req", 100, 200.0, 800.0))
+        check("leak", leakMessage("op", "worker-1"))
+        check("mismatch", mismatchMessage("a", "b"))
+        check("stale", staleContextMessage("req", 997, 0.42))
+        // And a report carrying as many of the optional blocks at once as one can.
+        check("render", loadedReport().render())
+        check("render(legend)", loadedReport().render(legend = true))
+        assertTrue(
+            offenders.isEmpty(),
+            "non-ASCII in printed output:\n" + offenders.joinToString("\n")
+        )
+    }
+
+    /** A report with the warnings, the duty block and both tables all present at once. */
+    private fun loadedReport(): Report {
+        val fine = OperationStat(0, "work", 100, 1_000_000, 60, 3, 20, 10, 100)
+        val c = CoarseStat(
+            0, "request", 10, 10_000_000, 100, 2_000_000, LongArray(SpanHistogram.BUCKETS),
+            80, 40, 80, 40, 40, 40, LongArray(MAX_OPERATIONS + 1) { if (it == 0) 80 else 0 }, 5,
+        )
+        return Report(
+            operations = listOf(fine), idleHits = 50, ticks = 1_000,
+            samplingSpanNanos = 1_000_000_000, durationNanos = 1_000_000_000, threads = 4,
+            duty = DutyReport(
+                labelledDuty = 0.02, invisibleOffCpu = 0.0, labelledFraction = 1.0, reason = null,
+                resolutionNanos = 15_625_000, windowNanos = 1_000_000_000, windows = 1, threads = 4,
+                cpuNanos = 20_000_000, wallNanos = 1_000_000_000,
+                minWindowDuty = 0.02, maxWindowDuty = 0.02, anomalies = 1, maxSampleNanos = 200_000,
+            ),
+            failure = "something went wrong", imbalances = 2, openAtEnd = 1,
+            untrackedSlots = 3, reclaimedSlots = 4, idleWaitingHits = 5,
+            coarse = listOf(c), openContextsAtEnd = 1, labelledOutsideCoarse = 60,
+            staleContextHits = 20, coarseSampleHits = 100,
+        )
+    }
+
     private fun stat(
         name: String, hits: Long, calls: Long,
         stuck: Long = 0, instances: Long = 0, waiting: Long = 0, active: Long = hits,

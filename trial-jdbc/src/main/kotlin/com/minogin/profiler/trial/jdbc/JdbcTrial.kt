@@ -242,7 +242,7 @@ private fun load(seconds: Int, threads: Int, fanout: Int, propagate: Boolean, st
 
         println(
             String.format(
-                Locale.ROOT, "%,d requests in %.1f s — %.2f ms each, %.1f requests/s",
+                Locale.ROOT, "%,d requests in %.1f s - %.2f ms each, %.1f requests/s",
                 requests, wall / 1e9, millis(spanTotal.get().toDouble() / requests), requests / (wall / 1e9)
             )
         )
@@ -348,7 +348,7 @@ fun main(args: Array<String>) {
     }
 
     println("=".repeat(96))
-    println("TRIAL 4 — POSTGRESQL OVER A SOCKET: the first workload here with waiting in it")
+    println("TRIAL 4 - POSTGRESQL OVER A SOCKET: the first workload here with waiting in it")
     println("=".repeat(96))
 
     if (!Pg.daemonRunning()) {

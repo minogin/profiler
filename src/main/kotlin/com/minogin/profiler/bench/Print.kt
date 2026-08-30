@@ -35,8 +35,8 @@ internal fun printDetail(bench: Bench, o: Outcome, sampler: Sampler?, stepMillis
 
     println("\n" + "=".repeat(96))
     println("TRUTH: share of an operation's self time")
-    println("A — configuration (configured duration x number of calls)")
-    println("B — batch measurement (measured duration x number of calls)")
+    println("A - configuration (configured duration x number of calls)")
+    println("B - batch measurement (measured duration x number of calls)")
     println("=".repeat(96))
     println(
         String.format(
@@ -59,7 +59,7 @@ internal fun printDetail(bench: Bench, o: Outcome, sampler: Sampler?, stepMillis
 
     val mismatch = (0 until OP_COUNT).filter { o.hookCalls[it] != 0L && o.hookCalls[it] != o.totalCalls[it] }
     println(
-        if (o.hookCalls.sum() == 0L) "  (hook counters idle — labels are off)"
+        if (o.hookCalls.sum() == 0L) "  (hook counters idle - labels are off)"
         else if (mismatch.isEmpty()) "  hook counters match the graph expansion exactly on all $OP_COUNT operations"
         else "  HOOK COUNTERS DISAGREE with the graph expansion on: " + mismatch.joinToString { OPS[it].name }
     )
@@ -157,7 +157,7 @@ private fun printSampler(
     println("\n--- Sampler ---")
     // Without this the run merely looks as though the sampler died.
     sampler.failure?.let {
-        println("  PROFILING STOPPED — these numbers were not going to be right:")
+        println("  PROFILING STOPPED - these numbers were not going to be right:")
         println("  $it")
     }
     println(String.format(Locale.ROOT, "  requested step: %.3f ms", stepMillis))
@@ -185,14 +185,14 @@ private fun printSampler(
     )
     println(
         "  one sample per slot per tick: " +
-                if (samples == expected) "yes" else "NO — $samples against an expected $expected"
+                if (samples == expected) "yes" else "NO - $samples against an expected $expected"
     )
     // A slot left behind by a dead thread reads empty forever and quietly inflates the
     // denominator. This is how that gets noticed rather than eyeballed.
     println(
         "  one slot per live worker: " +
                 if (slots == bench.threads) "yes"
-                else "NO — $slots slots against ${bench.threads} worker threads (stale slots in the registry)"
+                else "NO - $slots slots against ${bench.threads} worker threads (stale slots in the registry)"
     )
     println(String.format(Locale.ROOT, "  covered %.2f%% of the run", sampler.span.toDouble() / runNanos * 100))
 
@@ -256,7 +256,7 @@ private fun printSampler(
     val small = report.tooSmall()
     println("\n  below the floor: ${if (small.isEmpty()) "none flagged" else small.joinToString { it.name }}")
     for (op in small) println("  ! " + tooSmallMessage(op.name, op.calls, report.impliedUpperNanosOf(op)))
-    if (small.isNotEmpty()) println("  the run finished anyway — this is a warning, not a verdict")
+    if (small.isNotEmpty()) println("  the run finished anyway - this is a warning, not a verdict")
 }
 
 /**
@@ -343,16 +343,16 @@ private fun printDetector(
                 "  nothing is flagged, which is the right answer: this bench has nothing that could block"
 
             lock == null ->
-                "  FLAGGED: $names — and without --lock this bench has nothing that could block"
+                "  FLAGGED: $names - and without --lock this bench has nothing that could block"
 
             flagged.map { it.id } == listOf(lockOpId) ->
-                "  FLAGGED: lockedUpdate, and nothing else — which is the right answer, since it is the " +
+                "  FLAGGED: lockedUpdate, and nothing else - which is the right answer, since it is the " +
                         "only thing here that waits"
 
             flagged.isEmpty() ->
-                "  NOTHING FLAGGED, but lockedUpdate blocks by construction — the detector missed it"
+                "  NOTHING FLAGGED, but lockedUpdate blocks by construction - the detector missed it"
 
-            else -> "  FLAGGED: $names — expected lockedUpdate alone"
+            else -> "  FLAGGED: $names - expected lockedUpdate alone"
         }
     )
     println("  (the floor is one tick: a stall shorter than ${String.format(Locale.ROOT, "%.2f", stepNanos / 1e6)} ms cannot be seen at all)")
@@ -371,7 +371,7 @@ private fun printDetector(
             String.format(
                 Locale.ROOT,
                 "    the workers timed it: %.1f%% of that operation was holding the lock and %.1f%% waiting, " +
-                        "against a bound of at least %.1f%% running — %s",
+                        "against a bound of at least %.1f%% running - %s",
                 truth * 100, (1 - truth) * 100, floor * 100,
                 if (floor <= truth + 1e-9) "the bound holds" else "THE BOUND IS VIOLATED, which cannot happen"
             )
@@ -445,7 +445,7 @@ private fun printDuty(
     )
     println(
         String.format(
-            Locale.ROOT, "  %s — the two differ by %.2f pp, tolerance %.2f pp",
+            Locale.ROOT, "  %s - the two differ by %.2f pp, tolerance %.2f pp",
             if (diffPp <= DUTY_TOLERANCE_PP) "the two independent readings agree" else "THEY DO NOT AGREE",
             diffPp, DUTY_TOLERANCE_PP
         )
@@ -526,7 +526,7 @@ private fun printWaitingCheck(sampler: Sampler, bench: Bench) {
         .maxByOrNull { sampler.waitingHits[it].toDouble() / sampler.counters[it] }
     if (worst != null) println(
         String.format(
-            Locale.ROOT, "  worst false positive: %s at %.2f%% — nothing else here can block",
+            Locale.ROOT, "  worst false positive: %s at %.2f%% - nothing else here can block",
             Profiler.nameOf(worst), sampler.waitingHits[worst] * 100.0 / sampler.counters[worst]
         )
     )

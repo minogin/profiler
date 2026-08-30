@@ -214,7 +214,7 @@ fun main(args: Array<String>) {
     }
 
     println("=".repeat(96))
-    println("PHASE 1 — BENCH + PHASE 2 — SAMPLER")
+    println("PHASE 1 - BENCH + PHASE 2 - SAMPLER")
     if (sweep != null) {
         println("sweep over thread counts: ${sweep.joinToString(", ")}, $seconds s each")
     } else {
@@ -230,7 +230,7 @@ fun main(args: Array<String>) {
         println(
             String.format(
                 Locale.ROOT,
-                "CONTENDED LOCK: hold %.0f us every %.1f ms per thread — lock utilisation %.2f at %d threads%s",
+                "CONTENDED LOCK: hold %.0f us every %.1f ms per thread - lock utilisation %.2f at %d threads%s",
                 it.holdNanos / 1e3, it.intervalNanos / 1e6, it.utilisation(activeThreads), activeThreads,
                 if (it.utilisation(activeThreads) >= 1.0) "  (over 1: the queue will run away, which is a mode too)" else ""
             )
@@ -288,7 +288,7 @@ fun main(args: Array<String>) {
         println(
             String.format(
                 Locale.ROOT,
-                "\nBENCH IS BROKEN: %.4f ns/iteration is physically impossible (< %.1f) — the JIT collapsed the busy loop",
+                "\nBENCH IS BROKEN: %.4f ns/iteration is physically impossible (< %.1f) - the JIT collapsed the busy loop",
                 cal.nsPerIter, MIN_PLAUSIBLE_NS_PER_ITER
             )
         )
@@ -614,7 +614,7 @@ private fun runSweep(
         outcomes.add(outcome)
         println(
             String.format(
-                Locale.ROOT, "  %,.0f root calls/s, price x%.3f, scatter %.2f%%, A-B %.3f pp — %s",
+                Locale.ROOT, "  %,.0f root calls/s, price x%.3f, scatter %.2f%%, A-B %.3f pp - %s",
                 outcome.throughput, outcome.loadFactor, outcome.maxScatter * 100,
                 outcome.maxShareDiff, if (outcome.ok) "ok" else "FAIL"
             )
@@ -912,7 +912,7 @@ private fun runHookAnalysis(threads: Int, workload: Workload) {
     val directSpread = active.map { it.hookDirect }
 
     println("\n" + "=".repeat(96))
-    println("HOOK COST — measured directly, and by difference")
+    println("HOOK COST - measured directly, and by difference")
     println("=".repeat(96))
     println(
         String.format(
@@ -943,7 +943,7 @@ private fun runHookAnalysis(threads: Int, workload: Workload) {
         )
     }
     println("  " + "-".repeat(76))
-    println("  'vs direct' is the differential divided by the direct reading — 1.00x means they agree")
+    println("  'vs direct' is the differential divided by the direct reading - 1.00x means they agree")
     println(
         String.format(
             Locale.ROOT, "%n  against a call-weighted mean operation of %.0f ns, the hook is %.2f%%",
@@ -986,7 +986,7 @@ private fun warmUp(bench: Bench): Boolean {
     val settled = climb <= CLIMB_EPS
     println(
         String.format(
-            Locale.ROOT, "  second half %+.2f%% against the first — %s",
+            Locale.ROOT, "  second half %+.2f%% against the first - %s",
             climb * 100,
             if (settled) "settled" else "STILL CLIMBING, the JIT is not done"
         )

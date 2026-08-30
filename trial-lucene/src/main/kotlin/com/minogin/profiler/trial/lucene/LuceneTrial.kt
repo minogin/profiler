@@ -421,7 +421,7 @@ private class GapProbe(val bed: Bed, val triggerTicks: Int, val stepNanos: Long 
         appendLine(
             String.format(
                 Locale.ROOT,
-                "GAP PROBE — %,d slot observations, %,d unlabelled (%.1f%%); %,d windows triggered, of which %,d were a parked thread (%.1f%%) and %,d were walked",
+                "GAP PROBE - %,d slot observations, %,d unlabelled (%.1f%%); %,d windows triggered, of which %,d were a parked thread (%.1f%%) and %,d were walked",
                 observations, unlabelled, p * 100, stacks + parked, parked, parked * 100.0 / (stacks + parked).coerceAtLeast(1), stacks
             )
         )
@@ -461,8 +461,8 @@ private class GapProbe(val bed: Bed, val triggerTicks: Int, val stepNanos: Long 
                 appendLine(String.format(Locale.ROOT, "  %-52s %8d %7.1f%%", name, c, c * 100.0 / n))
             }
         }
-        table("where the triggered stacks landed — leaf frame", leaf)
-        table("where the triggered stacks landed — deepest frame in lucene.search", searchFrame)
+        table("where the triggered stacks landed - leaf frame", leaf)
+        table("where the triggered stacks landed - deepest frame in lucene.search", searchFrame)
     }
 }
 
@@ -559,7 +559,7 @@ private fun load(
         )
         if (prober != null) {
             println()
-            println("STACK PROBE — " + prober.report())
+            println("STACK PROBE - " + prober.report())
             println(
                 String.format(
                     Locale.ROOT,
