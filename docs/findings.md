@@ -1771,6 +1771,12 @@ scatter over a window inside the run so a drifting clock cancels the way it does
 last is the most in keeping with the rest of this project, since it makes the check relative rather
 than absolute — which is exactly why the coarse tier's own checks survive the drift.
 
+**What a coarse label will cost per execution — only two thirds of it is measured, and the API
+rename raised the stakes.** Promoting an operation from fine to coarse is now a one-word change at
+registration rather than an edit at every call site, so the report's advice — *"the operation wants a
+coarse label"* — is far cheaper to act on and will be acted on more often. The number below decides
+when that advice is given, and it is still partly assumed.
+
 **What a coarse label will cost per execution — only two thirds of it is measured.** The tier
 boundary in [profiler.md](profiler.md#where-the-boundary-is) is derived from ~40 ns per coarse
 execution, of which **21.5 ns is measured** — fitted from the Lucene timed-wrapper comparison, which
