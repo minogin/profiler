@@ -47,6 +47,37 @@ something to do, it graduates into [ideas.md](ideas.md) and is marked here as ha
 
 ---
 
+### `p99` printed larger than `max`, on a single execution
+*2026-08-30, Andrey, from the first real run in the sandbox. **Fixed the same day.***
+
+```
+coarse operation   executions      mean       p50       p90       p99       max
+request                     1  713.2 us  720.9 us  720.9 us  720.9 us  713.2 us
+```
+
+`mean` and `max` are exact — two timestamps. The percentiles come from the log-bucket histogram and
+are reported at the **top** of the bucket the value fell into, because a latency figure may overstate
+and must never understate. 713 200 ns lands in bucket 138, spanning `[655.4 µs, 720.9 µs]`, so all
+three printed as the ceiling: +1.08% here, against a documented worst case of +12.5%.
+
+All of which is true, documented, and *still nonsense on the face of it*: a 99th percentile cannot be
+larger than the maximum. With many executions the rounding disappears into the distribution and
+nobody sees it; with one it is the first thing you read.
+
+**Fixed by clamping every percentile to the measured maximum**, which cannot cost the never-below
+guarantee — `max` is exact, and the true p-th percentile of a set is never above its true maximum, so
+the clamp can only move a value down to something still at or above the truth.
+
+**What it says about the tool beyond this line.** The rounding was documented in three places and
+defended with a good argument, and none of that stopped it printing an impossible number. A guarantee
+stated at the level of *"at most 12.5% high"* did not catch a violation of *"a percentile is not
+bigger than the maximum"* — the second is not a tolerance, it is arithmetic, and it wanted asserting
+separately. Two tests now do.
+
+*Also in that row, both honest rather than broken:* `busy/exec 0.0 ns` because a 713 µs execution
+against a 1 ms step caught no samples at all, and `inside` / `working` / `in flight` showing `-`
+because `instanceTicks` is zero and there is no denominator to divide by.
+
 ### A fixed iteration count produces an honest, useless report — and you only find out afterwards
 *2026-08-30, from writing the skeleton. Mine, so weight it accordingly.* **Graduated to
 [ideas.md](ideas.md) item 27** — with the complication that `start()` cannot know how long the run

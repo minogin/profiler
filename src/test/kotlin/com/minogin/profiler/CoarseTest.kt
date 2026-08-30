@@ -72,6 +72,52 @@ class CoarseTest {
         }
     }
 
+    /**
+     * Found by using the tool rather than by testing it: one execution of 713.2 µs printed every
+     * percentile as 720.9 µs — the top of its bucket — beside an exact `max` of 713.2. A p99 above
+     * the maximum is nonsense however well the rounding is documented.
+     */
+    @Test
+    fun `a percentile is never reported above the measured maximum`() {
+        val exact = 713_200L
+        val hist = LongArray(SpanHistogram.BUCKETS)
+        hist[SpanHistogram.bucketOf(exact)]++
+        val c = CoarseStat(
+            0, "req", 1, exact, exact, exact, hist,
+            0, 0, 0, 0, 0, 0, LongArray(MAX_OPERATIONS + 1),
+        )
+        // The bucket really does end above the value — this is the quantisation, not a mistake.
+        assertTrue(
+            SpanHistogram.percentile(hist, 1, 0.99) > exact,
+            "the bucket top is not above the value, so this test is no longer testing anything"
+        )
+        for (p in listOf(0.50, 0.90, 0.99, 1.0)) {
+            assertEquals(
+                exact.toDouble(), c.percentileNanos(p),
+                "p$p was reported above the exact maximum"
+            )
+        }
+    }
+
+    @Test
+    fun `clamping does not push a percentile below the truth`() {
+        // A spread of values: the clamp must only ever bite on the top bucket, and every percentile
+        // must still be at or above the true one it describes.
+        val values = (1..2_000).map { it.toLong() * 971 }
+        val hist = LongArray(SpanHistogram.BUCKETS)
+        for (v in values) hist[SpanHistogram.bucketOf(v)]++
+        val c = CoarseStat(
+            0, "req", values.size.toLong(), values.sum(), values.min(), values.max(), hist,
+            0, 0, 0, 0, 0, 0, LongArray(MAX_OPERATIONS + 1),
+        )
+        val sorted = values.sorted()
+        for (p in listOf(0.5, 0.9, 0.99, 1.0)) {
+            val truth = sorted[Math.ceil(p * sorted.size).toInt() - 1].toDouble()
+            assertTrue(c.percentileNanos(p) >= truth, "p$p fell below the truth after clamping")
+            assertTrue(c.percentileNanos(p) <= values.max().toDouble(), "p$p exceeded the maximum")
+        }
+    }
+
     @Test
     fun `an empty histogram has no percentile rather than a wrong one`() {
         assertTrue(SpanHistogram.percentile(LongArray(SpanHistogram.BUCKETS), 0, 0.5).isNaN())

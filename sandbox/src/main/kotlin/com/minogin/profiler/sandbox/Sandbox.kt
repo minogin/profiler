@@ -32,11 +32,16 @@ fun main() {
 
     val deadline = System.nanoTime() + 3_000_000_000L
     var sink = 0L
-    while (System.nanoTime() < deadline) {
-        op(request) {
-            sink += op(work) { placeholder() }
-        }
+
+    op(request) {
+        sink += op(work) { work() }
     }
+
+//    while (System.nanoTime() < deadline) {
+//        op(request) {
+//            sink += op(work) { placeholder() }
+//        }
+//    }
 
     println(Profiler.stop().render())
     println("(sink: $sink)")
@@ -49,7 +54,7 @@ fun main() {
  * workload, not one of mine, and anything more elaborate here would quietly become the thing being
  * measured.
  */
-private fun placeholder(): Long {
+private fun work(): Long {
     var s = 0L
     for (i in 0 until 20_000) s = s * 31 + i
     return s

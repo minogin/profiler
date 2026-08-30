@@ -286,8 +286,25 @@ class CoarseStat internal constructor(
     /** Mean measured duration of one execution. Exact, not sampled. */
     val meanSpanNanos: Double get() = if (count == 0L) Double.NaN else spanSumNanos.toDouble() / count
 
-    /** A percentile of the measured durations, to within [SpanHistogram.PRECISION]. */
-    fun percentileNanos(p: Double): Double = SpanHistogram.percentile(hist, count, p)
+    /**
+     * A percentile of the measured durations, to within [SpanHistogram.PRECISION] — and never above
+     * [spanMaxNanos], which is exact.
+     *
+     * The histogram reports a percentile at the **top** of the bucket it fell into, because a
+     * latency figure may overstate and must not understate. On many executions that rounding
+     * disappears into the distribution. On few it does not: a single execution of 713.2 µs lands in
+     * the bucket `[655.4, 720.9]` and every percentile prints as **720.9 µs**, against a `max` of
+     * 713.2 — a p99 larger than the maximum, which is nonsense on its face and was the first thing a
+     * reader noticed.
+     *
+     * Clamping to the measured maximum fixes it and cannot cost the guarantee: `max` is two
+     * timestamps rather than a bucket, and the true p-th percentile of a set is never above its
+     * true maximum. So the clamp can only ever move a value *down* to something still at or above
+     * the truth. The result is exact whenever the top bucket is the one being asked about, which is
+     * every percentile of a single execution.
+     */
+    fun percentileNanos(p: Double): Double =
+        minOf(SpanHistogram.percentile(hist, count, p), spanMaxNanos.toDouble())
 
     /** Of the samples caught under this operation, those whose thread was parked or blocked. */
     val waitingHits: Long get() = inclusiveHits - runningInclusiveHits
