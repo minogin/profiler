@@ -1162,10 +1162,14 @@ class Report internal constructor(
             appendLine("!".repeat(WIDTH))
         }
         appendLine("=".repeat(WIDTH))
+        // A title, in the same bare-uppercase style as the section headings below it. The report had
+        // none: it opened on a rule and a statistics line, so nothing on screen said what the block
+        // of text was, and a reader scrolling back had no landmark to stop at.
+        appendLine("PROFILER REPORT")
         appendLine(
             String.format(
-                Locale.ROOT, "%,d labelled samples over %.1f s, %,d ticks at %.3f ms, %d threads",
-                labelledHits, durationNanos / 1e9, ticks, achieved, threads
+                Locale.ROOT, "%,d labelled samples over %.1f s, %,d ticks at %.3f ms, %s",
+                labelledHits, durationNanos / 1e9, ticks, achieved, plural(threads.toLong(), "thread")
             )
         )
         // Coverage in units, not only as a ratio. A percentage is a comparison against a total the
@@ -1174,10 +1178,10 @@ class Report internal constructor(
         appendLine(
             String.format(
                 Locale.ROOT,
-                "labels cover %s of the %s of thread-time observed (%.1f%%); %s was outside every label, in %,d samples",
+                "labels cover %s of the %s of thread-time observed (%.1f%%); %s was outside every label, in %s",
                 threadTime(labelledNanos), threadTime(observedNanos),
                 labelledHits * 100.0 / (labelledHits + idleHits).coerceAtLeast(1),
-                threadTime(observedNanos - labelledNanos), idleHits
+                threadTime(observedNanos - labelledNanos), plural(idleHits, "sample")
             )
         )
         // What the unlabelled time *was* is the reader's first question and the one they have no
@@ -1261,10 +1265,13 @@ class Report internal constructor(
         if (operations.any { it.hits > 0 }) appendLine("-".repeat(WIDTH))
         if (unseen.isNotEmpty()) {
             val called = unseen.filter { it.calls > 0 }
+            // "called anyway" rather than "N of them did run", which reads as nonsense at N = 1 —
+            // and one is the common case on a short run, which is exactly when a reader is most
+            // likely to be new to the report.
             appendLine(
-                "${unseen.size} operations were never sampled and are folded away" +
+                "  ${plural(unseen.size.toLong(), "operation")} never sampled and folded away" +
                         (if (called.isEmpty()) " (none of them ran at all)"
-                        else "; ${called.size} of them did run: " +
+                        else "; called anyway: " +
                                 called.sortedByDescending { it.calls }.take(4).joinToString { it.name } +
                                 (if (called.size > 4) ", ..." else ""))
             )
@@ -1411,6 +1418,15 @@ class Report internal constructor(
         const val MIN_TICKS_FOR_A_TABLE = 50
 
         const val WIDTH = 130
+
+        /**
+         * `1 thread` rather than `1 threads`.
+         *
+         * A report that cannot count is a report a reader trusts slightly less, and the places this
+         * matters are exactly the small runs where every other number is already marginal.
+         */
+        internal fun plural(n: Long, noun: String): String =
+            if (n == 1L) "1 $noun" else String.format(Locale.ROOT, "%,d ${noun}s", n)
 
         /** The short-operation bias, so the check cannot accuse an operation of the sampler's own error. */
         const val FLOOR_BIAS_ALLOWANCE = 1.2
