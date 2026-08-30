@@ -60,6 +60,7 @@ with the duty-cycle bound printed beside it.
 | [trial-lucene.md](trial-lucene.md) | the same, Apache Lucene — concurrent, the first head-to-head against a timed-wrapper profiler, and where the coarse tier meets the edge of its own tier | you want the second, and the strongest argument for sampling we have |
 | [trial-netty.md](trial-netty.md) | the same, Netty — event loops, the first test of the thread-state column on foreign code, and the negative control for the coarse tier's waiting column: it reads 0.0% because a loopback request really does not wait | you want the third, and what a flame graph does with a handler chain |
 | [trial-jdbc.md](trial-jdbc.md) | the same, PostgreSQL over a socket — the first workload here with any waiting in it, and where `working` was measured wrong by 55x | you want the fourth, and the trial that found a defect in a column we had shipped |
+| [sandbox.md](sandbox.md) | the friction log — where using the tool was awkward, as opposed to where its numbers were wrong | you want to know what it is like to use, or you have just been using it |
 | [ideas.md](ideas.md) | things worth doing that we have not committed to | you want to know what was considered and deferred |
 | [../README.md](../README.md) | how to use it and how to run the bench | you want to run something |
 
@@ -101,6 +102,7 @@ with the duty-cycle bound printed beside it.
 | `trial-lucene/` | the Lucene trial — the corpus, the wrappers that place the labels, and four instrumentation configurations to compare |
 | `trial-netty/` | the Netty trial — the HTTP pipeline, the load generator, and the three-way A/B |
 | `trial-jdbc/` | the PostgreSQL trial — a container driven by plain `docker run`, a HikariCP pool, and the CPU-time truth the thread-state column is held against |
+| `sandbox/` | a place to *use* the tool rather than test it. Not a trial and not evidence: it is our code. The friction it turns up is in [sandbox.md](sandbox.md) |
 | `trial-common/` | shared by every trial and depending on nothing but the JDK: the JFR recording and the collapsed-stack analysis |
 
 ## Running the four trials

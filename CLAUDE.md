@@ -33,6 +33,13 @@ Each doc has one job. Write to the right one as you go, not at the end.
   other tools are better" section honest and current too.
 * `docs/ideas.md` — **whenever an idea comes up that we do not act on immediately**, record it
   before it evaporates. Untested is fine; unwritten is not.
+* `docs/sandbox.md` — **whenever using the tool is awkward**, log it: a label that would not go where
+  it was wanted, a column that had to be re-read, a warning that looked like noise, something reached
+  for that was not there. Raw observations, newest first, dated, and saying who noticed — an
+  observation from someone who already knows the tool is worth less than one from someone who does
+  not. They graduate into `ideas.md` when they become something to do. Nothing measured in
+  `sandbox/` is evidence and none of it belongs in `findings.md`: it is our code, so it inherits our
+  assumptions, which is the same reason items 23 and 25 were not built.
 * `docs/findings.md` — only things we measured, with the measurement.
 * `docs/plan.md` — only work we committed to.
 

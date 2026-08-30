@@ -30,3 +30,9 @@ include("trial-netty")
 // else's, and it is the one workload that can say whether `working` counts a blocked thread as
 // working: Java thread state is blind to native waits, and a socket read is a native wait.
 include("trial-jdbc")
+
+// A place to use the tool rather than to test it. Not a trial: the trials are somebody else's
+// codebase, which is what makes their numbers evidence, and nothing measured here is. What it is for
+// is the other half — placing labels by hand, reading the report cold, and finding out where the API
+// and the output get in the way. See docs/sandbox.md.
+include("sandbox")
