@@ -85,13 +85,13 @@ class CoarseTest {
         val inner = Profiler.registerCoarse("test-inner")
         val slot = Profiler.slot()
         assertNull(slot.contextOpaque())
-        coarse(outer) {
+        op(outer) {
             val a = assertNotNull(slot.contextOpaque())
-            assertEquals(outer, a.type)
+            assertEquals(outer.id, a.type)
             assertEquals(0, a.depth)
-            coarse(inner) {
+            op(inner) {
                 val b = assertNotNull(slot.contextOpaque())
-                assertEquals(inner, b.type)
+                assertEquals(inner.id, b.type)
                 assertEquals(1, b.depth)
                 assertEquals(a, b.parent)
             }
@@ -106,7 +106,7 @@ class CoarseTest {
     fun `a body that throws still closes the block form`() {
         val t = Profiler.registerCoarse("test-throwing")
         val slot = Profiler.slot()
-        runCatching { coarse<Unit>(t) { throw IllegalStateException("boom") } }
+        runCatching { op<Unit>(t) { throw IllegalStateException("boom") } }
         assertNull(slot.contextOpaque(), "the finally did not restore the slot")
     }
 
@@ -119,7 +119,7 @@ class CoarseTest {
     fun `expectBalanced catches a leaked context and closes it`() {
         val t = Profiler.registerCoarse("test-leaked")
         val slot = Profiler.slot()
-        enterCoarse(t)
+        Profiler.enter(t)
         assertNotNull(slot.contextOpaque())
         assertTrue(!Profiler.expectBalanced(), "a leaked context reported as balanced")
         assertNull(slot.contextOpaque(), "the leak was reported but not stopped")
@@ -127,10 +127,15 @@ class CoarseTest {
     }
 
     @Test
-    fun `an unmatched exit is a no-op rather than a crash`() {
+    fun `an unmatched exit is reported rather than a crash`() {
+        // It used to be a silent no-op, because `exitCoarse()` had no way to know there was nothing
+        // to close. Now it names what the caller tried to close and counts an imbalance — still not
+        // an exception, because a measurement problem must not become a crash in somebody else's
+        // process.
+        val t = Profiler.registerCoarse("test-unmatched")
         val slot = Profiler.slot()
         assertNull(slot.contextOpaque())
-        exitCoarse()
+        Profiler.exit(t)
         assertNull(slot.contextOpaque())
         assertTrue(Profiler.expectBalanced())
     }

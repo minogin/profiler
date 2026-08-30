@@ -246,7 +246,7 @@ fun main(args: Array<String>) {
     // After the catalogue, so it takes the id straight after the bench's twenty and none of the
     // truth machinery — which is indexed by operation id up to OP_COUNT — has to know about it.
     // Its truth is not the configured one anyway: it is whatever the workers measured.
-    val lockOpId = if (contended != null) Profiler.register("lockedUpdate") else -1
+    val lockOpId = if (contended != null) Profiler.registerFine("lockedUpdate").id else -1
     warmUpBurn(500)
     val provisional = calibrate()
     println("\n--- Busy-loop calibration (provisional, before the workload warm-up) ---")
@@ -670,7 +670,7 @@ private fun runSweep(
  * flag had been wired to nothing at all.
  */
 private fun checkLeakStopsTheSession(): Boolean {
-    val id = Profiler.register("leakedOnPurpose")
+    val id = Profiler.registerFine("leakedOnPurpose")
     println("--- Leak check: does a label left open stop the session? ---")
     var ok = true
 
@@ -730,7 +730,7 @@ private fun checkLeakStopsTheSession(): Boolean {
  * half would pass anyway.
  */
 private fun checkStaleStopsTheSession(): Boolean {
-    val fine = Profiler.register("workedAfterTheSpanClosed")
+    val fine = Profiler.registerFine("workedAfterTheSpanClosed")
     val type = Profiler.registerCoarse("spanThatClosedEarly")
     println("\n--- Stale check: does work under a finished execution stop the session? ---")
     var ok = true
@@ -740,7 +740,7 @@ private fun checkStaleStopsTheSession(): Boolean {
         val worker = Thread {
             // Closed the moment the block ends, and captured on the way out — so from here on this
             // context names an execution that is over.
-            val ctx = coarse(type) { captureCoarse() }
+            val ctx = op(type) { captureCoarse() }
             // Long enough for the once-a-second check to run twice, and for the minimum sample count
             // to be passed several times over. Nothing else in this process is labelled, so the
             // share is effectively 100% and the threshold is not what is under test here.
@@ -797,9 +797,9 @@ private const val STALE_STAGE_NANOS = 2_500_000_000L
  */
 private fun runApiDemo(threads: Int, seconds: Int) {
     // 1. Register at startup. Idempotent, so a `val` in an object works; keep the id.
-    val parse = Profiler.register("parseRecord")
-    val validate = Profiler.register("validateRecord")
-    val index = Profiler.register("indexRecord")
+    val parse = Profiler.registerFine("parseRecord")
+    val validate = Profiler.registerFine("validateRecord")
+    val index = Profiler.registerFine("indexRecord")
 
     println("profiling $threads threads for $seconds s\n")
 
@@ -820,7 +820,7 @@ private fun runApiDemo(threads: Int, seconds: Int) {
 
     // A fourth operation placed the other way, for code that cannot be wrapped in a block. One
     // worker leaks it on purpose, every thousandth pass, to show what the balance check is for.
-    val flush = Profiler.register("flushBatch")
+    val flush = Profiler.registerFine("flushBatch")
 
     // 2b. A coarse label, in an id space of its own. It goes around a *batch* of passes and not
     // around one, and that is the tier boundary doing its job rather than an arbitrary choice: one
@@ -840,7 +840,7 @@ private fun runApiDemo(threads: Int, seconds: Int) {
                     // p99 are three different numbers rather than three copies of one — a
                     // percentile over a distribution with no spread describes nothing.
                     val batch = 64 + ((pass.toInt() * 37) and 255)
-                    coarse(request) {
+                    op(request) {
                         repeat(batch) {
                             // 3a. Wrap the work. Nesting is fine; the innermost label wins.
                             s = op(parse) { burn(s, work[0]) }
@@ -855,7 +855,7 @@ private fun runApiDemo(threads: Int, seconds: Int) {
                             Profiler.enter(flush)
                             s = burn(s, work[1])
                             val leak = n == 0 && (++pass % 1000L) == 0L
-                            if (!leak) Profiler.exit()
+                            if (!leak) Profiler.exit(flush)
                         }
                     }
 

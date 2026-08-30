@@ -48,7 +48,7 @@ val OPS = arrayOf(
  */
 fun registerOperations() {
     for (id in 0 until OP_COUNT) {
-        val assigned = Profiler.register(OPS[id].name)
+        val assigned = Profiler.registerFine(OPS[id].name).id
         check(assigned == id) { "${OPS[id].name} got id $assigned, expected $id" }
     }
 }
@@ -123,9 +123,9 @@ val REQUEST_CHUNKS = IntArray(64).also {
 const val COARSE_VIOLATOR = 19
 
 fun registerCoarseOperations(violate: Boolean = false) {
-    for (id in COARSE_OPS) coarseTypeOf[id] = Profiler.registerCoarse(OPS[id].name)
-    if (violate) coarseTypeOf[COARSE_VIOLATOR] = Profiler.registerCoarse(OPS[COARSE_VIOLATOR].name)
-    requestType = Profiler.registerCoarse("request")
+    for (id in COARSE_OPS) coarseTypeOf[id] = Profiler.registerCoarse(OPS[id].name).id
+    if (violate) coarseTypeOf[COARSE_VIOLATOR] = Profiler.registerCoarse(OPS[COARSE_VIOLATOR].name).id
+    requestType = Profiler.registerCoarse("request").id
 }
 
 /**
@@ -242,10 +242,13 @@ class Workload(
         // The coarse label goes *outside* the fine one, so the span it measures is the operation's
         // inclusive duration — which is exactly the quantity the truth knows, and exactly what a
         // fine label can never report.
-        return if (ct < 0) execFine(id, state) else coarse(ct) { execFine(id, state) }
+        // FineOp/CoarseOp erase to an int, so wrapping here costs nothing: the bench keeps its
+        // ids in IntArrays because it indexes the catalogue by them, and hands the handle over
+        // at the call. Measured in the generated code — no allocation, no extra load.
+        return if (ct < 0) execFine(id, state) else op(CoarseOp(ct)) { execFine(id, state) }
     }
 
-    private fun execFine(id: Int, state: Long): Long = op(id) {
+    private fun execFine(id: Int, state: Long): Long = op(FineOp(id)) {
         var s = burn(state, iters[id])
         val ch = children[id]
         var i = 0

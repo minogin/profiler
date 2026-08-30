@@ -22,7 +22,7 @@ You put a **label** on the operation you care about — the thing your domain ca
 the thing the stack calls a method:
 
 ```kotlin
-val probe = Profiler.register("hashProbe")   // once, at startup
+val probe = Profiler.registerFine("hashProbe")  // once, at startup
 
 op(probe) { table.find(key) }                // at the call site
 ```

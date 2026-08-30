@@ -360,14 +360,23 @@ object Profiler {
      * Do this at startup, not on the hot path — it takes a map lookup, which is many times the cost
      * of the hook it feeds.
      */
-    fun register(name: String): Int = ids.computeIfAbsent(name) {
+    fun registerFine(name: String): FineOp = FineOp(registerFineId(name))
+
+    /** The raw id, for the internals that index arrays by it. See [registerFine]. */
+    internal fun registerFineId(name: String): Int = ids.computeIfAbsent(name) {
         val id = nextId.getAndIncrement()
         check(id < MAX_OPERATIONS) { "more than $MAX_OPERATIONS distinct operations registered" }
         names[id] = name
         id
     }
 
-    fun nameOf(id: Int): String = if (id in 0 until MAX_OPERATIONS) names[id] ?: "op#$id" else "op#$id"
+    internal fun nameOf(id: Int): String = if (id in 0 until MAX_OPERATIONS) names[id] ?: "op#$id" else "op#$id"
+
+    /** What [op] was registered as. */
+    fun nameOf(op: FineOp): String = nameOf(op.id)
+
+    /** What [op] was registered as. */
+    fun nameOf(op: CoarseOp): String = coarseNameOf(op.id)
 
     /**
      * How many operations have been registered, never more than there is room for.
@@ -391,14 +400,17 @@ object Profiler {
      * carry both labels: the fine one measures the operation's *self* time, the coarse one its
      * duration and everything nested under it, and comparing the two is a cross-check worth having.
      */
-    fun registerCoarse(name: String): Int = coarseIds.computeIfAbsent(name) {
+    fun registerCoarse(name: String): CoarseOp = CoarseOp(registerCoarseId(name))
+
+    /** The raw id, for the internals that index arrays by it. See [registerCoarse]. */
+    internal fun registerCoarseId(name: String): Int = coarseIds.computeIfAbsent(name) {
         val id = nextCoarseId.getAndIncrement()
         check(id < MAX_COARSE_TYPES) { "more than $MAX_COARSE_TYPES distinct coarse operations registered" }
         coarseNames[id] = name
         id
     }
 
-    fun coarseNameOf(type: Int): String =
+    internal fun coarseNameOf(type: Int): String =
         if (type in 0 until MAX_COARSE_TYPES) coarseNames[type] ?: "coarse#$type" else "coarse#$type"
 
     /** How many coarse types have been registered. Clamped for the reason [registeredCount] is. */
@@ -492,17 +504,71 @@ object Profiler {
      * warning, a plausible wrong number — the contaminating direction. Calcite's "after"
      * notification is not inside a `finally`, so this is not a hypothetical. See [expectBalanced].
      */
-    fun enter(id: Int) {
+    fun enter(op: FineOp) {
         val s = local.get()
         if (s.depth < MAX_SPAN_DEPTH) s.stack[s.depth++] = s.getOpaque() else s.overflows++
-        s.setOpaque(id)
-        s.count(id)
+        s.setOpaque(op.id)
+        s.count(op.id)
     }
 
-    /** Leaves the innermost hand-placed operation, restoring what the thread was inside before. */
-    fun exit() {
+    /**
+     * Leaves [op], restoring what the thread was inside before it.
+     *
+     * **It takes what you are closing, and that is not symmetry for its own sake.** The no-argument
+     * form it replaced could not tell a correct unwind from a crossed one — `enter(a); enter(b);
+     * exit(); exit()` closes `b` then `a` whether or not that is what the code meant. Naming the
+     * operation lets the library check, and a mismatch is the same category of fault as a leak: a
+     * label ends up covering work that was never inside it, and the number that comes out is
+     * plausible rather than obviously wrong.
+     *
+     * A mismatch is reported and counted, never thrown — throwing would turn a measurement problem
+     * into a crash in somebody else's process — and it still unwinds, so one mistake does not
+     * cascade into every label after it.
+     */
+    fun exit(op: FineOp) {
         val s = local.get()
+        val current = s.getOpaque()
+        if (current != op.id) mismatch(nameOf(op), if (current < 0) "no operation" else nameOf(current))
         s.setOpaque(if (s.depth > 0) s.stack[--s.depth] else NO_OP)
+    }
+
+    /**
+     * Enters an execution of coarse operation [op] until a matching [exit].
+     *
+     * For the boundary that is two callbacks rather than a block, which is most of what third-party
+     * code offers. It carries the same hazard the fine form does and for the same reason: **there is
+     * no `finally` here**, so a body that throws leaves the context open and everything the thread
+     * does afterwards is billed to it. See [expectBalanced].
+     */
+    fun enter(op: CoarseOp) {
+        val s = local.get()
+        s.setContextOpaque(CoarseContext(op.id, s.contextOpaque(), System.nanoTime()))
+    }
+
+    /**
+     * Closes the innermost coarse execution on this thread and records its span.
+     *
+     * Checked against [op], for the reason the fine form gives. Closing when nothing is open is
+     * reported rather than thrown: it means the caller closed something it never opened, which is a
+     * measurement problem and not a reason to stop somebody else's program.
+     */
+    fun exit(op: CoarseOp) {
+        val s = local.get()
+        val ctx = s.contextOpaque()
+        if (ctx == null) {
+            mismatch(nameOf(op), "no coarse execution")
+            return
+        }
+        if (ctx.type != op.id) mismatch(nameOf(op), coarseNameOf(ctx.type))
+        s.setContextOpaque(ctx.parent)
+        ctx.markClosed()
+        s.recordSpan(ctx.type, System.nanoTime() - ctx.startNanos)
+    }
+
+    /** One closing call that did not match what was open. Counted with the leaks, and fatal under strict. */
+    private fun mismatch(closed: String, open: String) {
+        imbalances.incrementAndGet()
+        sampler?.let { if (it.strict) it.fail(mismatchMessage(closed, open)) }
     }
 
     /** How many hand-placed labels this thread has entered and not left. */
@@ -746,15 +812,15 @@ object Profiler {
  * The previous value is restored rather than cleared — clearing would break nesting, since the
  * caller is still inside its own operation when a nested one returns.
  */
-inline fun <T> op(id: Int, body: () -> T): T {
+inline fun <T> op(op: FineOp, body: () -> T): T {
     val slot = Profiler.slot()
     val prev = slot.getOpaque()
-    slot.setOpaque(id)
+    slot.setOpaque(op.id)
     // After the label, deliberately. Before it, the increment would be billed to the caller and
     // would add to the attribution bias; after it, the time lands on the operation it belongs to.
     // That inflates busy operations by calls x counterCost — the one distortion we can subtract
     // exactly, since the counter measures precisely the quantity the correction needs.
-    slot.count(id)
+    slot.count(op.id)
     try {
         return body()
     } finally {
@@ -774,11 +840,11 @@ inline fun <T> op(id: Int, body: () -> T): T {
  *
  * `op(probe, times = keys.size) { for (k in keys) table.find(k) }` reports the probe, not the loop.
  */
-inline fun <T> op(id: Int, times: Int, body: () -> T): T {
+inline fun <T> op(op: FineOp, times: Int, body: () -> T): T {
     val slot = Profiler.slot()
     val prev = slot.getOpaque()
-    slot.setOpaque(id)
-    slot.count(id, times)
+    slot.setOpaque(op.id)
+    slot.count(op.id, times)
     try {
         return body()
     } finally {

@@ -849,6 +849,87 @@ that claim stops being a claim.
 **What would change the answer:** a real coroutine workload to point it at. Item 23's, if it ever
 becomes writable, or a third-party one — the same standard every other trial here is held to.
 
+## 27. Say at `start()` what the run is too short to answer · open
+
+From the [sandbox friction log](sandbox.md), and the first thing anyone does: a small loop, to see
+what happens. On this machine a fixed 2,000 iterations is 0.2 s, and the report comes back with 26
+samples, **19.6% noise**, and the duty cycle reporting itself *"unavailable — no window completed
+(the run is shorter than 1.000 s)"*.
+
+Everything it says is true and clearly flagged. The flags arrive **after** the run.
+
+`Profiler.start()` already knows its own step and the duty cycle's one-second window. It could say,
+at the moment it is called, that a run under about a second will produce no duty cycle and therefore
+no bound on any share — which is the difference between a report a reader can use and one they
+cannot.
+
+**What is unclear, and why this is not simply obvious.** `start()` does not know how long the run
+will be, so the warning would have to be unconditional — *"runs under a second produce no bound"* —
+printed every time, including the thousands of times it is irrelevant. A warning nobody needs is how
+a tool teaches people to skip its warnings. The alternatives: print it at `stop()` when the run was
+in fact too short (which is where it already is), or have `start()` take an expected duration it can
+check against, which puts a parameter on the hot path of the API for a diagnostic.
+
+**Worth deciding with phase 7**, which is where the surface gets hardened, rather than patched now.
+
+## 26. Calling this from Java · in scope, deferred to phase 7
+
+**Java callers are in scope.** They are also, today, accidentally supported rather than designed
+for — and the value-class change in the API refactor would take them from *awkward* to *impossible*
+unless something is done about it. Written down here so the decision is made deliberately in phase 7
+rather than inherited from whichever Kotlin feature was reached for.
+
+### Where it stands today
+
+`Profiler` is a Kotlin `object`, so everything is `Profiler.INSTANCE.x()`:
+
+```java
+int parse = Profiler.INSTANCE.register("parse");
+Profiler.INSTANCE.enter(parse);
+try { ... } finally { Profiler.INSTANCE.exit(); }
+```
+
+That works. Two things about it do not:
+
+- **`op(id) { }` is effectively Kotlin-only.** Java sees `ProfilerKt.op(int, Function0)`, and an
+  inline function is *not* inlined for a Java caller — every call is a real invocation plus a
+  `Function0` allocation. The 2 ns hook exists because C2 inlines the wrapper away; from Java none of
+  that happens. So a Java user is pushed onto `enter`/`exit`, which is the form with no `finally` and
+  the leak hazard the docs warn about hardest.
+- **`start()` has default parameters**, so Java gets `start$default(INSTANCE, 1.0, null, 0.0, false,
+  false, 0b11110, null)` unless it passes all five.
+
+### What the refactor does to it, and the fix
+
+Value classes mangle in **both** parameter and return position:
+
+```
+public final int registerFine-0JTvllc(java.lang.String);
+public final void enter-_c7NGOw(int);
+```
+
+`-` is not a legal character in a Java identifier, so `javac` cannot call these at all. Not ugly —
+uncallable, short of reflection.
+
+`@JvmName` restores a clean surface, verified:
+
+```kotlin
+@JvmName("registerFine") fun registerFine(name: String): FineOp
+```
+```
+public final int registerFine(java.lang.String);   // plain int, callable
+```
+
+### What phase 7 should decide
+
+1. `@JvmName` on every entry point that takes or returns a handle — about eight functions.
+2. A Java-friendly `start` overload without default parameters.
+3. Whether to give Java a cheap block form at all. The honest answer may be *no*: without inlining
+   there is no cheap block form to give, and the right advice is `enter`/`exit` plus
+   `expectBalanced()`. That is a documentation decision, not an API one.
+4. **A Java source file in the test suite that actually compiles against the API.** Without one,
+   nobody finds out it broke — which is exactly how it got into this state.
+
 ## Promoted to plan.md
 
 **Phase 3.5** is item 9 above, reframed from detecting bad operations to bounding the error on every

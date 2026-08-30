@@ -1,6 +1,7 @@
 package com.minogin.profiler.trial.netty
 
-import com.minogin.profiler.coarse
+import com.minogin.profiler.CoarseOp
+import com.minogin.profiler.FineOp
 import com.minogin.profiler.op
 import io.netty.buffer.Unpooled
 import io.netty.channel.ChannelHandlerContext
@@ -56,8 +57,8 @@ object Switch {
     var on: Boolean = true
 }
 
-private inline fun <T> labelled(opId: Int, body: () -> T): T =
-    if (opId >= 0 && Switch.on) op(opId) { body() } else body()
+private inline fun <T> labelled(op: FineOp?, body: () -> T): T =
+    if (op != null && Switch.on) op(op) { body() } else body()
 
 /**
  * A policy in the chain — and the reason this trial exists in the shape it does.
@@ -85,7 +86,10 @@ class PolicyHandler(
      * produce sixteen labels reading a sixteenth each, which is the sort of thing that looks like a
      * finding.
      */
-    @JvmField val opId: Int,
+    // No @JvmField: Kotlin forbids it on a value-class property. The generated getter is a field
+    // read behind a trivial accessor and C2 inlines it, but it is a real constraint on anyone who
+    // stores a handle in a hot object, and it was not obvious until the compiler said so.
+    val opId: FineOp?,
 ) : SimpleChannelInboundHandler<Exchange>(false) {
 
     override fun channelRead0(ctx: ChannelHandlerContext, ex: Exchange) {
@@ -123,7 +127,7 @@ class PolicyHandler(
  * to show which parts of a pipeline the existing tools already answer. Whatever the labels add here
  * is not a difference the tool invented, and case.md keeps an honest section on exactly that.
  */
-class AuthHandler(@JvmField val opId: Int) : SimpleChannelInboundHandler<Exchange>(false) {
+class AuthHandler(val opId: FineOp?) : SimpleChannelInboundHandler<Exchange>(false) {
 
     override fun channelRead0(ctx: ChannelHandlerContext, ex: Exchange) {
         labelled(opId) { run(ex) }
@@ -149,7 +153,7 @@ class AuthHandler(@JvmField val opId: Int) : SimpleChannelInboundHandler<Exchang
 }
 
 /** Distinct class: turns a path into a route name. The other half of the control. */
-class RouteHandler(@JvmField val opId: Int) : SimpleChannelInboundHandler<Exchange>(false) {
+class RouteHandler(val opId: FineOp?) : SimpleChannelInboundHandler<Exchange>(false) {
 
     override fun channelRead0(ctx: ChannelHandlerContext, ex: Exchange) {
         labelled(opId) { run(ex) }
@@ -185,7 +189,7 @@ class RouteHandler(@JvmField val opId: Int) : SimpleChannelInboundHandler<Exchan
  * place in this pipeline where the label could reasonably have been drawn elsewhere: putting it
  * around the write as well would bill the socket to this handler.
  */
-class RenderHandler(@JvmField val opId: Int) : SimpleChannelInboundHandler<Exchange>(false) {
+class RenderHandler(val opId: FineOp?) : SimpleChannelInboundHandler<Exchange>(false) {
 
     override fun channelRead0(ctx: ChannelHandlerContext, ex: Exchange) {
         val response = labelled(opId) { run(ex) }
@@ -229,9 +233,10 @@ class RenderHandler(@JvmField val opId: Int) : SimpleChannelInboundHandler<Excha
  * difference is the waiting, and a tool that invents waiting where there is none fails here — which
  * makes this a negative control rather than a demonstration.
  */
-class ExchangeHandler(@JvmField val coarseId: Int = -1) : SimpleChannelInboundHandler<FullHttpRequest>(false) {
+class ExchangeHandler(val coarseOp: CoarseOp? = null) : SimpleChannelInboundHandler<FullHttpRequest>(false) {
     override fun channelRead0(ctx: ChannelHandlerContext, request: FullHttpRequest) {
-        if (coarseId < 0) ctx.fireChannelRead(Exchange(request))
-        else coarse(coarseId) { ctx.fireChannelRead(Exchange(request)) }
+        val c = coarseOp
+        if (c == null) ctx.fireChannelRead(Exchange(request))
+        else op(c) { ctx.fireChannelRead(Exchange(request)) }
     }
 }

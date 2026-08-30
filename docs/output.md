@@ -330,7 +330,7 @@ Two causes, and they want opposite fixes:
 
 - **work was forked and not joined** — propagate only what the request actually waits for. A task
   the request does not join is not part of it, however much it feels like it
-- **the span is closed too early** — `exitCoarse` is running before the work it covers has finished
+- **the span is closed too early** — `Profiler.exit(op)` is running before the work it covers has finished
 
 Under `strict` this stops the session, which is the same treatment a leaked label gets and for the
 same reason: both report a number that is not merely imprecise but false. It needs a share *and* a

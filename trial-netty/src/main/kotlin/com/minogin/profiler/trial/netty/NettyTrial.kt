@@ -21,6 +21,8 @@ import io.netty.handler.codec.http.HttpMethod
 import io.netty.handler.codec.http.HttpObjectAggregator
 import io.netty.handler.codec.http.HttpServerCodec
 import io.netty.handler.codec.http.HttpVersion
+import com.minogin.profiler.CoarseOp
+import com.minogin.profiler.FineOp
 import com.minogin.profiler.Profiler
 import com.minogin.profiler.trial.analyzeJfr
 import com.minogin.profiler.trial.recordExecutionSamples
@@ -60,24 +62,30 @@ private val POLICIES = arrayOf(
  * like a mistake.
  */
 class Labels(
-    val auth: Int, val route: Int, val render: Int, val policies: IntArray,
+    // Nullable, because the A/B control below is "the same objects and the same branch with no
+    // hook" — the absence of a label is a real configuration here, and it is now a type rather than
+    // a -1 that every call site had to remember to test.
+    val auth: FineOp?, val route: FineOp?, val render: FineOp?, val policies: Array<FineOp?>,
     /**
-     * The coarse type for a whole request, or -1. A separate id space, so it does not collide with
-     * the fine labels above and the same name could carry both.
+     * The coarse operation for a whole request, or null when the tier is off.
+     *
+     * Null rather than -1: a handle can only come from registration now, so there is no sentinel to
+     * reach for — and the absence is a type the compiler checks rather than a number everything
+     * downstream has to remember to test.
      */
-    val request: Int = -1,
+    val request: CoarseOp? = null,
 ) {
     companion object {
         fun register(coarse: Boolean) = Labels(
-            Profiler.register("auth"),
-            Profiler.register("route"),
-            Profiler.register("render"),
-            IntArray(POLICIES.size) { Profiler.register(POLICIES[it].first) },
-            if (coarse) Profiler.registerCoarse("request") else -1,
+            Profiler.registerFine("auth"),
+            Profiler.registerFine("route"),
+            Profiler.registerFine("render"),
+            Array<FineOp?>(POLICIES.size) { Profiler.registerFine(POLICIES[it].first) },
+            if (coarse) Profiler.registerCoarse("request") else null,
         )
 
         /** The unlabelled configuration: same objects, same branch, no hook. */
-        fun none() = Labels(-1, -1, -1, IntArray(POLICIES.size) { -1 })
+        fun none() = Labels(null, null, null, arrayOfNulls(POLICIES.size))
     }
 }
 

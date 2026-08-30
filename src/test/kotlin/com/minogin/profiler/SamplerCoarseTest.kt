@@ -90,11 +90,11 @@ class SamplerCoarseTest {
     @Test
     fun `work under a closed execution is counted stale and kept out of the type's totals`() {
         val t = Profiler.registerCoarse("sampler-stale")
-        val fine = Profiler.register("sampler-stale-work")
+        val fine = Profiler.registerFine("sampler-stale-work")
         Profiler.start(stepMillis = 1.0, strict = false)
 
         // Closed the moment the block ends, and captured on the way out.
-        val ctx = assertNotNull(coarse(t) { captureCoarse() })
+        val ctx = assertNotNull(op(t) { captureCoarse() })
         val worker = onThread("stale-worker") {
             withCoarse(ctx) { op(fine) { spinFor(holdNanos) } }
         }
@@ -137,7 +137,7 @@ class SamplerCoarseTest {
     @Test
     fun `opening and closing executions on one thread never looks stale`() {
         val t = Profiler.registerCoarse("sampler-churn")
-        val fine = Profiler.register("sampler-churn-work")
+        val fine = Profiler.registerFine("sampler-churn-work")
         Profiler.start(stepMillis = 1.0, strict = false)
 
         val worker = onThread("churn-worker") {
@@ -146,7 +146,7 @@ class SamplerCoarseTest {
             // Short executions, opened and closed as fast as the machine will go, so the sampler
             // gets every chance to photograph one on the way out.
             while (System.nanoTime() < until) {
-                coarse(t) {
+                op(t) {
                     op(fine) {
                         var i = 0
                         while (i < 2048) {
@@ -179,7 +179,7 @@ class SamplerCoarseTest {
     @Test
     fun `two threads inside one execution read as two threads inside`() {
         val t = Profiler.registerCoarse("sampler-shared")
-        val fine = Profiler.register("sampler-shared-work")
+        val fine = Profiler.registerFine("sampler-shared-work")
         Profiler.start(stepMillis = 1.0, strict = false)
 
         val stop = AtomicBoolean(false)
@@ -187,7 +187,7 @@ class SamplerCoarseTest {
             var c: CoarseContext? = null
             // Held open for the whole measurement: enter/exit rather than the block form, because
             // the borrowers have to be inside it while it is still live.
-            enterCoarse(t)
+            Profiler.enter(t)
             c = captureCoarse()
             c
         })
@@ -199,7 +199,7 @@ class SamplerCoarseTest {
         spinFor(holdNanos)
         stop.set(true)
         borrowers.forEach { it.join() }
-        exitCoarse()
+        Profiler.exit(t)
 
         val report = Profiler.stop()
         val stat = assertNotNull(report.coarse.firstOrNull { it.name == "sampler-shared" })
@@ -227,18 +227,18 @@ class SamplerCoarseTest {
     fun `a coarse label opened inside a borrowed context nests under it`() {
         val outer = Profiler.registerCoarse("sampler-outer")
         val inner = Profiler.registerCoarse("sampler-inner")
-        val fine = Profiler.register("sampler-nested-work")
+        val fine = Profiler.registerFine("sampler-nested-work")
         Profiler.start(stepMillis = 1.0, strict = false)
 
-        enterCoarse(outer)
+        Profiler.enter(outer)
         val ctx = assertNotNull(captureCoarse())
         val worker = onThread("nesting-worker") {
             withCoarse(ctx) {
-                coarse(inner) {
+                op(inner) {
                     // Checked here rather than only in the report: the chain is the mechanism, and
                     // a report that happened to look right would not prove the parent was set.
                     val mounted = assertNotNull(captureCoarse())
-                    assertEquals(inner, mounted.type)
+                    assertEquals(inner.id, mounted.type)
                     assertEquals(ctx, mounted.parent, "the borrowed context is not the parent")
                     op(fine) { spinFor(holdNanos) }
                 }
@@ -246,7 +246,7 @@ class SamplerCoarseTest {
         }
         worker.start()
         worker.join()
-        exitCoarse()
+        Profiler.exit(outer)
 
         val report = Profiler.stop()
         val out = assertNotNull(report.coarse.firstOrNull { it.name == "sampler-outer" })

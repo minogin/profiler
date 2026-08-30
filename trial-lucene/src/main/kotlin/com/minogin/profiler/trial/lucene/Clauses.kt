@@ -1,5 +1,6 @@
 package com.minogin.profiler.trial.lucene
 
+import com.minogin.profiler.FineOp
 import com.minogin.profiler.Profiler
 import com.minogin.profiler.op
 import java.util.Locale
@@ -94,8 +95,9 @@ class Clause(val name: String, mode: Placement) {
      * it feeds — the same point the Calcite trial had to make, and the one the documentation should
      * make before anybody discovers it.
      */
-    @JvmField
-    val id: Int = if (labelled) Profiler.register("clause:$name") else -1
+    // No @JvmField: Kotlin forbids it on a value-class property, and a null here is the honest way
+    // to say "this configuration places no label" — which used to be -1 and a test at every use.
+    val id: FineOp? = if (labelled) Profiler.registerFine("clause:$name") else null
 
     /** Only used by [Placement.TIME]. Contended across the search threads, which is part of its cost. */
     @JvmField
@@ -116,7 +118,7 @@ class Clause(val name: String, mode: Placement) {
  * both forms for a reason that is now observed twice rather than argued once.
  */
 inline fun <T> Clause.probe(body: () -> T): T {
-    if (labelled) return op(id, body)
+    id?.let { return op(it, body) }
     if (timed) {
         val t0 = System.nanoTime()
         try {

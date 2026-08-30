@@ -1548,6 +1548,44 @@ from "sawtooth spiking to 16, barrier costs", which both average to 3. That need
 varies over time, and the ground truth for it has to be *recorded* (per-phase timestamps) rather
 than computed, because occupancy is emergent rather than configured.
 
+## The API rename · done, out of phase order
+
+Not a phase, and it jumped the queue because the sandbox found it: `Profiler.register` and
+`Profiler.registerCoarse` both returned a bare `Int` from counters that both start at zero, so the
+first fine operation and the first coarse one were **the same number**. `op(request)` compiled, ran,
+and reported a plausible wrong answer — silent misattribution, which is the one failure this project
+treats as unacceptable everywhere else.
+
+**The shape came from the observation that fine and coarse is a property of the instrument, not of
+the program.** A coarse label gives everything a fine one gives *plus* measured spans, percentiles
+and a breakdown, so the only question is whether the operation can afford ~40 ns. That is decided
+once, when you are judging the size of the thing:
+
+```kotlin
+val parse   = Profiler.registerFine("parse")     // FineOp
+val request = Profiler.registerCoarse("request") // CoarseOp
+
+op(parse) { }   ;   op(request) { }              // one verb, the handle decides
+Profiler.enter(op)  ;  Profiler.exit(op)         // replaces enterCoarse/exitCoarse too
+```
+
+**What it buys beyond safety.** The report already advises *"the operation wants a coarse label for
+its per-execution statistics"*. Acting on that used to mean changing the registration **and** every
+call site; now it is one word in one place, and reversible if the cost turns out not to be worth it.
+
+**`exit` takes what it closes**, which the no-argument form could not: `enter(a); enter(b); exit();
+exit()` unwinds `b` then `a` whether or not that was meant. A crossed pair is now counted, named and
+fatal under `strict`.
+
+**What it cost.** About 150 call sites across the library, bench, four trials, sandbox and tests, all
+found by the compiler. Two constraints discovered on the way, both now documented where they bite:
+`@JvmField` cannot be applied to a value-class property, which the Netty trial and Lucene's `Clause`
+were both relying on; and value classes mangle their JVM names, which makes the API **uncallable from
+Java source** until phase 7 adds `@JvmName` — [ideas.md](ideas.md) item 26, with the fix verified.
+
+**Also done here:** the coarse table gained `share` and `occupancy`, which the fine table had all
+along. Coarse was already strictly more informative in the data; only the printed report was short.
+
 ## Phase 7 — library surface · not started
 
 What someone else has to touch to use this. The *placement essentials* were pulled forward into
@@ -1580,6 +1618,12 @@ roughly twice as fast as a `ThreadLocal` lookup — and it is not negotiable, si
 ## Phase 8 — JFR output · not started
 
 JFR as the transport, not as the mechanism.
+
+**One thing to design in from the start: the event needs a tier field.** The two id spaces both
+count from zero, so a fine operation and a coarse one can share the number 0. Inside the library the
+types keep them apart, but an event carrying `id = 0` has left the type system and is ambiguous to
+whatever reads it. Cheap to add now, and a silent misattribution in somebody else's tooling if it is
+not — see [ideas.md](ideas.md) item 26 for the same problem at the Java boundary.
 
 A custom JFR event per *operation* is hopeless — events cost tens of nanoseconds even without stack
 traces, and Datadog's attempt at scope events inflated recordings more than tenfold. But one

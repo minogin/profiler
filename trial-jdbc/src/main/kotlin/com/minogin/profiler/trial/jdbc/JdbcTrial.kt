@@ -1,7 +1,6 @@
 package com.minogin.profiler.trial.jdbc
 
 import com.minogin.profiler.Profiler
-import com.minogin.profiler.coarse
 import com.minogin.profiler.op
 import com.minogin.profiler.propagating
 import com.zaxxer.hikari.HikariConfig
@@ -42,26 +41,29 @@ import kotlin.system.exitProcess
  * They should agree. If the first is far larger, the column is counting threads that were stopped.
  */
 
-/** The coarse operation: one logical request, which fans out across the pool. */
-private var REQUEST = -1
+/**
+ * The labels, registered where they are declared.
+ *
+ * A handle can only come from registration now, so there is no sentinel to initialise them to and no
+ * reason to want one — which is the API telling you something true: an operation that has not been
+ * registered is not an operation.
+ */
+private val REQUEST = Profiler.registerCoarse("request")
 
-private var ACQUIRE = -1
-private var EXECUTE = -1
-private var FETCH = -1
-private var MERGE = -1
+/**
+ * Borrowing a connection. It blocks when the pool is exhausted, which is a wait of a completely
+ * different kind from the socket wait below — one is this program queueing on itself, the other is
+ * the database taking its time. Separating them is the sort of thing a share is for.
+ */
+private val ACQUIRE = Profiler.registerFine("acquire")
 
-private fun registerLabels() {
-    REQUEST = Profiler.registerCoarse("request")
-    // Borrowing a connection. It blocks when the pool is exhausted, which is a wait of a completely
-    // different kind from the socket wait below — one is this program queueing on itself, the other
-    // is the database taking its time. Separating them is the sort of thing a share is for.
-    ACQUIRE = Profiler.register("acquire")
-    // The round trip. Nearly all of a request's wall time, and nearly none of its CPU.
-    EXECUTE = Profiler.register("execute")
-    // Walking the result set. Partly local decoding, partly more socket reads for further rows.
-    FETCH = Profiler.register("fetch")
-    MERGE = Profiler.register("merge")
-}
+/** The round trip. Nearly all of a request's wall time, and nearly none of its CPU. */
+private val EXECUTE = Profiler.registerFine("execute")
+
+/** Walking the result set. Partly local decoding, partly more socket reads for further rows. */
+private val FETCH = Profiler.registerFine("fetch")
+
+private val MERGE = Profiler.registerFine("merge")
 
 /**
  * One query in the mix, and the mix exists so the spans have a distribution.
@@ -211,7 +213,6 @@ private fun processCpuNanos(): Long {
 private fun millis(nanos: Double) = nanos / 1e6
 
 private fun load(seconds: Int, threads: Int, fanout: Int, propagate: Boolean, step: Double, sampler: Boolean) {
-    registerLabels()
     Bed(threads, fanout, propagate).use { bed ->
         println(
             "threads=$threads fanout=$fanout propagation=${if (propagate) "ON" else "OFF"}" +
@@ -231,7 +232,7 @@ private fun load(seconds: Int, threads: Int, fanout: Int, propagate: Boolean, st
         val spanTotal = AtomicLong()
         while (System.nanoTime() < deadline) {
             val t0 = System.nanoTime()
-            coarse(REQUEST) { bed.request() }
+            op(REQUEST) { bed.request() }
             spanTotal.addAndGet(System.nanoTime() - t0)
             requests++
         }

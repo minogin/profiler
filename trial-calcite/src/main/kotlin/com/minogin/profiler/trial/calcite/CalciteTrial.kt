@@ -5,7 +5,6 @@ import com.minogin.profiler.trial.recordExecutionSamples
 import com.minogin.profiler.Profiler
 import com.minogin.profiler.Report
 import com.minogin.profiler.SpanHistogram
-import com.minogin.profiler.coarse
 import com.minogin.profiler.duration
 import com.minogin.profiler.op
 import org.apache.calcite.DataContext
@@ -144,10 +143,10 @@ fun rules(associate: Boolean, mergeJoin: Boolean = true): List<RelOptRule> = lis
  * a map lookup and has no business on a hot path.
  */
 object Phases {
-    val parse = Profiler.register("phase:parse")
-    val validate = Profiler.register("phase:validate")
-    val sqlToRel = Profiler.register("phase:sqlToRel")
-    val optimise = Profiler.register("phase:optimise")
+    val parse = Profiler.registerFine("phase:parse")
+    val validate = Profiler.registerFine("phase:validate")
+    val sqlToRel = Profiler.registerFine("phase:sqlToRel")
+    val optimise = Profiler.registerFine("phase:optimise")
 }
 
 /**
@@ -220,7 +219,7 @@ class PlanRunner(
             // and the loop's own stopwatch can check.
             return if (!coarse) op(Phases.optimise) {
                 p.transform(0, p.emptyTraitSet.replace(EnumerableConvention.INSTANCE), rel)
-            } else coarse(CoarsePhases.optimise) {
+            } else op(CoarsePhases.optimise) {
                 op(Phases.optimise) {
                     p.transform(0, p.emptyTraitSet.replace(EnumerableConvention.INSTANCE), rel)
                 }
@@ -332,7 +331,7 @@ private fun load(
         // The coarse label brackets exactly what the stopwatch above brackets, which is what makes
         // `times` a truth for it rather than a rough comparison: the two measure the same interval
         // with the same clock, so what they disagree by is the profiler and nothing else.
-        Sink.keep(if (runner.coarse) coarse(CoarsePhases.plan) { runner.planOnce() } else runner.planOnce())
+        Sink.keep(if (runner.coarse) op(CoarsePhases.plan) { runner.planOnce() } else runner.planOnce())
         times += System.nanoTime() - t0
         // The library's check now, not the trial's own. A plan boundary is the point at which this
         // thread cannot legitimately be inside a rule, which is exactly what expectBalanced wants.

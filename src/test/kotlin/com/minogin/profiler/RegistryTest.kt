@@ -4,6 +4,7 @@ import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
@@ -51,8 +52,8 @@ class RegistryTest {
     /** Registration is idempotent, so a `val` in an object is a safe place to keep an id. */
     @Test
     fun `registering the same name twice gives the same id`() {
-        val a = Profiler.register("test:idempotent")
-        val b = Profiler.register("test:idempotent")
+        val a = Profiler.registerFine("test:idempotent")
+        val b = Profiler.registerFine("test:idempotent")
         assertEquals(a, b)
         assertEquals("test:idempotent", Profiler.nameOf(a))
     }
@@ -84,18 +85,18 @@ class RegistryTest {
     /** `enter`/`exit` nest, and coming back out restores what was underneath rather than clearing. */
     @Test
     fun `labels nest and unwind to what was underneath`() {
-        val outer = Profiler.register("test:outer")
-        val inner = Profiler.register("test:inner")
+        val outer = Profiler.registerFine("test:outer")
+        val inner = Profiler.registerFine("test:inner")
         onOwnThread {
             val s = Profiler.slot()
             assertEquals(NO_OP, s.getOpaque())
             Profiler.enter(outer)
-            assertEquals(outer, s.getOpaque())
+            assertEquals(outer.id, s.getOpaque())
             Profiler.enter(inner)
-            assertEquals(inner, s.getOpaque())
-            Profiler.exit()
-            assertEquals(outer, s.getOpaque(), "unwinding lost the enclosing label")
-            Profiler.exit()
+            assertEquals(inner.id, s.getOpaque())
+            Profiler.exit(inner)
+            assertEquals(outer.id, s.getOpaque(), "unwinding lost the enclosing label")
+            Profiler.exit(outer)
             assertEquals(NO_OP, s.getOpaque())
             assertEquals(0, Profiler.depth())
         }
@@ -104,16 +105,16 @@ class RegistryTest {
     /** `op { }` and the explicit form nest with each other in either order. */
     @Test
     fun `the block form and the explicit form interleave`() {
-        val a = Profiler.register("test:block")
-        val b = Profiler.register("test:explicit")
+        val a = Profiler.registerFine("test:block")
+        val b = Profiler.registerFine("test:explicit")
         onOwnThread {
             val s = Profiler.slot()
             op(a) {
-                assertEquals(a, s.getOpaque())
+                assertEquals(a.id, s.getOpaque())
                 Profiler.enter(b)
-                assertEquals(b, s.getOpaque())
-                Profiler.exit()
-                assertEquals(a, s.getOpaque())
+                assertEquals(b.id, s.getOpaque())
+                Profiler.exit(b)
+                assertEquals(a.id, s.getOpaque())
             }
             assertEquals(NO_OP, s.getOpaque())
         }
@@ -122,7 +123,7 @@ class RegistryTest {
     /** `op { }` has a `finally`; that is the whole reason it is the form documented first. */
     @Test
     fun `the block form closes its label when the body throws`() {
-        val id = Profiler.register("test:throwing")
+        val id = Profiler.registerFine("test:throwing")
         onOwnThread {
             val s = Profiler.slot()
             runCatching { op<Unit>(id) { throw IllegalStateException("boom") } }
@@ -136,7 +137,7 @@ class RegistryTest {
     /** A thread that closed everything it opened reports balanced and is not counted as a leak. */
     @Test
     fun `a balanced thread reports balanced`() {
-        val id = Profiler.register("test:balanced")
+        val id = Profiler.registerFine("test:balanced")
         onOwnThread {
             op(id) { }
             assertTrue(Profiler.expectBalanced())
@@ -149,7 +150,7 @@ class RegistryTest {
      */
     @Test
     fun `a leak is reported once and then the slot is clean`() {
-        val id = Profiler.register("test:leaky")
+        val id = Profiler.registerFine("test:leaky")
         onOwnThread {
             Profiler.enter(id)
             assertFalse(Profiler.expectBalanced(), "a leaked label reported itself balanced")
@@ -167,7 +168,7 @@ class RegistryTest {
      */
     @Test
     fun `a leak stops the session under strict and only under strict`() {
-        val id = Profiler.register("test:fatal")
+        val id = Profiler.registerFine("test:fatal")
 
         Profiler.start(stepMillis = 1.0, strict = true)
         onOwnThread { Profiler.enter(id); Profiler.expectBalanced() }
@@ -199,7 +200,7 @@ class RegistryTest {
      */
     @Test
     fun `a clean session does not inherit an earlier session's leaks`() {
-        val id = Profiler.register("test:inherited")
+        val id = Profiler.registerFine("test:inherited")
 
         Profiler.start(stepMillis = 1.0, strict = false)
         onOwnThread { Profiler.enter(id); Profiler.expectBalanced() }
@@ -212,11 +213,66 @@ class RegistryTest {
         assertFalse(clean.render().contains("still open at a point"), "a clean report warned about a leak")
     }
 
+    /**
+     * The check the no-argument `exit()` could not do.
+     *
+     * `enter(a); enter(b); exit(); exit()` unwinds `b` then `a` whether or not that is what the code
+     * meant — a crossed pair is indistinguishable from a correct one, and the share that comes out
+     * covers work that was never inside the label. Naming what you are closing makes it visible.
+     */
+    @Test
+    fun `closing the wrong operation is counted and named`() {
+        val a = Profiler.registerFine("test:crossed-a")
+        val b = Profiler.registerFine("test:crossed-b")
+        Profiler.start(stepMillis = 1.0, strict = false)
+        onOwnThread {
+            Profiler.enter(a)
+            Profiler.exit(b)
+            // Unwound anyway: one bad label, not every label after it.
+            assertEquals(NO_OP, Profiler.slot().getOpaque(), "the thread was not unwound")
+            Profiler.release()
+        }
+        val report = Profiler.stop()
+        assertEquals(1, report.imbalances, "a crossed exit was not counted")
+    }
+
+    @Test
+    fun `a crossed exit stops the session under strict and names both operations`() {
+        val a = Profiler.registerFine("test:strict-open")
+        val b = Profiler.registerFine("test:strict-closed")
+        Profiler.start(stepMillis = 1.0, strict = true)
+        onOwnThread {
+            Profiler.enter(a)
+            Profiler.exit(b)
+            Profiler.release()
+        }
+        val report = Profiler.stop()
+        val failure = assertNotNull(report.failure, "a crossed exit did not stop a strict session")
+        assertTrue("test:strict-closed" in failure, "the message did not name what was closed")
+        assertTrue("test:strict-open" in failure, "the message did not name what was open")
+    }
+
+    @Test
+    fun `closing a coarse execution that is not the one open is caught too`() {
+        val a = Profiler.registerCoarse("test:coarse-open")
+        val b = Profiler.registerCoarse("test:coarse-closed")
+        Profiler.start(stepMillis = 1.0, strict = false)
+        onOwnThread {
+            Profiler.enter(a)
+            Profiler.exit(b)
+            assertNull(Profiler.slot().contextOpaque(), "the context was not closed")
+            Profiler.release()
+        }
+        val report = Profiler.stop()
+        assertEquals(1, report.imbalances, "a crossed coarse exit was not counted")
+    }
+
     /** An `exit` with no `enter` names nothing rather than reading off the end of the name table. */
     @Test
     fun `an unmatched exit does not crash the leak message`() {
+        val ghost = Profiler.registerFine("test:neverEntered")
         onOwnThread {
-            Profiler.exit()
+            Profiler.exit(ghost)
             // Depth is already zero, so this is balanced; what is checked is that getting here at
             // all — and formatting a message from a slot holding NO_OP — is safe.
             assertTrue(Profiler.expectBalanced())

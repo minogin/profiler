@@ -102,6 +102,25 @@ fun staleContextMessage(worst: String, hits: Long, share: Double): String = Stri
 )
 
 /**
+ * What to tell someone who closed a label that was not the one open.
+ *
+ * Names both, because the interesting part is the pair: closing `parse` while `serialize` is open
+ * means one of them is covering work that was never inside it, and which one depends on how the two
+ * were meant to nest. The no-argument `exit()` this replaced could not see the difference at all.
+ */
+fun mismatchMessage(closed: String, open: String): String = String.format(
+    Locale.ROOT,
+    "exit(%s) was called while %s was the operation open on this thread.%n" +
+            "    One of them now covers work that was never inside it, and the number that comes " +
+            "out of%n" +
+            "    that is plausible rather than obviously wrong — which is the direction that costs " +
+            "you a day.%n" +
+            "    The thread was unwound anyway, so this is one bad label and not every label after " +
+            "it.",
+    closed, open
+)
+
+/**
  * What to tell someone whose label leaked. Names the operation that was open, because that is the
  * one whose share is now wrong and the reader has no other way to know which.
  */
@@ -922,11 +941,25 @@ class Report internal constructor(
             )
         }
         appendLine("-".repeat(WIDTH))
-        // The cross-tabulation, which is the reason the pair is recorded at all. One line per type
-        // rather than a matrix: a reader wants "what was this request made of", and twenty columns
-        // of mostly zeroes is not that.
+        // Share and occupancy, which the fine table has had all along and this one did not.
+        //
+        // **A coarse label gives you everything a fine one does and more** — the same hits, the same
+        // ticks, plus measured spans and this breakdown — so the only reason to choose fine is the
+        // ~40 ns a context costs. That was true of the data and not of the printed report, which
+        // silently lost two columns when an operation was promoted. Nothing was missing; nobody had
+        // printed it.
+        //
+        // On its own line rather than in the table because the table is already exactly [WIDTH]
+        // columns and these two need nineteen more. Grouped with the `was:` line, since "how much of
+        // the run" and "what it was made of" are the same question at two levels of detail.
         for (c in seen.sortedByDescending { it.inclusiveHits }) {
             if (c.inclusiveHits == 0L) continue
+            appendLine(
+                String.format(
+                    Locale.ROOT, "  %s: %.3f%% of labelled thread-time, %s occupancy",
+                    c.name, shareOf(c) * 100, threadTime(c.inclusiveHits * stepNanos)
+                )
+            )
             val parts = operations
                 .map { it.name to c.fine[it.id] }
                 .plus("unlabelled" to c.fine[NO_OP_INDEX])
@@ -957,6 +990,9 @@ class Report internal constructor(
         appendLine("  is the gap between them. A saturated pool reads working low: it is min(what the code")
         appendLine("  could do, threads actually free)")
         appendLine("in flight is executions at once out of the threads there were — your load, not your code")
+        appendLine("share and occupancy mean what they do in the fine table, and are here because a coarse")
+        appendLine("  label gives you everything a fine one does and more - the only reason to prefer fine is")
+        appendLine("  what a context costs. occupancy is INCLUSIVE: everything under this operation")
         appendLine("the 'was:' lines are the cross-tabulation: which fine operations ran under this one")
         // The one signal for work escaping its context, which neither the floor check nor the
         // balance check can see. Stated as a measurement with both readings, because it cannot tell

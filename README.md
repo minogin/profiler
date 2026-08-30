@@ -25,7 +25,7 @@ is the regime stack profilers cannot see into, and it has no upper limit — Cal
 millisecond-sized and it handled them to within a percentage point of JFR.
 
 **And for operations big enough to afford it — a request, a query, a plan — a second kind of label
-answers what the first cannot:** how long *one execution* took. `coarse(type) { }` timestamps both
+answers what the first cannot:** how long *one execution* took. A coarse label timestamps both
 ends, so you get executions, mean, p50/p90/p99 and max **measured rather than sampled**, the fine
 breakdown of what ran underneath it, and `mean − busy/exec` as the time it spent not running. On
 Calcite that reads *of the 9.08 ms a plan takes, `FilterIntoJoinRule` is 25.2%* — a sentence neither
@@ -139,11 +139,11 @@ or Rust would, which is why a native implementation would not help.
 Everything a caller needs, and there is nothing else:
 
 ```kotlin
-val parse = Profiler.register("parseRecord")     // once, at startup — keep the id
+val parse = Profiler.registerFine("parseRecord")  // once, at startup — keep the handle
 
 Profiler.start(stepMillis = 1.0)
 
-s = op(parse) { parseRecord(input) }             // wrap the work; nesting is fine
+s = op(parse) { parseRecord(input) }              // wrap the work; nesting is fine
 
 println(Profiler.stop().render())
 ```
@@ -154,18 +154,26 @@ there is a working example to copy. Up to 256 operations, registered by name at 
 `Profiler.start()` also takes `strict` (below), `sampleState = false` to switch off the per-sample
 thread-state read, and `stepMillis` — a smaller step is more samples and more sampler CPU.
 
+**One verb, and the tier is chosen once.** `Profiler.registerFine` gives back a `FineOp`,
+`Profiler.registerCoarse` a `CoarseOp`, and `op(x) { }` takes either — so promoting an operation
+when the report tells you to is one word in one place, not an edit at every call site. It is also
+what makes the two id spaces safe: both count from zero, so before this the first fine operation and
+the first coarse one were both the integer `0`, and passing one where the other belonged compiled
+and reported a plausible wrong answer. The handles erase to a bare `int`, so none of it costs
+anything at run time.
+
 **For a whole request, query or plan, add a coarse label as well:**
 
 ```kotlin
 val request = Profiler.registerCoarse("request")   // a separate id space
 
-coarse(request) {                                  // timestamps both ends
-    handle(input)                                  // your op(...) labels nest inside
+op(request) {                                      // same verb; the handle says which tier
+    handle(input)                                  // your other op(...) labels nest inside
 }
 ```
 
 That gives you the second table: how long each execution took, with percentiles, and what ran inside
-it. `enterCoarse(id)` / `exitCoarse()` exist for a boundary that is two callbacks rather than a block
+it. `Profiler.enter(op)` / `Profiler.exit(op)` exist for a boundary that is two callbacks rather than a block
 — they have no `finally`, so pair them with `Profiler.expectBalanced()` at a point the thread should
 be quiescent, which for a coarse label means *between* requests and not inside one.
 
@@ -176,7 +184,7 @@ context, and the caller's span reports the time they spent as *waiting*. Wrap th
 ```kotlin
 val pool = Executors.newFixedThreadPool(8).propagating()
 
-coarse(request) {
+op(request) {
     pool.invokeAll(shards.map { Callable { search(it) } })   // each shard runs inside `request`
 }
 ```
@@ -236,7 +244,7 @@ methods — there is an explicit form. Reach for it second, because it has no `f
 leak:
 
 ```kotlin
-Profiler.enter(rule); … ; Profiler.exit()        // nests with op { } in either order
+Profiler.enter(rule); … ; Profiler.exit(rule)   // nests with op { } in either order
 
 Profiler.expectBalanced()                        // at a point the thread should be quiescent
 ```
@@ -425,7 +433,7 @@ actually spread out.
 on the error of every share — the `waiting`, `elapsed` and `in-flight` columns are those. And the
 library surface enough to publish: **v0.1.0**, Apache-2.0, on JitPack.
 
-**And the coarse tier is built, and contexts now cross threads.** `coarse(type) { }` around a logical operation gives
+**And the coarse tier is built, and contexts now cross threads.** A coarse label around a logical operation gives
 executions, mean, p50/p90/p99 and max — **measured**, two timestamps per execution, the only numbers
 in the report that are not sampled — plus busy time per execution, so `mean − busy/exec` is the
 waiting quantified, and the breakdown by fine operation underneath it. Verified by a truth that is an

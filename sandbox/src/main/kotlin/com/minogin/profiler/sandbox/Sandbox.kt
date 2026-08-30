@@ -1,7 +1,6 @@
 package com.minogin.profiler.sandbox
 
 import com.minogin.profiler.Profiler
-import com.minogin.profiler.coarse
 import com.minogin.profiler.op
 
 /**
@@ -27,14 +26,14 @@ import com.minogin.profiler.op
  */
 fun main() {
     val request = Profiler.registerCoarse("request")
-    val work = Profiler.register("work")
+    val work = Profiler.registerFine("work")
 
     Profiler.start(stepMillis = 1.0)
 
     val deadline = System.nanoTime() + 3_000_000_000L
     var sink = 0L
     while (System.nanoTime() < deadline) {
-        coarse(request) {
+        op(request) {
             sink += op(work) { placeholder() }
         }
     }

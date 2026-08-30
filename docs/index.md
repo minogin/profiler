@@ -82,7 +82,8 @@ with the duty-cycle bound printed beside it.
 | **`com/minogin/profiler/`** | **the library — everything a user imports, and nothing else** |
 | `Profiler.kt` | the slot, the registry, `op { }` / `enter` / `exit`, and the constants that bound them |
 | `Sampler.kt` | the sampling thread: the tick loop, the slot walk, the wait strategy |
-| `Coarse.kt` | the coarse tier: the context, the span histogram, and `coarse { }` / `enterCoarse` / `exitCoarse` |
+| `Coarse.kt` | the coarse tier: the context and the span histogram. The label itself is `op { }`, the same verb the fine tier uses |
+| `Operations.kt` | `FineOp` and `CoarseOp` — why the tier is chosen once, at registration, and never mentioned again |
 | `Report.kt` | what a session collected and how it is rendered, including every verdict and threshold |
 | `Duty.kt` | how much of the occupancy was CPU, and the bound that puts on every share |
 | **`com/minogin/profiler/bench/`** | **the harness — never shipped, and now unable to leak into the above** |

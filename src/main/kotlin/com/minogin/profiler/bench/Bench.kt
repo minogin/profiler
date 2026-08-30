@@ -275,7 +275,7 @@ class Worker(
             // enter/exit rather than the block form, deliberately. It is the shape third-party code
             // forces on you — two callbacks, no finally — so the bench exercises the dangerous form
             // under its own balance check instead of only the safe one.
-            if (reqType >= 0) enterCoarse(reqType)
+            if (reqType >= 0) Profiler.enter(CoarseOp(reqType))
             var done = false
             var c = 0
             while (c < chunks) {
@@ -312,7 +312,7 @@ class Worker(
                 c++
             }
             if (reqType >= 0) {
-                exitCoarse()
+                Profiler.exit(CoarseOp(reqType))
                 // Timed outside the label, so this interval contains everything the profiler's span
                 // contains and the two are measuring the same thing. The last request of the run is
                 // recorded like any other: it was cut short by the deadline, and so was the span.
@@ -367,7 +367,7 @@ class Worker(
             val reqStart = System.nanoTime()
             // enter/exit and not the block form, for the reason the inline loop gives: it is the
             // shape third-party code forces on you, so the bench exercises the dangerous one.
-            enterCoarse(reqType)
+            Profiler.enter(CoarseOp(reqType))
             var c = 0
             while (c < chunks) {
                 // Each chunk gets its own window of the schedule, so the run covers exactly what it
@@ -387,7 +387,7 @@ class Worker(
                 dispatched += ESCAPE_CHUNK
             }
             f.await(req)
-            exitCoarse()
+            Profiler.exit(CoarseOp(reqType))
             val span = System.nanoTime() - reqStart
             recordRequest(span)
             occ += req.occupancyNanos.get()
@@ -414,7 +414,7 @@ class Worker(
      * would look like an ordinary well-behaved 2 ms of work. That is worth knowing in its own
      * right: where the label sits decides whether waiting is visible at all.
      */
-    private fun takeLock(state: Long): Long = op(lockOpId) {
+    private fun takeLock(state: Long): Long = op(FineOp(lockOpId)) {
         val c = contended!!
         val t0 = System.nanoTime()
         c.lock.lock()
@@ -522,7 +522,7 @@ class Worker(
                 t0 = System.nanoTime()
                 r = 0
                 while (r < reps) {
-                    s = op(op) { burn(s, n) }
+                    s = op(FineOp(op)) { burn(s, n) }
                     r++
                 }
                 hooked[op][t] = (System.nanoTime() - t0).toDouble() / reps

@@ -1,5 +1,6 @@
 package com.minogin.profiler.trial.calcite
 
+import com.minogin.profiler.FineOp
 import com.minogin.profiler.Profiler
 import org.apache.calcite.plan.RelOptListener
 import org.apache.calcite.plan.RelOptNode
@@ -54,15 +55,19 @@ class NullListener : RelOptListener {
 
 class RuleLabeller(rules: List<RelOptRule>) : RelOptListener {
 
-    private val ids = java.util.IdentityHashMap<RelOptRule, Int>().apply {
-        for (r in rules) put(r, Profiler.register(shortName(r)))
+    private val ids = java.util.IdentityHashMap<RelOptRule, FineOp>().apply {
+        for (r in rules) put(r, Profiler.registerFine(shortName(r)))
     }
 
     /** Rules Calcite created for itself, which are not in the set we handed it. */
-    private val unregistered = Profiler.register("rule:<other>")
+    private val unregistered = Profiler.registerFine("rule:<other>")
 
     override fun ruleAttempted(event: RelOptListener.RuleAttemptedEvent) {
-        if (event.isBefore) Profiler.enter(ids[event.ruleCall.rule] ?: unregistered) else Profiler.exit()
+        // The close now names what it is closing, and Calcite happens to hand us the rule on
+        // both callbacks — so a crossed enter/exit here would be caught rather than reported as
+        // a plausible share. The old no-argument exit() could not have known.
+        val op = ids[event.ruleCall.rule] ?: unregistered
+        if (event.isBefore) Profiler.enter(op) else Profiler.exit(op)
     }
 
     override fun relEquivalenceFound(event: RelOptListener.RelEquivalenceEvent) {}

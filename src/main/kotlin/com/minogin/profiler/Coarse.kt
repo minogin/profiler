@@ -222,10 +222,10 @@ internal class CoarseAgg(@JvmField val type: Int) {
  * under about a microsecond cannot afford this and belongs in the fine tier. See
  * `profiler.md`, "Where the boundary is".
  */
-inline fun <T> coarse(type: Int, body: () -> T): T {
+inline fun <T> op(op: CoarseOp, body: () -> T): T {
     val slot = Profiler.slot()
     val parent = slot.contextOpaque()
-    val ctx = CoarseContext(type, parent, System.nanoTime())
+    val ctx = CoarseContext(op.id, parent, System.nanoTime())
     slot.setContextOpaque(ctx)
     try {
         return body()
@@ -242,34 +242,6 @@ inline fun <T> coarse(type: Int, body: () -> T): T {
         // window is a nanosecond or two against a 1 ms sampling step, so swapping these two lines
         // leaves the suite green. Reasoned, not measured, and left in the safe order.
         ctx.markClosed()
-        slot.recordSpan(type, System.nanoTime() - ctx.startNanos)
+        slot.recordSpan(op.id, System.nanoTime() - ctx.startNanos)
     }
-}
-
-/**
- * Enters an execution of coarse operation [type] until a matching [exitCoarse].
- *
- * For the boundary that is two callbacks rather than a block — which is most of what third-party
- * code offers. It carries the same hazard [Profiler.enter] does and for the same reason: **there is
- * no `finally` here**, so a body that throws leaves the context open, and everything the thread does
- * afterwards is billed to it until something closes it. See [Profiler.expectBalanced].
- */
-fun enterCoarse(type: Int) {
-    val s = Profiler.slot()
-    s.setContextOpaque(CoarseContext(type, s.contextOpaque(), System.nanoTime()))
-}
-
-/**
- * Closes the innermost coarse execution on this thread and records its span.
- *
- * An unmatched call is a no-op rather than an error: it means the caller closed something it never
- * opened, which [Profiler.expectBalanced] is the place to notice, and throwing here would turn a
- * measurement problem into an application crash in somebody else's process.
- */
-fun exitCoarse() {
-    val s = Profiler.slot()
-    val ctx = s.contextOpaque() ?: return
-    s.setContextOpaque(ctx.parent)
-    ctx.markClosed()
-    s.recordSpan(ctx.type, System.nanoTime() - ctx.startNanos)
 }

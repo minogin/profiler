@@ -75,9 +75,9 @@ class PropagateTest {
     fun `withCoarse mounts the context and puts back what was there`() {
         val outer = Profiler.registerCoarse("prop-outer")
         val other = Profiler.registerCoarse("prop-other")
-        coarse(outer) {
+        op(outer) {
             val a = assertNotNull(current())
-            val borrowed = CoarseContext(other, null, System.nanoTime())
+            val borrowed = CoarseContext(other.id, null, System.nanoTime())
             withCoarse(borrowed) {
                 assertSame(borrowed, current(), "the context was not mounted")
             }
@@ -91,7 +91,7 @@ class PropagateTest {
     @Test
     fun `withCoarse restores even when the body throws`() {
         val t = Profiler.registerCoarse("prop-throwing")
-        coarse(t) {
+        op(t) {
             val a = assertNotNull(current())
             runCatching { withCoarse<Unit>(null) { throw IllegalStateException("boom") } }
             assertSame(a, current(), "the finally did not restore the slot")
@@ -101,7 +101,7 @@ class PropagateTest {
     @Test
     fun `mounting null means run under no execution`() {
         val t = Profiler.registerCoarse("prop-unmount")
-        coarse(t) {
+        op(t) {
             assertNotNull(current())
             withCoarse(null) {
                 assertNull(current(), "null did not unmount the execution")
@@ -116,7 +116,7 @@ class PropagateTest {
     @Test
     fun `a wrapped runnable carries the execution to another thread`() {
         val t = Profiler.registerCoarse("prop-runnable")
-        coarse(t) {
+        op(t) {
             val mine = assertNotNull(current())
             val task = Runnable { assertSame(mine, current(), "the context did not cross") }.propagating()
             onAnotherThread { task.run() }
@@ -126,12 +126,12 @@ class PropagateTest {
     @Test
     fun `a wrapped callable carries the execution to another thread`() {
         val t = Profiler.registerCoarse("prop-callable")
-        val seen = coarse(t) {
+        val seen = op(t) {
             val task = Callable { current() }.propagating()
             onAnotherThread { task.call() }
         }
         assertNotNull(seen, "the context did not cross")
-        assertEquals(t, seen.type)
+        assertEquals(t.id, seen.type)
     }
 
     /**
@@ -146,7 +146,7 @@ class PropagateTest {
     fun `capture happens where the task is wrapped, not where it runs`() {
         val t = Profiler.registerCoarse("prop-wrap-site")
         val wrappedOutside = Callable { current() }.propagating()
-        val seen = coarse(t) { wrappedOutside.call() }
+        val seen = op(t) { wrappedOutside.call() }
         assertNull(seen, "the task captured a context it was never wrapped under")
     }
 
@@ -154,10 +154,10 @@ class PropagateTest {
     fun `a wrapped runnable leaves the borrowing thread as it found it`() {
         val mine = Profiler.registerCoarse("prop-restore-mine")
         val theirs = Profiler.registerCoarse("prop-restore-theirs")
-        coarse(mine) {
+        op(mine) {
             val task = Runnable { }.propagating()
             onAnotherThread {
-                coarse(theirs) {
+                op(theirs) {
                     val before = assertNotNull(current())
                     task.run()
                     assertSame(before, current(), "the borrowed context was left mounted")
@@ -172,9 +172,9 @@ class PropagateTest {
         val t = Profiler.registerCoarse("prop-executor")
         val pool = pool(1).propagating()
         try {
-            val seen = coarse(t) { pool.submit(Callable { current() }).get() }
+            val seen = op(t) { pool.submit(Callable { current() }).get() }
             assertNotNull(seen, "submit did not carry the context")
-            assertEquals(t, seen.type)
+            assertEquals(t.id, seen.type)
         } finally {
             pool.shutdown()
             assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS))
@@ -186,10 +186,10 @@ class PropagateTest {
         val t = Profiler.registerCoarse("prop-invokeall")
         val pool = pool(2).propagating()
         try {
-            val seen = coarse(t) {
+            val seen = op(t) {
                 pool.invokeAll(listOf(Callable { current() }, Callable { current() })).map { it.get() }
             }
-            assertTrue(seen.all { it != null && it.type == t }, "invokeAll did not carry the context")
+            assertTrue(seen.all { it != null && it.type == t.id }, "invokeAll did not carry the context")
         } finally {
             pool.shutdown()
             assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS))
@@ -205,10 +205,10 @@ class PropagateTest {
         try {
             val seen = java.util.concurrent.atomic.AtomicReference<CoarseContext?>()
             val done = java.util.concurrent.CountDownLatch(1)
-            coarse(t) { pool.execute { seen.set(current()); done.countDown() } }
+            op(t) { pool.execute { seen.set(current()); done.countDown() } }
             assertTrue(done.await(5, TimeUnit.SECONDS))
             val ctx = assertNotNull(seen.get(), "execute did not carry the context")
-            assertEquals(t, ctx.type)
+            assertEquals(t.id, ctx.type)
         } finally {
             pool.shutdown()
             assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS))
@@ -220,10 +220,10 @@ class PropagateTest {
         val t = Profiler.registerCoarse("prop-invokeany")
         val pool = pool(2).propagating()
         try {
-            val seen = coarse(t) {
+            val seen = op(t) {
                 pool.invokeAny(listOf(Callable { current()?.type ?: -1 }))
             }
-            assertEquals(t, seen, "invokeAny did not carry the context")
+            assertEquals(t.id, seen, "invokeAny did not carry the context")
         } finally {
             pool.shutdown()
             assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS))
@@ -236,10 +236,10 @@ class PropagateTest {
         val pool = pool(1).propagating()
         try {
             val seen = java.util.concurrent.atomic.AtomicReference<CoarseContext?>()
-            val handed = coarse(t) { pool.submit({ seen.set(current()) }, "done").get() }
+            val handed = op(t) { pool.submit({ seen.set(current()) }, "done").get() }
             assertEquals("done", handed, "the result value was not passed through")
             val ctx = assertNotNull(seen.get(), "submit(Runnable, result) did not carry the context")
-            assertEquals(t, ctx.type)
+            assertEquals(t.id, ctx.type)
         } finally {
             pool.shutdown()
             assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS))
@@ -263,7 +263,7 @@ class PropagateTest {
     @Test
     fun `a context is not closed while its owner is inside it`() {
         val t = Profiler.registerCoarse("prop-open")
-        coarse(t) {
+        op(t) {
             val ctx = assertNotNull(current())
             assertTrue(!ctx.isClosed(), "the execution reported itself finished while it was running")
         }
@@ -276,7 +276,7 @@ class PropagateTest {
         // clean either way, so the balance check sees nothing wrong.
         val t = Profiler.registerCoarse("prop-closed")
         var captured: CoarseContext? = null
-        coarse(t) { captured = current() }
+        op(t) { captured = current() }
         assertTrue(assertNotNull(captured).isClosed(), "a finished execution did not mark itself closed")
     }
 
@@ -285,9 +285,9 @@ class PropagateTest {
         // enter/exit is the form third-party code forces on you, and it is the form most likely to
         // be handing work around, so it is the one that must not be missed.
         val t = Profiler.registerCoarse("prop-closed-nonlexical")
-        enterCoarse(t)
+        Profiler.enter(t)
         val ctx = assertNotNull(current())
-        exitCoarse()
+        Profiler.exit(t)
         assertTrue(ctx.isClosed(), "exitCoarse did not mark the execution closed")
     }
 
@@ -299,9 +299,9 @@ class PropagateTest {
         // plausible. The flag is the only thing that says otherwise.
         val t = Profiler.registerCoarse("prop-outlives")
         val task = Callable { current() }
-        val wrapped = coarse(t) { task.propagating() }
+        val wrapped = op(t) { task.propagating() }
         val seen = assertNotNull(onAnotherThread { wrapped.call() }, "the context did not cross")
-        assertEquals(t, seen.type)
+        assertEquals(t.id, seen.type)
         assertTrue(seen.isClosed(), "work outliving its span did not look stale")
     }
 
@@ -325,14 +325,14 @@ class PropagateTest {
             }
         }.propagating()
         try {
-            val delayed = coarse(t) { pool.schedule(Callable { current() }, 1, TimeUnit.MILLISECONDS) }
+            val delayed = op(t) { pool.schedule(Callable { current() }, 1, TimeUnit.MILLISECONDS) }
             assertNull(delayed.get(), "a delayed task inherited a context it will usually outlive")
 
             // The same pool still propagates through the undelayed path, so this is a property of
             // the method and not of the wrapper having given up on scheduled pools.
-            val immediate = coarse(t) { pool.submit(Callable { current() }).get() }
+            val immediate = op(t) { pool.submit(Callable { current() }).get() }
             assertNotNull(immediate, "submit on a scheduled pool did not carry the context")
-            assertEquals(t, immediate.type)
+            assertEquals(t.id, immediate.type)
         } finally {
             pool.shutdown()
             assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS))

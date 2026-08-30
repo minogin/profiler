@@ -33,6 +33,47 @@ every span collapses from **76.4%** to **0.0%**. Root calls are conserved exactl
 the escaping arm is still runnable as `--propagate=off`, so the before and after are an A/B in one
 binary.
 
+### One verb, and the tier chosen once — a breaking API change
+
+`Profiler.register` is now `Profiler.registerFine` and returns a **`FineOp`**; `registerCoarse`
+returns a **`CoarseOp`**. Everywhere else there is one verb:
+
+```kotlin
+val parse   = Profiler.registerFine("parse")
+val request = Profiler.registerCoarse("request")
+
+op(parse)   { … }        // was op(parse) { … }
+op(request) { … }        // was coarse(request) { … }
+
+Profiler.enter(op) / Profiler.exit(op)   // was Profiler.enter(id)/exit() and enterCoarse/exitCoarse
+```
+
+**Why.** Fine and coarse is a property of the instrument, not of your program — a coarse label gives
+you everything a fine one does *plus* measured spans, percentiles and a breakdown, so the only
+question is whether the operation is long enough to afford ~40 ns. That decision belongs at
+registration, where you are judging the size of the thing, and nowhere else. The report already says
+*"the operation wants a coarse label for its per-execution statistics"*; acting on that advice is now
+one word in one place instead of an edit at every call site.
+
+**And it closes a hole.** Both id spaces count from zero, so the first fine operation and the first
+coarse one were both the integer `0` — `op(request)` compiled, ran, and reported a plausible wrong
+answer. Two distinct types cannot be confused, and both erase to a bare `int`, so nothing is paid at
+run time. Handles come only from registration, and each prints as `fine#3` / `coarse#0` when it
+reaches a log.
+
+**`exit` now takes what you are closing**, which is more than symmetry: the no-argument form could
+not tell a correct unwind from a crossed one. `enter(a); enter(b); exit(); exit()` closes `b` then
+`a` whether or not that is what the code meant. A mismatch is now counted, named, and fatal under
+`strict` — the same treatment a leak gets, because it is the same fault: a label covering work that
+was never inside it.
+
+**Also:** the coarse table gained the `share` and `occupancy` the fine table always had. A coarse
+label was already strictly more informative; the printed report was quietly two columns short.
+
+**Known limitation:** value classes mangle their JVM names, so these are not callable from Java
+source. Java is in scope and this is deferred to phase 7 with a fix that is verified to work —
+`ideas.md` item 26.
+
 ### `working` is bounded by the CPU the machine actually gave you
 
 A fourth trial — PostgreSQL over a socket, the first workload here with any waiting in it — found

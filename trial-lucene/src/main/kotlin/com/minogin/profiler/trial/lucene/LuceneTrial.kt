@@ -1,9 +1,9 @@
 package com.minogin.profiler.trial.lucene
 
 import com.minogin.profiler.NO_OP
-import com.minogin.profiler.coarse
 import com.minogin.profiler.propagating
 import com.minogin.profiler.Profiler
+import com.minogin.profiler.op
 import com.minogin.profiler.getOpaque
 import com.minogin.profiler.trial.analyzeJfr
 import com.minogin.profiler.trial.recordExecutionSamples
@@ -489,7 +489,7 @@ private fun load(
     /** Whether the search pool carries the caller's coarse execution. See [Bed.propagate]. */
     propagate: Boolean = true,
 ) {
-    val searchCoarse = if (coarse) Profiler.registerCoarse("search") else -1
+    val searchCoarse = if (coarse) Profiler.registerCoarse("search") else null
     Bed(corpus, threads, mode, propagate = propagate).use { bed ->
         println(
             "threads=$threads placement=$mode sampler=$sampler" +
@@ -530,7 +530,7 @@ private fun load(
             // With `--propagate` on — the default now — the pool is wrapped and the slices run inside
             // the search that forked them. `--propagate=off` still runs the other way, because the
             // before and the after have to be the same binary.
-            Sink.last = if (searchCoarse < 0) bed.searchOnce() else coarse(searchCoarse) { bed.searchOnce() }
+            Sink.last = searchCoarse?.let { c -> op(c) { bed.searchOnce() } } ?: bed.searchOnce()
             val took = System.nanoTime() - t0
             searches++
             if (probing) {

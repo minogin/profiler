@@ -48,7 +48,9 @@ something to do, it graduates into [ideas.md](ideas.md) and is marked here as ha
 ---
 
 ### A fixed iteration count produces an honest, useless report — and you only find out afterwards
-*2026-08-30, from writing the skeleton. Mine, so weight it accordingly.*
+*2026-08-30, from writing the skeleton. Mine, so weight it accordingly.* **Graduated to
+[ideas.md](ideas.md) item 27** — with the complication that `start()` cannot know how long the run
+will be, so the warning would have to be unconditional.*
 
 The first version of the skeleton ran a fixed 2,000 iterations. On this machine that is 0.2 s, and
 the report came back with 26 samples, **19.6% noise** on the only operation, and the duty cycle
