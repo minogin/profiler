@@ -1161,15 +1161,23 @@ class Report internal constructor(
             appendLine("profile anyway, which is what to do when the code is not yours to change.")
             appendLine("!".repeat(WIDTH))
         }
-        appendLine("=".repeat(WIDTH))
-        // A title, in the same bare-uppercase style as the section headings below it. The report had
-        // none: it opened on a rule and a statistics line, so nothing on screen said what the block
-        // of text was, and a reader scrolling back had no landmark to stop at.
-        appendLine("PROFILER REPORT")
+        // The report used to open on a rule and a statistics line, so nothing on screen said what
+        // the block of text was and a reader scrolling back had no landmark to stop at.
+        //
+        // Five lines against a report of twenty-three is not free, and it was chosen knowing that.
+        // Backslashes are doubled here and nowhere else in this file, which is the one way this
+        // block can be broken by a well-meaning edit.
+        appendLine(" ____  ____   ___  _____ ___ _     _____ ____")
+        appendLine("|  _ \\|  _ \\ / _ \\|  ___|_ _| |   | ____|  _ \\")
+        appendLine("| |_) | |_) | | | | |_   | || |   |  _| | |_) |")
+        appendLine("|  __/|  _ <| |_| |  _|  | || |___| |___|  _ <")
+        appendLine("|_|   |_| \\_\\\\___/|_|   |___|_____|_____|_| \\_\\")
+        appendLine()
         appendLine(
             String.format(
-                Locale.ROOT, "%,d labelled samples over %.1f s, %,d ticks at %.3f ms, %s",
-                labelledHits, durationNanos / 1e9, ticks, achieved, plural(threads.toLong(), "thread")
+                Locale.ROOT, "%s over %.1f s, %,d ticks at %.3f ms, %s",
+                plural(labelledHits, "labelled sample"), durationNanos / 1e9, ticks, achieved,
+                plural(threads.toLong(), "thread")
             )
         )
         // Coverage in units, not only as a ratio. A percentage is a comparison against a total the
