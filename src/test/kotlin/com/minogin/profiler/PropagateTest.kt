@@ -197,6 +197,56 @@ class PropagateTest {
     }
 
     @Test
+    fun `a propagating executor carries the execution through execute`() {
+        // execute() is the one method on Executor, so a user who wrapped a bare Executor rather
+        // than an ExecutorService has only this path. It was the only wrapper never exercised.
+        val t = Profiler.registerCoarse("prop-execute")
+        val pool = pool(1).propagating()
+        try {
+            val seen = java.util.concurrent.atomic.AtomicReference<CoarseContext?>()
+            val done = java.util.concurrent.CountDownLatch(1)
+            coarse(t) { pool.execute { seen.set(current()); done.countDown() } }
+            assertTrue(done.await(5, TimeUnit.SECONDS))
+            val ctx = assertNotNull(seen.get(), "execute did not carry the context")
+            assertEquals(t, ctx.type)
+        } finally {
+            pool.shutdown()
+            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
+    fun `a propagating executor service carries the execution through invokeAny`() {
+        val t = Profiler.registerCoarse("prop-invokeany")
+        val pool = pool(2).propagating()
+        try {
+            val seen = coarse(t) {
+                pool.invokeAny(listOf(Callable { current()?.type ?: -1 }))
+            }
+            assertEquals(t, seen, "invokeAny did not carry the context")
+        } finally {
+            pool.shutdown()
+            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
+    fun `a propagating executor service carries the execution through submit with a result`() {
+        val t = Profiler.registerCoarse("prop-submit-result")
+        val pool = pool(1).propagating()
+        try {
+            val seen = java.util.concurrent.atomic.AtomicReference<CoarseContext?>()
+            val handed = coarse(t) { pool.submit({ seen.set(current()) }, "done").get() }
+            assertEquals("done", handed, "the result value was not passed through")
+            val ctx = assertNotNull(seen.get(), "submit(Runnable, result) did not carry the context")
+            assertEquals(t, ctx.type)
+        } finally {
+            pool.shutdown()
+            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS))
+        }
+    }
+
+    @Test
     fun `a propagating executor forwards lifecycle calls to the delegate`() {
         // The methods that carry no work must still reach the pool underneath, or a wrapped pool
         // could never be shut down and the wrapper would leak threads for the life of the process.

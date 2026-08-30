@@ -26,17 +26,11 @@ import com.minogin.profiler.op
  * launches the bench and all four trials as well.
  */
 fun main() {
-    // Registered once, at startup, and the ids kept. Two id spaces: coarse for a whole logical
-    // operation, fine for the pieces inside it.
     val request = Profiler.registerCoarse("request")
     val work = Profiler.register("work")
 
     Profiler.start(stepMillis = 1.0)
 
-    // Time-bounded rather than count-bounded, and that is worth copying. At a fixed iteration count
-    // a fast machine finishes before the sampler has anything to say: the first version of this ran
-    // for 0.2 s and produced 26 samples at 19.6% noise, with the duty cycle reporting itself
-    // unavailable because no one-second window had completed. The report was honest and useless.
     val deadline = System.nanoTime() + 3_000_000_000L
     var sink = 0L
     while (System.nanoTime() < deadline) {

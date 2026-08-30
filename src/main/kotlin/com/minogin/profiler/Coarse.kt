@@ -235,6 +235,12 @@ inline fun <T> coarse(type: Int, body: () -> T): T {
         slot.setContextOpaque(parent)
         // Marked the moment this thread leaves it, and before the span is recorded: from here on,
         // any thread still mounted on this context is working under an execution that is over.
+        //
+        // After the slot is restored, deliberately. The sampler treats a closed context as stale
+        // only if the slot still holds it, so marking first would leave a window — one opaque store
+        // wide — in which this thread's own exit looks like an escape. **No test covers this**: the
+        // window is a nanosecond or two against a 1 ms sampling step, so swapping these two lines
+        // leaves the suite green. Reasoned, not measured, and left in the safe order.
         ctx.markClosed()
         slot.recordSpan(type, System.nanoTime() - ctx.startNanos)
     }

@@ -137,21 +137,139 @@ class CoarseTest {
 
     // --- what the report works out from it -------------------------------------------
 
+    // --- `working` against what the machine actually gave it ------------------------
+    //
+    // Trial 4 measured this column reading 55x more CPU than the process spent: `working` is built
+    // on thread state, and Java reports a thread stopped inside a native call as RUNNABLE. These
+    // pin the bound that was added in response, in both directions — because the direction that
+    // costs more is the false accusation, and the slack that prevents it is not obvious.
+
+    @Test
+    fun `working is bounded by the CPU the machine was measured to give it`() {
+        // The PostgreSQL numbers: eight threads stopped in a socket read, reported as 2.83 working,
+        // on a process the operating system says was on a CPU 1.02% of the time.
+        val c = stat(
+            count = 860, sumNanos = 860 * 17_440_000, hits = 3_830, running = 2_830,
+            instanceTicks = 1_000, activeTicks = 1_000,
+        )
+        val r = report(listOf(c), labelledDuty = 0.0102)
+        assertEquals(3.83, c.inside, 1e-9)
+        assertEquals(2.83, c.working, 1e-9)
+        assertTrue(r.workingIsContradicted(c), "a column claiming 2.83 threads on a 1% duty cycle was believed")
+        assertTrue(r.workingCeilingOf(c) < 0.05, "the ceiling should be about 0.04, was ${r.workingCeilingOf(c)}")
+    }
+
+    /**
+     * The regression test for the slack, and it is load-bearing rather than caution.
+     *
+     * These are Lucene's measured figures: `inside` 6.64 and `working` 6.40 against a labelled duty
+     * cycle of 96.40%, which puts the ceiling at **exactly 6.40**. A strict test — anything above
+     * the ceiling is a fault — would accuse a run that is entirely correct, of the defect
+     * PostgreSQL actually has. The ceiling is a run-wide figure applied to one operation, and one
+     * operation may honestly be more CPU-bound than the run around it.
+     */
+    @Test
+    fun `a CPU-bound operation sitting on its ceiling is not accused`() {
+        val c = stat(
+            count = 3_663, sumNanos = 3_663 * 4_090_000, hits = 6_640, running = 6_400,
+            instanceTicks = 1_000, activeTicks = 1_000,
+        )
+        val r = report(listOf(c), labelledDuty = 0.9640)
+        // 6.64 x 0.9640 = 6.40096 — the point is that `working` of 6.40 sits *on* that, not that
+        // the two are bit-identical.
+        assertEquals(6.40, r.workingCeilingOf(c), 0.01)
+        assertTrue(c.working <= r.workingCeilingOf(c) * Report.WORKING_CEILING_SLACK)
+        assertTrue(!r.workingIsContradicted(c), "an operation at its ceiling was accused")
+    }
+
+    @Test
+    fun `the slack is a factor, and it decides on both sides of itself`() {
+        fun contradictedAt(working: Long): Boolean {
+            val c = stat(
+                count = 100, sumNanos = 100_000_000, hits = 1_000, running = working,
+                instanceTicks = 1_000, activeTicks = 1_000,
+            )
+            // inside = 1.0, duty 0.5, so the ceiling is 0.5 and the threshold 0.5 x 1.5 = 0.75.
+            return report(listOf(c), labelledDuty = 0.5).workingIsContradicted(c)
+        }
+        assertTrue(!contradictedAt(700), "0.70 is inside the slack and was accused")
+        assertTrue(contradictedAt(800), "0.80 is outside the slack and was believed")
+    }
+
+    @Test
+    fun `no duty cycle means no accusation`() {
+        // A run too short for a window says so rather than inventing a ceiling. Silence is the only
+        // honest answer: without the operating system's figure there is nothing to contradict.
+        val c = stat(count = 10, sumNanos = 10_000_000, hits = 1_000, running = 1_000, instanceTicks = 100)
+        val r = report(listOf(c), labelledDuty = 0.0, dutyAvailable = false)
+        assertTrue(r.workingCeilingOf(c).isNaN())
+        assertTrue(!r.workingIsContradicted(c), "an unavailable duty cycle was read as a contradiction")
+    }
+
+    @Test
+    fun `the report names the operation whose working cannot be supported`() {
+        val bad = stat(
+            count = 100, sumNanos = 100_000_000, hits = 4_000, running = 3_000,
+            instanceTicks = 1_000, activeTicks = 1_000, name = "query",
+        )
+        val text = report(listOf(bad), labelledDuty = 0.01).render()
+        assertTrue("READS HIGHER THAN THE MEASURED CPU DUTY" in text, "the warning did not appear")
+        assertTrue("query" in text, "the warning did not name the operation")
+        // The printed cell carries both readings, so a reader who skips the block still sees it.
+        assertTrue(Regex("""3\.00/0\.0\d""").containsMatchIn(text), "the column did not print value over ceiling")
+    }
+
+    @Test
+    fun `a report with nothing contradicted says nothing about it`() {
+        val ok = stat(count = 100, sumNanos = 100_000_000, hits = 1_000, running = 990, instanceTicks = 1_000)
+        val text = report(listOf(ok), labelledDuty = 0.99).render()
+        assertTrue("READS HIGHER THAN THE MEASURED CPU DUTY" !in text, "a clean run was warned about")
+    }
+
+    // --- the stale share, which had the wrong denominator ----------------------------
+
+    /**
+     * This printed **102.3%** before it was fixed: the numerator counted a stale entry per coarse
+     * *type* on the chain, and the denominator counted only samples that were inside a *fine* label.
+     * Two different populations, so the ratio was not a share of anything.
+     */
+    @Test
+    fun `the stale share is of coarse thread-time and cannot exceed all of it`() {
+        val c = stat(count = 10, sumNanos = 10_000_000, hits = 0, running = 0, instanceTicks = 1, staleHits = 997)
+        val r = report(listOf(c), labelled = 975, staleContextHits = 997, coarseSampleHits = 1_000)
+        assertEquals(0.997, r.staleContextShare, 1e-9)
+        assertTrue(r.staleContextShare <= 1.0, "a share of thread-time exceeded all of it")
+    }
+
+    @Test
+    fun `no coarse samples is a stale share of zero rather than a division by zero`() {
+        val r = report(emptyList(), staleContextHits = 0, coarseSampleHits = 0)
+        assertEquals(0.0, r.staleContextShare)
+    }
+
     private fun stat(
         count: Long, sumNanos: Long, hits: Long, running: Long,
         inclusive: Long = hits, runningInclusive: Long = running,
         instanceTicks: Long = inclusive, activeTicks: Long = instanceTicks,
+        staleHits: Long = 0, name: String = "req",
     ) = CoarseStat(
-        0, "req", count, sumNanos, 0, 0, LongArray(SpanHistogram.BUCKETS),
+        0, name, count, sumNanos, 0, 0, LongArray(SpanHistogram.BUCKETS),
         hits, running, inclusive, runningInclusive, instanceTicks, activeTicks,
-        LongArray(MAX_OPERATIONS + 1),
+        LongArray(MAX_OPERATIONS + 1), staleHits,
     )
 
     /**
      * A report with a 1 ms step, so that a hit is a millisecond and the arithmetic in these tests
      * can be done in one's head. [labelled] sets the denominator every coarse share is taken over.
      */
-    private fun report(coarse: List<CoarseStat>, labelled: Long = 1_000_000) = Report(
+    private fun report(
+        coarse: List<CoarseStat>,
+        labelled: Long = 1_000_000,
+        labelledDuty: Double = 0.99,
+        dutyAvailable: Boolean = true,
+        staleContextHits: Long = 0,
+        coarseSampleHits: Long = 0,
+    ) = Report(
         operations = listOf(OperationStat(0, "fine", labelled, labelled, 0, 0, 0, 0, labelled)),
         idleHits = 0,
         ticks = 1_000_001,
@@ -159,12 +277,17 @@ class CoarseTest {
         durationNanos = 1_000_000_000_000,
         threads = 8,
         duty = DutyReport(
-            labelledDuty = 0.99, invisibleOffCpu = 0.0, labelledFraction = 1.0, reason = null,
-            resolutionNanos = 15_625_000, windowNanos = 1_000_000_000, windows = 20, threads = 8,
-            cpuNanos = 990_000_000, wallNanos = 1_000_000_000,
-            minWindowDuty = 0.99, maxWindowDuty = 0.99, anomalies = 0, maxSampleNanos = 200_000,
+            labelledDuty = labelledDuty, invisibleOffCpu = 0.0, labelledFraction = 1.0,
+            reason = if (dutyAvailable) null else "no window completed",
+            resolutionNanos = 15_625_000, windowNanos = 1_000_000_000,
+            windows = if (dutyAvailable) 20 else 0, threads = 8,
+            cpuNanos = (labelledDuty * 1_000_000_000).toLong(), wallNanos = 1_000_000_000,
+            minWindowDuty = labelledDuty, maxWindowDuty = labelledDuty,
+            anomalies = 0, maxSampleNanos = 200_000,
         ),
         coarse = coarse,
+        staleContextHits = staleContextHits,
+        coarseSampleHits = coarseSampleHits,
     )
 
     @Test
