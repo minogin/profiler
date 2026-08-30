@@ -165,9 +165,12 @@ fun ensureSchema(): Boolean {
                 """
                 INSERT INTO events (id, user_id, kind, amount, created_at, payload)
                 SELECT g,
-                       (g * 2654435761)::bigint % $USERS,
+                       -- g::bigint before the multiply, not after: generate_series yields int, and
+                       -- 5,000,000 * 2654435761 overflows int long before any cast on the result
+                       -- could rescue it. PostgreSQL says "integer out of range" and it is right.
+                       ((g::bigint * 2654435761) % $USERS)::int,
                        (g % 8)::smallint,
-                       ((g * 7919) % 100000) / 100.0,
+                       ((g::bigint * 7919) % 100000) / 100.0,
                        now() - ((g % 2592000) * interval '1 second'),
                        md5(g::text) || md5((g + 1)::text)
                 FROM generate_series(1, $ROWS) g

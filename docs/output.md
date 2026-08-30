@@ -281,6 +281,21 @@ it does.
 eight helpers leaves nothing to fan out to and `working` falls back to about 1. That is the truth
 about *that run*, not about the code.
 
+*It reads high on anything that waits outside the JVM, and the report will tell you so.*
+`working` is built on `Thread.getState`, and **Java reports a thread inside a native call as
+`RUNNABLE`** — a socket read, a file read, an `epoll` wait. Measured on PostgreSQL over a socket, the
+column read **2.85** while the operating system said the whole process used 1.03 s of CPU in a 20 s
+run: **55× more CPU credited than the machine ever spent**. When the measured duty cycle cannot
+support the number, the column prints it over its ceiling —
+
+```
+inside   working
+  3.83  2.83/0.04     ← reads 2.83, the duty cycle supports 0.04
+```
+
+— followed by a warning block naming each type. `inside` is unaffected: it counts threads in the
+execution whatever they were doing.
+
 *And it reads high as a speedup.* `working` is `work ÷ span` **of the run it measured**, and
 parallelising usually costs extra work — per-slice setup, cache pressure, an all-core clock below
 single-core boost. Measured on Lucene, the same search at one thread and at eight:

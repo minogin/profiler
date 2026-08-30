@@ -755,6 +755,40 @@ and it is worth building. The suspension half in particular is not covered by an
 the bench's fan-out is threads handing work to threads, while a suspended coroutine occupies no
 thread at all, and phase 5 has to decide deliberately what a span means across one.
 
+## 24. Measure CPU per label, instead of bounding thread state after the fact · open
+
+Trial 4 measured `working` reading **55x** more CPU than the operating system says the process spent,
+because Java reports a thread inside a native call as `RUNNABLE` and a socket read is a native call.
+The report now prints the duty-cycle ceiling beside the number and warns — see
+[trial-jdbc.md](trial-jdbc.md) — but that says the figure cannot be trusted; it does not produce a
+better one.
+
+**The better one would be CPU time attributed per label.** `ThreadMXBean.getThreadCpuTime` counts
+time on a processor and sees through the JNI boundary that thread state cannot, so a sampler that
+read it would get `working` right by construction instead of bounding it afterwards.
+
+**Why it is not simply done.** The duty machinery already measures the cost: **130.9 µs for a walk**
+of the live threads, which is why it runs once a second and not once a tick. At a 1 ms step that is
+13% of the sampling thread's budget spent on one reading, against a design whose whole claim is that
+the observer costs nothing the workload can feel.
+
+**Three shapes it could take, none measured:**
+
+- **Delta per thread per window, split by where the thread was.** The duty walk already produces a
+  per-thread CPU delta once a second; the sampler knows which labels that thread was inside during
+  the window. Attribute the delta in proportion. Cheap, and an approximation whose error is worth
+  measuring rather than assuming.
+- **A second, slower clock for the coarse tier only.** Coarse executions last milliseconds, so a
+  per-execution CPU reading at entry and exit is two `getThreadCpuTime` calls against a span of
+  microseconds — plausible where it is hopeless for a 20 ns fine label. It would only work for a
+  span that stays on one thread, which after phase 5 is not the interesting case.
+- **The platform's own counters.** JFR's `ThreadCPULoad`, or perf on Linux. Foreign machinery, and
+  the JFR output in phase 8 has to be built anyway.
+
+**What would settle it:** measure `getThreadCpuTime` per call on this machine as carefully as the
+stack walk was measured, then decide. 130.9 µs is a *walk*; one call may be far cheaper, and the
+whole question turns on that number.
+
 ## Promoted to plan.md
 
 **Phase 3.5** is item 9 above, reframed from detecting bad operations to bounding the error on every

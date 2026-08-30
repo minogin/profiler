@@ -760,6 +760,40 @@ class Report internal constructor(
     fun busyPerExecutionNanos(c: CoarseStat): Double =
         if (c.count == 0L) Double.NaN else c.runningInclusiveHits * stepNanos / c.count
 
+    /**
+     * The most of [c]'s `working` the measured CPU duty cycle can support.
+     *
+     * `working` is built on [Thread.getState], and **thread state cannot see through a native
+     * call**: a thread stopped inside a socket read is `RUNNABLE` as far as Java is concerned, so it
+     * is counted as working. On a workload that waits on something outside the process that is not a
+     * small error. Measured on PostgreSQL over a socket: `working` read **2.85** while the operating
+     * system said the whole process used 1.03 s of CPU in a 20 s run — the report was crediting
+     * **55x** more CPU than the machine ever spent.
+     *
+     * The duty cycle already knows. [DutyReport.labelledDuty] is measured from `getThreadCpuTime`,
+     * which counts time on a processor and does see through the boundary, so `inside x labelledDuty`
+     * is what that much occupancy could at most have been doing.
+     *
+     * **It is a run-wide figure applied to one operation, not a per-type bound**, exactly as the
+     * fine tier's *"at most N pp of any share is a thread waiting"* line already is. One operation
+     * can be more CPU-bound than the run it sits in, which is why [workingIsContradicted] allows a
+     * factor before it complains rather than treating any excess as a fault.
+     */
+    fun workingCeilingOf(c: CoarseStat): Double =
+        if (!duty.available) Double.NaN else c.inside * duty.labelledDuty
+
+    /**
+     * Whether [c]'s `working` claims more CPU than the machine was measured to have given it.
+     *
+     * The factor is slack for the run-wide-versus-per-type mismatch above, and it is deliberately
+     * generous: the failure this catches is a factor of fifty, not a factor of two, so nothing is
+     * gained by being strict and a false accusation costs the reader their trust in the column.
+     */
+    fun workingIsContradicted(c: CoarseStat): Boolean {
+        val ceiling = workingCeilingOf(c)
+        return ceiling.isFinite() && c.working.isFinite() && c.working > ceiling * WORKING_CEILING_SLACK
+    }
+
     /** How much of the observed thread-time happened anywhere under [c]. */
     fun shareOf(c: CoarseStat): Double =
         if (observedNanos <= 0.0) 0.0 else c.inclusiveHits * stepNanos / observedNanos
@@ -858,7 +892,7 @@ class Report internal constructor(
             String.format(
                 // 130 columns exactly, to the report's WIDTH. Two new columns had to come out of
                 // the existing ones rather than out of the page: this table is read on a console.
-                Locale.ROOT, "%-22s %11s %9s %9s %9s %9s %9s %9s %8s %6s %7s %11s",
+                Locale.ROOT, "%-20s %11s %9s %9s %9s %9s %9s %9s %8s %6s %9s %11s",
                 "coarse operation", "executions", "mean", "p50", "p90", "p99", "max",
                 "busy/exec", "waiting", "inside", "working", "in flight"
             )
@@ -870,14 +904,19 @@ class Report internal constructor(
                 else (c.inclusiveHits - c.runningInclusiveHits).toDouble() / c.inclusiveHits
             appendLine(
                 String.format(
-                    Locale.ROOT, "%-22s %,11d %9s %9s %9s %9s %9s %9s %7.1f%% %6s %7s %11s",
+                    Locale.ROOT, "%-20s %,11d %9s %9s %9s %9s %9s %9s %7.1f%% %6s %9s %11s",
                     c.name, c.count,
                     duration(c.meanSpanNanos), duration(c.percentileNanos(0.50)),
                     duration(c.percentileNanos(0.90)), duration(c.percentileNanos(0.99)),
                     duration(c.spanMaxNanos.toDouble()), duration(busyPerExecutionNanos(c)),
                     waitShare * 100,
                     if (c.inside.isNaN()) "-" else String.format(Locale.ROOT, "%.2f", c.inside),
-                    if (c.working.isNaN()) "-" else String.format(Locale.ROOT, "%.2f", c.working),
+                    // Value over its ceiling when the duty cycle contradicts it, the same idiom
+                    // `in flight` already uses for a number read against the limit it must respect.
+                    if (c.working.isNaN()) "-"
+                    else if (workingIsContradicted(c))
+                        String.format(Locale.ROOT, "%.2f/%.2f", c.working, workingCeilingOf(c))
+                    else String.format(Locale.ROOT, "%.2f", c.working),
                     if (c.inFlight.isNaN()) "-" else String.format(Locale.ROOT, "%.2f/%d", c.inFlight, threads)
                 )
             )
@@ -910,6 +949,8 @@ class Report internal constructor(
         appendLine("  work does not leave its thread, mean - busy/exec is the WAITING, which is the one thing a")
         appendLine("  fine label can never tell you. waiting is that as a share, and is the reading that holds")
         appendLine("  either way")
+        appendLine("working printed as a/b means the measured CPU duty cycle only supports b of it - the threads")
+        appendLine("  are stopped in NATIVE calls, which Java thread state reports as RUNNABLE. See the warning below")
         appendLine("inside is THREADS in one execution at once, a parked one counted: what a request ties up.")
         appendLine("  working is the ones on a CPU - what splitting the work bought you, the T1/T8 of the")
         appendLine("  work-span model. working = inside x (1 - waiting), and a caller parked on its own join")
@@ -941,6 +982,35 @@ class Report internal constructor(
         // The opposite fault to the line above, and the more serious one. That one is attribution
         // lost and says so; this is attribution invented, and it is stated with the remedy because
         // there are two quite different causes with opposite fixes.
+        // The column cannot see a native wait, and on a workload that does nothing else that is not a
+        // rounding error. Named per type, with both readings, because the number is not useless —
+        // it is right on a CPU-bound operation and it is the *reader* who knows which they have.
+        val contradicted = coarse.filter { it.count > 0 && workingIsContradicted(it) }
+        if (contradicted.isNotEmpty()) {
+            appendLine()
+            appendLine("!".repeat(WIDTH))
+            appendLine("`working` READS HIGHER THAN THE MEASURED CPU DUTY CYCLE CAN SUPPORT")
+            for (c in contradicted.sortedByDescending { it.working }) {
+                appendLine(
+                    String.format(
+                        Locale.ROOT, "  %-22s working %.2f, but the duty cycle bounds it at %.2f",
+                        c.name, c.working, workingCeilingOf(c)
+                    )
+                )
+            }
+            appendLine(
+                String.format(
+                    Locale.ROOT,
+                    "  Threads inside these were on a CPU %.2f%% of the time, measured from the operating",
+                    duty.labelledDuty * 100
+                )
+            )
+            appendLine("  system's own clock. `working` is built on thread state, and a thread stopped inside a")
+            appendLine("  NATIVE call - a socket read, a file read, an epoll wait - reads RUNNABLE to Java. So it")
+            appendLine("  is counted as working, and `waiting` is short by the same amount.")
+            appendLine("  `inside` is unaffected: it counts threads in the execution whatever they were doing.")
+            appendLine("!".repeat(WIDTH))
+        }
         if (staleContextHits > 0) {
             val worst = coarse.maxByOrNull { it.staleHits }
             appendLine()
@@ -1183,6 +1253,16 @@ class Report internal constructor(
          * correction needs. What is not correctable is the bias, and beneath it the hazard that
          * C2 will shuffle work across the boundaries of adjacent short labels altogether.
          */
+        /**
+         * How far past its duty-cycle ceiling `working` may read before the report says so.
+         *
+         * Slack for a run-wide duty cycle being applied to one operation, which can honestly be more
+         * CPU-bound than the run around it. Generous on purpose: the failure this exists to catch was
+         * measured at **55x** on PostgreSQL over a socket, so strictness buys nothing and a false
+         * accusation costs the reader their trust in the column.
+         */
+        const val WORKING_CEILING_SLACK = 1.5
+
         const val FLOOR_NANOS = 50.0
 
         /**

@@ -33,6 +33,25 @@ every span collapses from **76.4%** to **0.0%**. Root calls are conserved exactl
 the escaping arm is still runnable as `--propagate=off`, so the before and after are an A/B in one
 binary.
 
+### `working` is bounded by the CPU the machine actually gave you
+
+A fourth trial — PostgreSQL over a socket, the first workload here with any waiting in it — found
+that `working` counts a thread stopped in a native call as working. Java reports a thread inside a
+socket read as `RUNNABLE`, and the column is built on thread state, so eight threads waiting on
+another process read as 2.85 threads on a CPU. Against the operating system's own accounting the
+report was crediting **55× more CPU than the machine ever spent**: 56.99 s attributed, 1.03 s used.
+
+The column now prints as `2.83/0.04` when the measured CPU duty cycle cannot support it — value over
+its ceiling, the idiom `in flight` already uses — with a warning naming each type. Both readings are
+stated rather than one corrected: `working` is right on a CPU-bound operation, and only the reader
+knows which they have. `inside` is unaffected; it counts threads in the execution whatever they were
+doing.
+
+The ceiling is `inside × labelledDuty`, measured with `getThreadCpuTime`, which sees through the JNI
+boundary that thread state cannot. It allows a factor of 1.5, because it applies a run-wide duty
+cycle to one operation — and that slack is load-bearing: Lucene reads `working 6.40` against a
+ceiling of 6.40 and Calcite 1.00 against 0.97.
+
 ### Propagation, verified on Lucene
 
 The acceptance test for all of the above, on code we did not write. One `.propagating()` call on the

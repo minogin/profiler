@@ -1673,6 +1673,54 @@ evidence the auto-wrap decision was parked on, and it says opt-in was enough *he
 does not remove: we own this pool. A target that builds its own internally cannot be wrapped from
 outside at all, which is what the bytecode agent in phase 7 is for.
 
+### `working` counts a thread stopped in a socket read as working — by 55x
+
+**The fourth trial, and it found a defect in a column shipped four commits earlier.** PostgreSQL 17
+over a socket, run 2026-08-30: 8 workers, fan-out 8, 20 s, 1,156 requests at 17.30 ms mean. Clock
+**201.4%** of nominal, 13 samples, none failed — and it hardly matters, because the finding is a
+ratio between two figures from the same run. Full record in [trial-jdbc.md](trial-jdbc.md).
+
+```
+CPU the process actually used              1.03 s   <- the OS, which sees native waits
+CPU the profiler attributes to requests   56.99 s   (working 2.85 x 17.30 ms x 1,156)
+                                          55.26x
+```
+
+**Java reports a thread inside a native call as `RUNNABLE`.** `working` is built on thread state, so
+eight threads doing nothing but waiting for another process read as 2.85 threads on a CPU. The true
+figure is about 0.05. The fine tier says it more starkly still: `execute` holds **99.972%** of the
+run at 6.25 ms per call and reads **`waiting 0.0%`**.
+
+**The only waiting detected was the Java-level park.** `inside 3.85` against `working 2.85` — the
+difference of exactly 1.0 is the caller parked in `invokeAll`. Everything the operating system was
+waiting for was invisible to the column.
+
+**`inside` is unaffected and correct**, because it counts threads in the execution whatever they were
+doing. `working` and `waiting` are wrong together, in the same direction, by the same amount.
+
+**The report already contained the contradiction.** Its own duty-cycle header read *"threads were on
+CPU 0.63% of sampled wall time"* and *"at most 100.00 pp of any share is a thread waiting rather than
+working"* — the phase 3.5 bound going honestly vacuous, twenty lines above a column that ignored it.
+The measurement was there. Nothing consulted it.
+
+**What the report does now.** `working` prints as `2.83/0.04` when the measured CPU duty cycle cannot
+support it — the value-over-its-ceiling idiom `in flight` already uses — with a warning naming each
+type. Both readings are stated rather than one corrected: the column is right on a CPU-bound
+operation, and it is the reader who knows which they have.
+
+The ceiling is `inside x labelledDuty`, and it is a **run-wide figure applied to one operation**,
+exactly as the fine tier's *"at most N pp of any share"* line already is. So it allows a factor of
+1.5 before complaining, and that slack earns its place rather than being caution:
+
+| | labelled duty | `inside` | `working` | warned |
+|---|---|---|---|---|
+| PostgreSQL over a socket | **1.02%** | 3.83 | **2.83 / 0.04** | yes |
+| Lucene, 8 threads | 96.40% | 6.64 | 6.40 | no |
+| Calcite | 96.94% | 1.00 | 1.00 | no |
+
+Both CPU-bound trials sit *at* their ceiling. Without the factor, Lucene would have been accused of
+the defect PostgreSQL actually has.
+
 ## Open questions
 
 **What the bench's duration tolerance should be on a warm machine.** Settled above that `--coarse` is

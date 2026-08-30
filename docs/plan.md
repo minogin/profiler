@@ -21,7 +21,7 @@ words, is [tldr.md](tldr.md).
 | — | Trial 2 — Lucene: concurrent, and identity by instance rather than by class | **done** |
 | — | Trial 3 — Netty: few event loops, many tasks, time that is mostly not CPU | **done** |
 | — | The coarse tier on all three trials — Calcite, Netty, Lucene | **done** |
-| — | **Trial 4 — PostgreSQL over a socket: the first workload here with waiting in it** | **in progress** |
+| — | **Trial 4 — PostgreSQL over a socket: the first workload here with waiting in it** | **done — found a defect** |
 | — | Trials 5+ — a compiler, two negative controls | later |
 | 4 | The coarse tier — contexts, spans, cross-tabulation | **done** |
 | 5 | Crossing threads — propagation, and per-operation parallelism | next |
@@ -1421,7 +1421,22 @@ HikariCP pool and an executor wrapped with `.propagating()`, behind `--propagate
 after are one binary, as on Lucene. Fine labels separate `acquire` — queueing on ourselves — from
 `execute`, which is the database taking its time.
 
-**Not yet run.** The container needs a Docker daemon.
+**What it found, and it is the point of running trials at all.** `working` reads **55x** more CPU
+than the operating system says the process spent: 56.99 s attributed against 1.03 s actually used.
+Java reports a thread inside a native call as `RUNNABLE`, so eight threads stopped in a socket read
+were counted as 2.85 threads working, and `execute` held 99.97% of the run at `waiting 0.0%`. The
+report's own duty-cycle header said *"threads were on CPU 0.63% of sampled wall time"* twenty lines
+above the column that contradicted it.
+
+**The fix is a bound, not a correction.** `working` now prints as `2.83/0.04` when the measured CPU
+duty cycle cannot support it, with a warning naming the type — both readings stated, because the
+column is right on a CPU-bound operation and only the reader knows which they have. The ceiling is
+`inside x labelledDuty` with a factor of 1.5, and that factor is load-bearing: Lucene reads
+`working 6.40` against a ceiling of 6.40 and Calcite 1.00 against 0.97, so a strict test would have
+accused both of the defect PostgreSQL actually has.
+
+Full record in [trial-jdbc.md](trial-jdbc.md); the measurement is in
+[findings.md](findings.md#working-counts-a-thread-stopped-in-a-socket-read-as-working--by-55x).
 
 ## Phase 6 — thread state and the whole-application coefficient · partly done
 
