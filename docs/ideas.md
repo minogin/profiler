@@ -733,6 +733,28 @@ so it measures resource contention rather than fan-out. Worth keeping the two ap
 **Where it would start:** the invariant, not the curve. It is cheaper, it is a pass/fail rather than a
 number needing interpretation, and phase 5 needs it.
 
+## 23. A graph-traversal bench, the shape the project came from · descoped from phase 5
+
+The project came from an in-memory supply-chain traversal: nanosecond operations, repeated billions
+of times, crossing coroutine suspensions. It is the exact shape this tool was built for and the one
+shape no trial covers, and [plan.md](plan.md) put a bench of it inside phase 5, on the argument that
+what it uniquely exercises — work crossing threads and suspending — has nothing to test until
+propagation exists.
+
+**Taken out of phase 5, for a reason plan.md had already written down.** The original is under NDA,
+so what can be built is a reproduction of it from the public form of the problem. That makes it our
+code, inheriting our assumptions, which is the same document's stated reason it *"cannot substitute
+for pointing the tool at somebody else's"*. It is then neither the real workload nor a trial, and
+phase 5 already gets its known truth from the bench's fork/join mode and its real-code verdict from
+Lucene at eight threads. A third thing that is a weaker version of both is not worth the phase.
+
+**What would change the answer.** If the public form of the problem becomes writable in enough
+detail to be more than a synthetic fan-out — the branching factor, the suspension pattern, the
+sharing between traversals — then it stops being a weaker fork/join bench and becomes the workload,
+and it is worth building. The suspension half in particular is not covered by anything else here:
+the bench's fan-out is threads handing work to threads, while a suspended coroutine occupies no
+thread at all, and phase 5 has to decide deliberately what a span means across one.
+
 ## Promoted to plan.md
 
 **Phase 3.5** is item 9 above, reframed from detecting bad operations to bounding the error on every

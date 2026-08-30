@@ -19,6 +19,11 @@
   * I ask questions, you give advices
   * Then you propose the implementation
   * Only when I confirm I like it, you code.
+* **Ask decisions through the question UI, not as prose.** When a choice is mine to make — scope,
+  ordering, an API's shape, whether something is its own commit — use `AskUserQuestion` so the
+  options are pickable, rather than burying them in a paragraph. Having a recommendation is not a
+  reason to skip it: put the recommendation first and still ask. Prose is for explaining what I
+  chose, not for collecting the choice.
 
 ## Keeping the docs
 Each doc has one job. Write to the right one as you go, not at the end.

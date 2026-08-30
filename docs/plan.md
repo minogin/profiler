@@ -1143,13 +1143,14 @@ worker independently runs its own schedule. Testing cross-thread coarse operatio
 join, which is also what phase 6 needs for occupancy that varies over time. Building it once serves
 both.
 
-**And this is where the graph-traversal workload belongs.** The project came from a system that
-traverses a supply chain in memory, with nanosecond operations and coroutines — the exact shape this
-tool was built for, and the shape no trial has covered. Written from the public form of the problem,
-it is the right bench for this phase and the wrong one for any earlier phase: what it uniquely
-exercises is work crossing threads and suspending, and until propagation exists there is nothing for
-it to test. It is a bench, not a trial — our code, so it inherits our assumptions, which is exactly
-why it cannot substitute for pointing the tool at somebody else's.
+**The graph-traversal workload is out of scope, and the objection came from this document.** It was
+planned here — the supply-chain traversal is the shape the tool was built for and no trial covers
+it — but the original is under NDA, so what could be built is our own reproduction of it: our code,
+inheriting our assumptions, which is exactly the reason plan.md already gave for why it *cannot
+substitute for pointing the tool at somebody else's*. A bench that is neither the real workload nor
+somebody else's code earns nothing this phase does not already get from fork/join plus Lucene.
+Recorded in [ideas.md](ideas.md) item 23 rather than deleted, because the argument may change if the
+public form of the problem ever becomes writable.
 
 **What this unlocks:** per-operation parallelism becomes real rather than trivially 1 — and the
 `waiting` column stops charging a fanned-out request for work its own helper threads were doing.
@@ -1160,6 +1161,48 @@ would give, and that is the question anybody tuning a pool is actually asking. C
 count and re-running is the counterfactual for parallelism, the sibling of the disable-and-re-run
 idea, and it survives this phase rather than being replaced by it —
 [ideas.md](ideas.md) item 22, which already has its first data point.
+
+### The order, and what each step has to show · settled 2026-08-30
+
+Six steps. Each one is a commit, and each has a number that must move before the next begins.
+
+| | | what it must show |
+|---|---|---|
+| **5a** | fork/join in the bench, **propagation off** · **done** | the defect reproduced where the truth is known: parallelism pinned at 1.0, the span accounting for 0.3% of its own work, 76% outside every span. [findings.md](findings.md#crossing-threads) |
+| **5b** | `captureCoarse` / `withCoarse` and the wrappers | parallelism rises to the bench's known fan-out; `busy/exec` returns to its one-thread value; outside-coarse collapses |
+| **5c** | the stale-context detector | a bench mode that stages an escape on purpose, asserting **both** directions the way `--leakcheck` does |
+| **5d** | the `parallelism` column | the identity `in flight × parallelism` becomes printable; [output.md](output.md) gains the paragraph |
+| **5e** | Lucene at eight threads, clock trace beside it | 88.5% outside-coarse collapses; Calcite and Netty stay silent |
+| **5f** | `profiler-coroutines`, a second module | the core POM keeps saying it has no dependencies; the suspended-span decision written down deliberately |
+
+**5a is a commit of its own, before any propagation exists.** It costs a round trip and it is the
+discipline that caught the vacuous error bound in phase 3.5: measure the defect against a known
+truth first, so that when the numbers move there is no question about what moved them.
+
+*What 5a built.* `Fanout` — a helper pool sharing the workers' barrier, so one `stage()` call drives
+every thread in the bench and the helpers take part in the **measure** stage as well as the run. That
+last part is not decoration: fan-out moves the work off the drivers, and truth B is a per-thread
+quantity, so without it the two-truths check would be pricing one set of threads' calls with another
+set's clocks. `Worker.runFannedOut` is a loop of its own rather than a branch in the tuned one, and
+the stall detector does not run in it — a driver parked on a join asked to be parked, and counting
+that as preemption would report the workload as a machine fault.
+
+*What it measured.* One driver against eight helpers reaches **4.24** threads per request by the
+bench's own stopwatch while the profiler reports exactly **1.0000**, and the request's span accounts
+for **0.3%** of the work that request did. Seven drivers against the same eight saturate the pool at
+1.14 and the defect goes quiet — which is `CoarseStat.parallelism`'s documented caveat observed, and
+the reason the assertions are gated on the bench's own measurement rather than run unconditionally.
+
+*The two checks that outlive the defect.* Root calls conserved exactly, dispatched against executed,
+in both configurations; and fan-out having demonstrably happened before anything is asserted about
+it. Both are counts against counts, so they say the same thing at any clock — which mattered: the
+clock fell from 205.5% to 144.4% of nominal across the four minutes of the run.
+
+**Propagation is opt-in wrapping only, for now.** You wrap the `Runnable` or the executor yourself. A
+hand-off you miss then shows up as *lost* attribution — outside-coarse rises, and the report already
+names that — rather than as work silently billed to the wrong operation. An auto-wrapping helper is
+the convenient version and its failure mode is the silent one, so the decision on whether it earns
+its place waits until 5e says what Lucene actually needed.
 
 ### Two parallelisms, and the identity that relates them · settled before any of it was built
 

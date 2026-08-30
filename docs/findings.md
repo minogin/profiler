@@ -1471,6 +1471,48 @@ label to an operation that already has one, because the two id spaces are unconn
 ([ideas.md](ideas.md) item 21); and `:trial-calcite:run` had been broken since the package was
 renamed, invisible because the documented launch is `java -cp`.
 
+## Crossing threads
+
+**The bench can now fan a request out, and with propagation absent the profiler cannot see any of
+it.** Phase 5a: seven drivers and eight helpers, `--coarse --fanout=8 --threads=7 --seconds=60`, run
+2026-08-30. Clock across the run window: mean **175.5%** of nominal, range 90.1–233.1, 120 samples,
+none failed — and falling across it, 205.5% in the first minute against 144.4% in the fourth, which
+is why every check below is a count against a count or a ratio taken inside one run.
+
+| drivers x helpers | requests | bench parallelism | profiler parallelism | work/exec | busy/exec | outside every span |
+|---|---|---|---|---|---|---|
+| 1 x 8 | 290,577 | **4.24** | **1.0000** | 792.2 µs | 2.1 µs | 76.3% |
+| 7 x 8 | 459,925 | 1.14 | 1.0000 | 1.42 ms | 1.0 µs | 76.5% |
+
+**The span accounts for 0.3% of the work its own request did.** That is the Lucene defect with a
+known answer beside it: the driver opens the context, parks on the join, and every helper that does
+the work is outside the span entirely. Lucene's version of this number was `busy/exec` falling from
+14.87 ms to 3.10 ms — a factor of five. Here it is a factor of 380, because the bench's driver does
+*nothing* but dispatch and wait, where a Lucene search thread also works.
+
+**Parallelism reads exactly 1.0000, not approximately.** With no propagation every occupied instance
+is occupied by the one thread that created it, so `inclusiveHits` and `instanceTicks` move in
+lockstep and the ratio is exact. That is what makes it usable as an assertion in both directions —
+it pins the same-thread case today and it is the thing that must move in 5b.
+
+**Root calls are conserved exactly**: 643,925,504 executed against 643,925,504 dispatched at one
+driver, and 1,019,188,480 against 1,019,188,480 at seven. Fan-out moves work and neither invents nor
+loses it. Counts on both sides, so this says the same thing whatever speed the machine chose.
+
+**Saturation makes the defect invisible, and that is the honest answer rather than a let-off.** At
+seven drivers against eight helpers there is nothing left to fan out to: the bench's own stopwatch
+measures 1.14 threads per request, so the parallelism the code could have had cannot be observed for
+want of a free thread. This is `CoarseStat.parallelism`'s documented caveat —
+*"what gets measured is `min(what the code could do, threads actually free)`"* — observed rather than
+argued. It is also why the checks are gated on the bench's measured parallelism and not run
+unconditionally: a saturated configuration would pass every "the profiler cannot see it" assertion
+trivially, and that is the shape of vacuous pass this project has already been caught by once.
+
+**The outside-every-span detector reads 76% in both configurations**, saturated or not, because it
+measures where the *labelled work* ran rather than how many threads were on a request. It is the
+more sensitive of the two signals, exactly as it was on Lucene (88.5% outside against 24.5%
+waiting).
+
 ## Open questions
 
 **What the bench's duration tolerance should be on a warm machine.** Settled above that `--coarse` is

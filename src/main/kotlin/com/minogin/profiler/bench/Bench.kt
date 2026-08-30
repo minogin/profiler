@@ -10,7 +10,7 @@ const val STAGE_STOP = 3
 const val STAGE_HOOK = 4
 
 /** Root calls between clock checks: nanoTime must not end up inside the hot loop. */
-private const val CLOCK_CHUNK = 256
+internal const val CLOCK_CHUNK = 256
 
 /**
  * A gap between two consecutive clock checks longer than this is taken to be the thread having
@@ -77,6 +77,15 @@ class Worker(
     private val barrier: CyclicBarrier,
     private val contended: ContendedLock? = null,
     private val lockOpId: Int = -1,
+    /**
+     * The helper pool this worker fans its requests out to, or null for the inline loop.
+     *
+     * When it is set the worker stops being the thing that runs the work and becomes the thing that
+     * *drives* a request: it opens the span, dispatches, parks on the join, and closes it. That is
+     * the whole of phase 5's subject, and it is a separate loop rather than a branch inside the
+     * existing one — see [runFannedOut].
+     */
+    private val fanout: Fanout? = null,
 ) : Thread("bench-$id") {
 
     @Volatile var stage: Int = 0
@@ -131,6 +140,30 @@ class Worker(
     var requestCount: Int = 0; private set
     var requestsDropped: Long = 0; private set
 
+    /**
+     * The fan-out truth, timed by the driver and the helpers between them: how long helpers were
+     * *inside* this worker's requests, and how long those requests lasted.
+     *
+     * Their ratio is the measured parallelism, and it is a direct measurement in the same sense the
+     * span is — two clock readings around something that lasts microseconds — rather than anything
+     * reconstructed from the call graph. That is what makes it a truth the profiler's own
+     * `inclusiveHits / instanceTicks` can be held against.
+     *
+     * Summed over requests rather than averaged per request, so long requests weigh more than short
+     * ones. The profiler's ratio is a sum over ticks and weighs them the same way; averaging here
+     * would compare two different means and the gap would be arithmetic rather than a finding.
+     */
+    var fanoutOccupancyNanos: Long = 0; private set
+    var fanoutSpanNanos: Long = 0; private set
+
+    /**
+     * Chunks this worker dispatched. Times [CLOCK_CHUNK] it is exactly how many root calls its
+     * requests asked for, which is the conservation check: the helpers must have run precisely that
+     * many and not one more. Counts, not durations, so it says the same thing whatever speed the
+     * machine chose to run at.
+     */
+    var fanoutChunks: Long = 0; private set
+
     /** Hook analysis: the hook timed alone, and leaf operations timed with and without it. */
     var hookDirect: Double = Double.NaN
         private set
@@ -158,6 +191,9 @@ class Worker(
         maxLockWaitNanos = 0
         requestCount = 0
         requestsDropped = 0
+        fanoutOccupancyNanos = 0
+        fanoutSpanNanos = 0
+        fanoutChunks = 0
     }
 
     override fun run() {
@@ -185,6 +221,11 @@ class Worker(
     }
 
     private fun runUntilDeadline() {
+        val f = fanout
+        if (f != null && w.coarseLabels && labeled) {
+            runFannedOut(f, requestType)
+            return
+        }
         var s = state
         var i = idx
         val sch = w.schedule
@@ -277,6 +318,62 @@ class Worker(
 
     private fun recordRequest(nanos: Long) {
         if (requestCount < requestSpans.size) requestSpans[requestCount++] = nanos else requestsDropped++
+    }
+
+    /**
+     * The same run, with the request's chunks handed to the helper pool instead of executed here.
+     *
+     * A loop of its own rather than a branch inside [runUntilDeadline]. The inline loop's shape has
+     * been tuned — one perfectly predicted branch per root call, the clock read once per chunk — and
+     * threading a second mode through it would change the very thing every earlier measurement was
+     * taken on. Here the driver executes no operations at all, so none of that applies.
+     *
+     * **The stall detector does not run here, and that is not an omission.** It exists to notice the
+     * scheduler taking the core away from a thread that wanted it. This thread is parked on a join
+     * because it asked to be, for most of every request, and counting that as preemption would
+     * report the workload as a machine fault. Same reasoning that already exempts the contended
+     * lock, and the same conclusion.
+     *
+     * **The context stays on this thread.** Nothing carries it to a helper, which is the defect 5a
+     * exists to reproduce: the request's span covers work that its own samples will never see.
+     */
+    private fun runFannedOut(f: Fanout, reqType: Int) {
+        var i = idx
+        val d = deadline
+        val started = System.nanoTime()
+        var reqIdx = id * 7
+        var occ = 0L
+        var spans = 0L
+        var dispatched = 0L
+        while (true) {
+            val chunks = REQUEST_CHUNKS[reqIdx++ and (REQUEST_CHUNKS.size - 1)]
+            val req = Fanout.Request(chunks)
+            val reqStart = System.nanoTime()
+            // enter/exit and not the block form, for the reason the inline loop gives: it is the
+            // shape third-party code forces on you, so the bench exercises the dangerous one.
+            enterCoarse(reqType)
+            var c = 0
+            while (c < chunks) {
+                // Each chunk gets its own window of the schedule, so the run covers exactly what it
+                // would have covered inline and the call counts are conserved.
+                f.submit(i, CLOCK_CHUNK, req)
+                i += CLOCK_CHUNK
+                c++
+            }
+            dispatched += chunks
+            f.await(req)
+            exitCoarse()
+            val span = System.nanoTime() - reqStart
+            recordRequest(span)
+            occ += req.occupancyNanos.get()
+            spans += span
+            if (System.nanoTime() >= d) break
+        }
+        fanoutOccupancyNanos = occ
+        fanoutSpanNanos = spans
+        fanoutChunks = dispatched
+        runWallNanos = System.nanoTime() - started
+        idx = i
     }
 
     /**
@@ -480,16 +577,36 @@ class Bench(
     val workload: Workload,
     val contended: ContendedLock? = null,
     lockOpId: Int = -1,
+    /**
+     * Helper threads the workers fan their requests out to. Zero — the default — is the bench as it
+     * has always been, with no pool constructed and no extra thread in the process.
+     */
+    val helpers: Int = 0,
 ) {
-    private val barrier = CyclicBarrier(threads + 1)
+    private val barrier = CyclicBarrier(threads + helpers + 1)
+
+    /**
+     * The helper pool, sharing the workers' barrier so one [stage] call drives every thread in the
+     * bench. Helpers take part in the measure stage as well as the run, which is what keeps the
+     * two-truths check valid when the work has moved off the workers — see [Fanout].
+     */
+    val fanout = if (helpers > 0) Fanout(helpers, workload, labeled, barrier) else null
+
     val workers = List(threads) {
-        Worker(it, it < activeThreads, labeled, workload, barrier, contended, lockOpId)
+        Worker(it, it < activeThreads, labeled, workload, barrier, contended, lockOpId, fanout)
     }
 
-    fun start() = workers.forEach { it.isDaemon = true; it.start() }
+    /** Every thread that runs bench work: the active drivers and the helpers behind them. */
+    val busyThreads: Int get() = activeThreads + helpers
+
+    fun start() {
+        fanout?.start()
+        workers.forEach { it.isDaemon = true; it.start() }
+    }
 
     private fun stage(s: Int) {
         workers.forEach { it.stage = s }
+        fanout?.stage = s
         barrier.await()
         barrier.await()
     }
@@ -502,7 +619,9 @@ class Bench(
     fun runStart(durationNanos: Long): Long {
         val d = System.nanoTime() + durationNanos
         workers.forEach { it.deadline = d }
+        fanout?.deadline = d
         workers.forEach { it.stage = STAGE_RUN }
+        fanout?.stage = STAGE_RUN
         barrier.await()
         return System.nanoTime()
     }
@@ -523,9 +642,26 @@ class Bench(
     fun stop() {
         stage(STAGE_STOP)
         workers.forEach { it.join() }
+        fanout?.join()
     }
 
-    fun totalRootCalls(): Long = workers.sumOf { w -> w.rootCalls.sum() }
+    /** Root calls wherever they ran. In fan-out mode nearly all of them are on the helpers. */
+    fun totalRootCalls(): Long =
+        workers.sumOf { w -> w.rootCalls.sum() } + (fanout?.rootCalls()?.sumOf { it.sum() } ?: 0L)
+
+    /**
+     * The bench's own measurement of how many threads were inside one request at once.
+     *
+     * Helper occupancy over request span, summed across drivers. It is 1.0 when the pool is
+     * saturated and there is nothing left to fan out to, which is not a defect but the honest answer
+     * — and it is why the profiler's number is only held against this where this says fan-out
+     * actually happened.
+     */
+    fun measuredParallelism(): Double {
+        val occ = workers.sumOf { it.fanoutOccupancyNanos }
+        val span = workers.sumOf { it.fanoutSpanNanos }
+        return if (span == 0L) Double.NaN else occ.toDouble() / span
+    }
 
     /** The workers' own account of the last run: wall time, time off the CPU, and how often. */
     fun stalls(): Stalls = workers.filter { it.active }.let { active ->
@@ -541,5 +677,8 @@ class Bench(
         )
     }
 
-    fun resetCounters() = workers.forEach { it.resetCounters() }
+    fun resetCounters() {
+        workers.forEach { it.resetCounters() }
+        fanout?.resetCounters()
+    }
 }

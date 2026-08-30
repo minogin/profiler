@@ -118,6 +118,17 @@ fun main(args: Array<String>) {
     // by default keeps every figure already in findings.md comparable with a fresh run.
     val coarseLabels = opt["coarse"] != null
 
+    // --fanout=<helpers>. Phase 5a: requests hand their chunks to a pool instead of running them
+    // inline, so a coarse context has something to fail to cross. It runs two configurations rather
+    // than one — one driver and many, against the same pool — because the second is not a bigger
+    // version of the first: with as many drivers as helpers the pool saturates and each request gets
+    // roughly one thread, so parallelism legitimately falls back to 1 and the defect goes quiet.
+    // Seeing both is what stops the check being read as a statement about fan-out in general.
+    val fanoutHelpers = opt["fanout"]?.toInt()
+    require(fanoutHelpers == null || (coarseLabels && labels)) {
+        "--fanout needs --coarse and labels: the context it is trying to cross is a coarse one"
+    }
+
 
     // Whether each hit also records the owning thread's state. A switch for the same reason
     // --labels and --sampler are: a cost that is always on can only be priced by argument.
@@ -146,9 +157,14 @@ fun main(args: Array<String>) {
     // against rather than a hazard to avoid.
     val oversubscribe = opt["oversubscribe"] != null
     val maxThreads = if (oversubscribe) 1024 else if (sampling) cores - 1 else cores
-    for (n in sweep ?: listOf(threads)) {
+    // The helpers count against the ceiling too. A fan-out run holds drivers *and* helpers at once,
+    // and the largest configuration it runs is `threads` drivers against the whole pool — so the
+    // number to check is their sum, not the driver count. Without this, --fanout=8 --threads=8 would
+    // pass a guard written for 8 threads and then put 16 of them on the machine.
+    for (n in sweep ?: listOf(threads + (fanoutHelpers ?: 0))) {
         require(n in 1..maxThreads) {
-            "thread count $n is outside 1..$maxThreads " +
+            (if (fanoutHelpers != null) "drivers + helpers = $threads + $fanoutHelpers " else "") +
+                    "thread count $n is outside 1..$maxThreads " +
                     (if (sampling) "(the sampler needs one of the $cores cores; --sampler=off lifts this, " +
                             "--oversubscribe allows more threads than cores on purpose)"
                     else "($cores cores; --oversubscribe allows more on purpose)")
@@ -326,6 +342,8 @@ fun main(args: Array<String>) {
         runVerify(threads, workload)
     } else if (sweep != null) {
         runSweep(sweep, labels, workload, seconds, warmedUp)
+    } else if (fanoutHelpers != null) {
+        runFanout(fanoutHelpers, threads, labels, workload, seconds, stepMillis, sampleState)
     } else {
         val bench = Bench(threads, activeThreads, labels, workload, contended, lockOpId)
         bench.start()
@@ -418,7 +436,11 @@ internal fun measureOnce(bench: Bench, seconds: Int, sampler: Sampler?): Outcome
     // Snapshot before the batch measurement. That stage runs execLabeled tens of thousands of
     // times to time the labelled path, and every one of those calls increments the same counters.
     // Reading afterwards counted the measurement as if it were the workload.
-    val hookCalls = LongArray(OP_COUNT) { id -> active.sumOf { it.slot.countOf(id) } }
+    // Helper slots included: in fan-out mode nearly every labelled call happens on one of them, and
+    // a cross-check that ignored them would compare the graph's expansion against a fraction of the
+    // hook's own count and call the difference a defect.
+    val countingSlots = active.map { it.slot } + (bench.fanout?.slots() ?: emptyList())
+    val hookCalls = LongArray(OP_COUNT) { id -> countingSlots.sumOf { it.countOf(id) } }
     // And the coarse aggregates for the same reason and more urgently: the batch measurement calls
     // execLabeled tens of thousands of times, so with the coarse tier on it records tens of
     // thousands of spans that belong to no request and are outside the sampled window entirely.
@@ -437,11 +459,17 @@ internal fun measureOnce(bench: Bench, seconds: Int, sampler: Sampler?): Outcome
     val subtree = subtreeCounts()
     val totalCalls = LongArray(OP_COUNT)
     val selfB = DoubleArray(OP_COUNT)
-    for (w in active) {
-        val callsHere = expandCalls(w.rootCalls, subtree)
+    // Every thread that ran root calls, each paired with the durations it measured itself. In
+    // fan-out mode the calls are on the helpers and the drivers contribute nothing but zeroes, so
+    // the pairing is what keeps truth B a per-thread quantity rather than an average over threads
+    // that were doing different things.
+    val counted = active.map { it.rootCalls to it.measuredSelf } +
+            (bench.fanout?.let { f -> f.rootCalls().zip(f.measuredSelf()) } ?: emptyList())
+    for ((rootCallsHere, selfHere) in counted) {
+        val callsHere = expandCalls(rootCallsHere, subtree)
         for (op in 0 until OP_COUNT) {
             totalCalls[op] += callsHere[op]
-            selfB[op] += callsHere[op] * w.measuredSelf[op]
+            selfB[op] += callsHere[op] * selfHere[op]
         }
     }
 
@@ -487,6 +515,56 @@ internal fun measureOnce(bench: Bench, seconds: Int, sampler: Sampler?): Outcome
         gcCollections = gcAfter.first - gcBefore.first,
         gcMillis = gcAfter.second - gcBefore.second,
     )
+}
+
+/**
+ * Phase 5a: the same pool of helpers driven by one request at a time and by many.
+ *
+ * Two configurations rather than one, because the second is not more of the first. With one driver
+ * the pool is free and a request really does get several threads; with as many drivers as helpers
+ * the pool is saturated and each request gets about one, so the parallelism the code could have had
+ * cannot be observed at all. Both are true statements about the same code, and printing only the
+ * first would read as a claim that fan-out always shows up.
+ *
+ * The sampler stays **on**, unlike [runSweep]. That sweep varies the bench and a spinning sampler
+ * would occupy a core and change what is being varied; this one is a measurement *of* the sampler,
+ * so there is nothing to hold apart. One calibration and one warm-up across both entries, for the
+ * same reason the thread sweep shares them.
+ */
+private fun runFanout(
+    helpers: Int,
+    drivers: Int,
+    labels: Boolean,
+    workload: Workload,
+    seconds: Int,
+    stepMillis: Double,
+    sampleState: Boolean,
+): Boolean {
+    val configs = listOf(1, drivers).distinct()
+    val rows = ArrayList<FanoutRow>()
+    for (d in configs) {
+        println("\n--- Fan-out: $d driver(s) x $helpers helpers, $seconds s ---")
+        val bench = Bench(d, d, labels, workload, helpers = helpers)
+        bench.start()
+        // The helpers are threads the JIT has never seen run this code. Without a re-warm the first
+        // entry would measure compilation and the second would not, and the difference would be
+        // read as the thing being varied.
+        bench.run(SWEEP_REWARM_NANOS)
+        val sampler = Sampler((stepMillis * 1_000_000).toLong(), sampleState = sampleState)
+        val outcome = measureOnce(bench, seconds, sampler)
+        println(
+            String.format(
+                Locale.ROOT, "  %,.0f root calls/s, price x%.3f, scatter %.2f%%",
+                outcome.throughput, outcome.loadFactor, outcome.maxScatter * 100
+            )
+        )
+        rows.add(fanoutRow(bench, outcome, sampler, stepMillis))
+        // Before the next entry starts: an open context would be billed across the boundary, and a
+        // driver that leaked one is a defect this phase must not be allowed to introduce quietly.
+        if (!Profiler.expectBalanced()) println("  ! a label was left open at the end of this entry")
+        bench.stop()
+    }
+    return reportFanout(rows)
 }
 
 /**
