@@ -298,6 +298,32 @@ class CoarseTest {
         assertEquals(0.0, r.staleContextShare)
     }
 
+    // --- the legend, which is four lines unless you ask -----------------------------
+
+    @Test
+    fun `the default legend is the traps and nothing else`() {
+        val c = stat(count = 10, sumNanos = 10_000_000, hits = 100, running = 100, instanceTicks = 100)
+        val text = report(listOf(c)).render()
+        assertTrue("occupancy% is sampled thread-time, NOT CPU" in text, "the traps are not printed")
+        assertTrue("render(legend = true)" in text, "there is no way to find the rest")
+        // The reference half is what makes it thirty-seven lines, and it is in output.md.
+        assertTrue("noise is 1/sqrt(hits)" !in text, "the full legend printed by default")
+        // The legend section itself, which is the thing that was thirty-seven lines.
+        val legendLines = text.lines().dropWhile { !it.startsWith("HOW TO READ THIS") }
+            .filter { it.isNotBlank() }
+        assertTrue(legendLines.size <= 7, "the default legend is ${legendLines.size} lines, not a handful")
+    }
+
+    @Test
+    fun `asking for the legend gets the whole thing`() {
+        val c = stat(count = 10, sumNanos = 10_000_000, hits = 100, running = 100, instanceTicks = 100)
+        val text = report(listOf(c)).render(legend = true)
+        assertTrue("occupancy% is sampled thread-time, NOT CPU" in text, "the traps went missing")
+        assertTrue("noise is 1/sqrt(hits)" in text, "the full legend was not printed")
+        assertTrue("worth 275x when" in text, "the counterfactual argument was not printed")
+        assertTrue("the 'was:' lines are the cross-tabulation" in text, "the coarse half was not printed")
+    }
+
     private fun stat(
         count: Long, sumNanos: Long, hits: Long, running: Long,
         inclusive: Long = hits, runningInclusive: Long = running,

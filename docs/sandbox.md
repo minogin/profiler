@@ -63,9 +63,20 @@ The verbosity came from a principle this project repeats often — a number nobo
 worse than no number — applied without ever asking *where on the page* the explanation belongs.
 Those are two different decisions and only the first one had been made.
 
-**Fixed:** named section headings with blank lines, every legend collected at the bottom under
-`HOW TO READ THIS`, an empty table replaced by a line saying why it is empty, and rules printed only
-where there is something to rule off.
+**Fixed:** named section headings with blank lines, an empty table replaced by a line saying why it
+is empty, and rules printed only where there is something to rule off.
+
+**And then the legend was cut from thirty-seven lines to five.** The first fix only *moved* it to the
+bottom, which was my choice by default rather than a decision anybody made — Andrey asked whether it
+was still always shown, which is the question that settled it. What stays on is the five things that
+will make a reader draw the wrong conclusion; the rest is reference and lives in
+[output.md](output.md). `render(legend = true)` prints everything.
+
+A follow-on he also caught: the heading said `OPERATIONS` beside `COARSE OPERATIONS`, making fine the
+unmarked default and coarse the exception — the exact asymmetry the `registerFine`/`registerCoarse`
+rename had removed from the API an hour earlier, reproduced in the output. Now `FINE OPERATIONS`.
+
+The whole report for a one-operation run is **23 non-blank lines**, against roughly sixty before.
 
 **And two columns were fixed by naming rather than by explaining**, which was Andrey's suggestion and
 is the better half of the change: `share` → `occupancy%`, since it is the same quantity as the

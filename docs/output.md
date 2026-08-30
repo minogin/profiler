@@ -103,11 +103,20 @@ Sections, in order, each with a heading and a blank line before it:
 
 ```
 (header)            how many samples, what they cover, and the duty cycle that bounds them
-OPERATIONS          the fine table, or one line saying why it is empty
+FINE OPERATIONS     the fine table, or one line saying why it is empty
 COARSE OPERATIONS   the coarse table, present only if you placed a coarse label
 (warnings)          anything the run wants to tell you about itself
-HOW TO READ THIS    every column explained, once, at the bottom
+HOW TO READ THIS    five lines: the things that will make you draw the wrong conclusion
 ```
+
+**The legend is five lines, not thirty-seven.** `render()` prints only what will actively mislead
+you — that `occupancy%` is not CPU, that `waiting` is waiting another thread caused, that
+`in flight` is your load and not your code, that a share is not a counterfactual, and that `working`
+bounds the speedup from above rather than being it. Everything else — how `noise` is computed, the
+convoy arithmetic behind `elapsed`, what the `was:` lines are — is reference, and reference belongs
+here, where it is read once instead of skipped thirty times.
+
+`render(legend = true)` prints the full text, and this document is the same content at length.
 
 **The explanations are last on purpose.** They used to sit *between* the two tables, so the report
 read numbers, prose, numbers, prose — reported the first time somebody who had not written it tried

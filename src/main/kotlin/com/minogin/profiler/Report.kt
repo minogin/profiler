@@ -939,9 +939,28 @@ class Report internal constructor(
      * ⚠ Every line here is also a paragraph in docs/output.md. Reword one, reword the other, in the
      * same commit.
      */
-    private fun StringBuilder.renderLegend() {
+    private fun StringBuilder.renderLegend(full: Boolean) {
         appendLine()
         appendLine("HOW TO READ THIS")
+        // Four lines, always. Not a summary of the rest — the four things that will make a reader
+        // draw the wrong conclusion, and nothing else. Everything below them is reference, and
+        // reference belongs in output.md where it can be read once rather than skipped thirty times.
+        appendLine("  occupancy% is sampled thread-time, NOT CPU")
+        appendLine("  waiting is waiting another thread caused; preemption reads runnable")
+        appendLine("  in flight tracks your load, not your code")
+        appendLine("  a share is where time went, NOT what removing the operation would save")
+        if (coarse.any { it.count > 0 || it.inclusiveHits > 0 }) {
+            appendLine("  working is an upper bound on the speedup, not the speedup")
+        }
+        if (!full) {
+            appendLine("  full notes: docs/output.md, or render(legend = true)")
+            return
+        }
+        appendLine()
+        appendLine("a share is where time went. It is not what removing the operation would save: in the one")
+        appendLine("  trial run against real code, an operation holding 46% of the time was worth 275x when")
+        appendLine("  removed, because it was creating work for everything else as well as doing its own. The")
+        appendLine("  two numbers are different questions and the gap can be orders of magnitude")
         appendLine("occupancy% and occupancy are the same quantity, relative and absolute: sampled thread-time,")
         appendLine("  with waiting counted in full. NOT CPU - the duty cycle above bounds how much of it was")
         appendLine("  waiting. occupancy is absolute, so unlike the percentage it does not move when a label is")
@@ -1129,7 +1148,10 @@ class Report internal constructor(
         }
     }
 
-    fun render(): String = buildString {
+    /**
+     * @param legend every column explained, at the bottom. Off by default: see [renderLegend].
+     */
+    fun render(legend: Boolean = false): String = buildString {
         val achieved = if (ticks > 1) samplingSpanNanos.toDouble() / (ticks - 1) / 1e6 else Double.NaN
         if (failure != null) {
             appendLine("!".repeat(WIDTH))
@@ -1191,7 +1213,10 @@ class Report internal constructor(
         // numbers below are worth, one against chance and one against stalling.
         for (l in duty.lines()) appendLine(l)
         appendLine()
-        appendLine("OPERATIONS")
+        // FINE, not bare OPERATIONS. `OPERATIONS` beside `COARSE OPERATIONS` makes one tier the
+        // default and the other the exception, which is the asymmetry `registerFine`/`registerCoarse`
+        // was introduced to remove — reproduced in the output an hour after it was fixed in the API.
+        appendLine("FINE OPERATIONS")
         if (operations.any { it.hits > 0 }) appendLine(
             String.format(
                 Locale.ROOT, "%-26s %8s %10s %8s %9s %11s %13s %8s %6s %10s %7s",
@@ -1303,12 +1328,7 @@ class Report internal constructor(
         appendLine("-".repeat(WIDTH))
         // Said in the output rather than in a document, because the one time it mattered it was
         // worth a factor of 275 and nothing on the screen hinted at it.
-        renderLegend()
-        appendLine()
-        appendLine("A share is where time went. It is not what removing the operation would save:")
-        appendLine("in the one trial run against real code, an operation holding 46% of the time was worth")
-        appendLine("275x when removed, because it was creating work for everything else as well as doing")
-        appendLine("its own. The two numbers are different questions and the gap can be orders of magnitude.")
+        renderLegend(legend)
     }
 
     companion object {
