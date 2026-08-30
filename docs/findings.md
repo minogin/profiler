@@ -1721,6 +1721,46 @@ exactly as the fine tier's *"at most N pp of any share"* line already is. So it 
 Both CPU-bound trials sit *at* their ceiling. Without the factor, Lucene would have been accused of
 the defect PostgreSQL actually has.
 
+### Reading a thread's CPU is cheap; its clock is 16x too coarse to use per tick
+
+**The measurement that decides how phase 6 is built, and it answers the opposite of what the plan
+assumed.** Run 2026-08-30, `--cpucost --threads=8`, eight victims spinning so the readings are of
+*running* threads, median of nine trials of 200,000 calls each.
+
+```
+getCurrentThreadCpuTime(), own thread       245.0 ns
+getThreadCpuTime(id), another thread        284.7 ns   <- the form a sampler needs
+a walk of every victim                        2.3 us   (8 threads, measured not multiplied)
+clock resolution                           15.625 ms
+```
+
+**Cost is not the obstacle.** A walk of eight threads every tick is **0.2%** of a 1 ms step, and 64
+threads would be 1.8%. Reading the per-thread CPU clock on every tick is affordable.
+
+**The 130.9 µs everyone was reasoning from is not a call cost.** It is `DutyReport.maxSampleNanos` —
+the *dearest walk observed over a whole run*, a maximum including walks that were descheduled
+mid-flight — and it is printed in the report's own header as *"dearest walk 130.9 us"*.
+[ideas.md](ideas.md) item 24 and phase 6 both treated it as the price of a CPU reading, which
+overstated it by about **57x**. A maximum is not a cost, and this is the second time in this project
+a maximum has been read as one.
+
+**Resolution is the obstacle, and no implementation can get around it.** 15.625 ms is the Windows
+scheduler quantum and **16x the sampling step**. A clock that advances in steps that large cannot
+attribute time to a millisecond however cheap it is to read: nearly every read returns the previous
+value, and each delta lands entirely in whichever tick happened to cross a quantum boundary rather
+than being spread over the sixteen ticks that earned it.
+
+| | survives | ruled out |
+|---|---|---|
+| **per window** — a second, many quanta | the duty cycle, and `working`'s ceiling | |
+| **per tick, per label, per execution** | | anything shorter than a scheduler quantum |
+
+**What this settles.** Phase 6's coefficient cannot be built on CPU time, so it has to be built on
+thread state — which trial 4 measured to be wrong by 55x on a workload that waits outside the JVM.
+The honest form is the one `working` adopted after that trial: build the number on state, and print
+the duty-cycle bound beside it so a reader can see when it cannot be supported. That is not a
+compromise reached for want of effort; it is what the platform allows.
+
 ## Open questions
 
 **What the bench's duration tolerance should be on a warm machine.** Settled above that `--coarse` is

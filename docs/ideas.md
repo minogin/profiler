@@ -755,7 +755,7 @@ and it is worth building. The suspension half in particular is not covered by an
 the bench's fan-out is threads handing work to threads, while a suspended coroutine occupies no
 thread at all, and phase 5 has to decide deliberately what a span means across one.
 
-## 24. Measure CPU per label, instead of bounding thread state after the fact · open
+## 24. Measure CPU per label, instead of bounding thread state after the fact · **closed: the clock is too coarse**
 
 Trial 4 measured `working` reading **55x** more CPU than the operating system says the process spent,
 because Java reports a thread inside a native call as `RUNNABLE` and a socket read is a native call.
@@ -785,9 +785,69 @@ the observer costs nothing the workload can feel.
 - **The platform's own counters.** JFR's `ThreadCPULoad`, or perf on Linux. Foreign machinery, and
   the JFR output in phase 8 has to be built anyway.
 
-**What would settle it:** measure `getThreadCpuTime` per call on this machine as carefully as the
-stack walk was measured, then decide. 130.9 µs is a *walk*; one call may be far cheaper, and the
-whole question turns on that number.
+**Measured, and it is closed.** `--cpucost` on 2026-08-30: a call for another thread costs
+**284.7 ns** and a walk of eight threads **2.3 µs**, which is 0.2% of a 1 ms step. Cost was never the
+obstacle, and the 130.9 µs this entry was written around is not a call cost at all — it is the
+*dearest walk observed over a run*, which overstated the price by about 57x.
+
+**What closes it is the resolution: 15.625 ms, sixteen times the sampling step.** A clock advancing
+in quanta that large cannot attribute time to a millisecond however cheap it is to read, and no
+implementation gets around a scheduler quantum. Per-window CPU survives — that is what the duty cycle
+already is, and what `working`'s ceiling is computed from — and per-tick, per-label and
+per-execution attribution do not. Recorded in
+[findings.md](findings.md#reading-a-threads-cpu-is-cheap-its-clock-is-16x-too-coarse-to-use-per-tick).
+
+**What would reopen it:** a platform whose per-thread CPU clock is finer than the sampling step.
+Linux's `clock_gettime(CLOCK_THREAD_CPUTIME_ID)` is nanosecond-resolution on paper, so the same
+measurement on Linux might come out differently — and the answer would then be *platform-dependent*,
+which is its own thing to report rather than a fix.
+
+## 25. Coroutine propagation, and the reason a suspended coroutine is the easy case · deferred
+
+Phase 5f was going to be a `profiler-coroutines` module: a `ThreadContextElement` that mounts the
+captured context on every resume and restores it on every suspension. It is not built, for the reason
+that descoped item 23 — the mechanism is [withCoarse] under another name, and without a coroutine
+workload to point it at it would be a mechanism nobody has watched work on anything real.
+
+**What it would have taught us is worth more than the module, and none of it needs the module.**
+
+### A suspended coroutine occupies no thread, so it is the one wait this tool cannot get wrong
+
+Three ways of waiting, and the tool has now met all three:
+
+| | what the sampler sees | verdict |
+|---|---|---|
+| a thread blocked in a socket read | a thread, `RUNNABLE`, holding the context | **wrong by 55x**, [trial 4](trial-jdbc.md) |
+| a thread parked on a join | a thread, `WAITING` | correct |
+| **a suspended coroutine** | **nothing at all** | correct, and it cannot be otherwise |
+
+That inverts the expectation the plan carried. Coroutines were filed under *hazard* — item 8 lists
+them first among the ways attribution breaks — but for the **coarse** tier they are the benign case.
+The blindness trial 4 found cannot arise, because there is no thread to misread. Waiting is visible
+as absence rather than as a state that has to be interrogated, and absence is not something
+`Thread.getState` can lie about.
+
+It is also an argument about workloads rather than about profilers, and worth saying out loud: *an
+application that suspends instead of blocking is easier to measure honestly.*
+
+### `inside` counts threads, and a coroutine user will read it as coroutines
+
+A request fanned across a hundred coroutines on four dispatcher threads reads `inside <= 4`. That is
+honest — the column is documented as *threads in one execution* — but it is not the number a
+coroutine user expects, and the gap between "concurrent pieces of work" and "threads carrying them"
+is exactly what coroutines exist to open up. Whatever the module eventually looks like, the column
+needs a sentence about this.
+
+### The fine tier's safety with coroutines is still an argument, not a measurement
+
+Item 8 reasons that `op(id) { }` is structurally safe because a suspending body is by construction
+not fine-grained: a suspension point costs a continuation allocation and a dispatch, hundreds of
+nanoseconds, against the tens the fine tier exists for. Sound, and never tested. A coroutine workload
+could put a label around a suspending body on purpose and watch what happens, which is the only way
+that claim stops being a claim.
+
+**What would change the answer:** a real coroutine workload to point it at. Item 23's, if it ever
+becomes writable, or a third-party one — the same standard every other trial here is held to.
 
 ## Promoted to plan.md
 

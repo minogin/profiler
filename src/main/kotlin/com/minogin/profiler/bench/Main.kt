@@ -192,6 +192,14 @@ fun main(args: Array<String>) {
     // What a cross-thread stack costs — the measurement that decides whether the tool may ever take
     // one to say *where* its unlabelled time went. Its own mode because it registers no operations
     // and needs no calibration beyond the busy loop.
+    // What a per-thread CPU reading costs and what resolution it answers at — the two numbers that
+    // decide whether `working` can be built on CPU instead of thread state. Its own mode for the
+    // same reason --stackcost is: it registers no operations and needs no calibration.
+    if (opt["cpucost"] != null) {
+        runCpuCost(victims = activeThreads)
+        return
+    }
+
     if (opt["stackcost"] != null) {
         runStackCost(victims = activeThreads)
         return

@@ -299,6 +299,11 @@ check, the long-execution verdict, the registry, and the report's promises about
 expectations are the numbers recorded in `docs/findings.md`, which makes a finding something that
 fails a build rather than something somebody has to re-run a trial to notice.
 
+**Use `:run`, with the colon.** An unqualified `gradlew run` matches the `run` task in *every*
+subproject, so it runs the bench and then all four trials in turn — minutes of extra load, and the
+next run starts on a machine that is no longer quiet. `gradlew :run` is the bench alone;
+`gradlew :trial-lucene:run` is one trial.
+
 ### Every flag
 
 Six of them pick a **mode** — the bench does that one thing and exits. Without one it runs the
@@ -314,6 +319,7 @@ workload and checks itself against the truth.
 | `--leakcheck` | stages a leaked label on purpose and asserts it stops the session, and *only* under strict |
 | `--fanout=N` | requests hand their chunks to a pool of N helpers, at one driver and at `--threads` of them. Checks the sampled threads-per-request against the bench's own stopwatch. Needs `--coarse`; add `--propagate=off` to run the same thing with the context left behind, which is what the defect looks like |
 | `--escape` | with `--fanout`, each request also dispatches a chunk nobody waits for, so it outlives the span carrying it. The stale-context detector must see it, and must stay silent without it |
+| `--cpucost` | what a per-thread CPU reading costs and at what resolution it answers — the two numbers that decide whether occupancy can be measured from CPU rather than from thread state |
 
 The rest shape the run:
 

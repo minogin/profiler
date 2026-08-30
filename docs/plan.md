@@ -1174,7 +1174,7 @@ Six steps. Each one is a commit, and each has a number that must move before the
 | **5c** | the stale-context detector · **done** | `--fanout --escape` stages an un-joined chunk per request: 18.33% of coarse thread-time caught inside a finished execution, against **0.00%** with nothing staged. Fatal under strict, and both rungs of the ladder now fire under `--leakcheck`. [findings.md](findings.md#work-that-outlives-the-span-that-forked-it) |
 | **5d** | the `inside` and `working` columns · **done in 5b** | landed with the mechanism rather than after it, because the pair is what the measurement is read through. See "Two parallelisms" below, which needed amending: there are three groupings, not two |
 | **5e** | Lucene at eight threads, clock trace beside it · **done** | 88.5% outside-coarse went silent, `working` 0.76 → 6.32, `waiting` 24.2% → 3.8%, mean span unchanged at 4.0 ms. Calcite and Netty silent. [findings.md](findings.md#propagation-on-lucene-and-what-working-is-not) |
-| **5f** | `profiler-coroutines`, a second module | the core POM keeps saying it has no dependencies; the suspended-span decision written down deliberately |
+| **5f** | `profiler-coroutines`, a second module · **not built, and the reasoning is recorded** | the mechanism is `withCoarse` under another name, and without a coroutine workload it would be a mechanism nobody has watched work on anything real. What it would have taught us is written down instead — [ideas.md](ideas.md) item 25 |
 
 **5a is a commit of its own, before any propagation exists.** It costs a round trip and it is the
 discipline that caught the vacuous error bound in phase 3.5: measure the defect against a known
@@ -1278,6 +1278,19 @@ Lucene needed exactly one call, at the one place the pool is constructed, and a 
 saved nothing. The caveat that argues the other way is untouched: this pool is ours to wrap, and a
 target that builds its own internally cannot be wrapped from outside at all — which is the bytecode
 agent in phase 7, not a helper here.
+
+*And 5f was dropped, on the argument that descoped the traversal bench.* The coroutines module was in
+the plan because the workload this project came from uses them. That workload left as
+[ideas.md](ideas.md) item 23 — NDA, and a reproduction is our code inheriting our assumptions — and
+the same reasoning finishes the job here: the mechanism is `withCoarse` under another name, and with
+no coroutine workload to point it at, it is a mechanism nobody has watched work on anything real.
+That is the criticism this project levels everywhere else.
+
+**What it would have taught us is worth more than the module, and costs nothing to write down.** A
+suspended coroutine occupies no thread at all, which makes it the one kind of waiting this tool
+cannot get wrong — where a thread blocked in a socket read reads `RUNNABLE` and was measured at 55x
+out in [trial 4](trial-jdbc.md). Waiting becomes visible as *absence* rather than as a state to
+interrogate. Two caveats fall out with it, and both are recorded in item 25.
 
 ### Two parallelisms, and the identity that relates them · settled before any of it was built, amended in 5b
 
@@ -1467,6 +1480,23 @@ more than any difference between configurations. Recorded as inconclusive rather
 **The scaling limit, which is new and matters:** at the 1024-slot ceiling that same per-slot cost is
 ~95 µs per tick, about 10% of the step. Eight threads is free and a thousand is not — and a thousand
 slots is exactly what the virtual-thread hazard produces.
+
+### The design is now settled, and the platform settled it
+
+**Phase 6's coefficient cannot be built on CPU time.** Measured 2026-08-30 with `--cpucost`: reading
+another thread's CPU costs **284.7 ns** and a walk of eight threads **2.3 µs**, which is 0.2% of a
+1 ms step — so cost was never the obstacle, and the 130.9 µs this plan reasoned from is the *dearest
+walk observed over a run* rather than a call cost, overstating it by about 57x. The obstacle is the
+**resolution: 15.625 ms, sixteen times the sampling step**, and no implementation gets around a
+scheduler quantum. See
+[findings.md](findings.md#reading-a-threads-cpu-is-cheap-its-clock-is-16x-too-coarse-to-use-per-tick)
+and [ideas.md](ideas.md) item 24, now closed.
+
+**So it is built on thread state, with the bound printed beside it** — the form `working` adopted
+after [trial 4](trial-jdbc.md) measured thread state wrong by 55x on a workload that waits outside
+the JVM. Build the histogram on the state the sampler can read every tick; carry the per-window duty
+cycle alongside; and where the two disagree, say so rather than printing one of them alone. The limit
+below is therefore not a caveat to design around — it is the shape of the answer.
 
 ### What is not built
 
