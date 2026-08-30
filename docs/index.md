@@ -11,21 +11,33 @@ is far enough for a 0.x but has no annotations and no agent.
 
 Since the trials: the three small fixes and the pause after them are **done**, and the pause earned
 its place — it caught the new error bound being sound and useless on a thread pool. There is a test
-suite now (63 tests, ~3 s) whose expectations are the numbers in findings.md, two code reviews have
+suite now (84 tests, ~3 s) whose expectations are the numbers in findings.md, two code reviews have
 been through every file, and `D₂` — the one outright defect the design carried — is fixed.
 
-**Phase 4 — the coarse tier — is done**, same-thread, and checked on all three trials. Contexts,
-measured spans with percentiles, the `(fine, coarse)` cross-tabulation, `mean − busy/exec` as the
-waiting quantified, and a floor check for the tier boundary that is *exact* where the fine one has to
-infer. Verified against truths that are identities rather than estimates: the bench times every one
-of its own requests, the Calcite harness has timed every plan since before this tier existed, and in
-both cases p50, p90 and p99 agree to **+0.00%**.
+**Phase 4 — the coarse tier — is done**, and checked on every trial. Contexts, measured spans with
+percentiles, the `(fine, coarse)` cross-tabulation, and a floor check for the tier boundary that is
+*exact* where the fine one has to infer. Verified against truths that are identities rather than
+estimates: the bench times every one of its own requests, the Calcite harness has timed every plan
+since before this tier existed, and in both cases p50, p90 and p99 agree to **+0.00%**.
 
-**What to do next is [plan.md § Phase 5](plan.md#phase-5--crossing-threads--next-and-the-trials-said-why)**,
-which opens with a *"start here"* section written for a session picking this up cold. The short
-version: Lucene fans a search across a pool, so a context stays on the calling thread and the work on
-the others is reported as **waiting** — 0.0% at one thread against 24.5% at eight, same code, same
-label. Propagation fixes that and makes per-operation parallelism a real number rather than 1.0.
+**Phase 5 — crossing threads — is done too.** Wrap a pool with `.propagating()` and work handed to it
+stays inside the execution that forked it. On Lucene that took labelled time falling outside every
+span from **88.5% to nothing**, with the mean span unchanged — the program was not altered, only what
+could be seen of it. Two columns come with it: `inside`, the threads a request ties up, and
+`working`, the ones on a CPU. Work that outlives the request that forked it is detected and excluded
+rather than billed to a finished execution. The coroutines module was dropped on purpose —
+[ideas.md](ideas.md) item 25.
+
+**A fourth trial then found a defect in one of those columns.** PostgreSQL over a socket is the first
+workload here that waits for anything, and `working` read **55× more CPU than the machine actually
+spent**: Java reports a thread stopped inside a native call as runnable. The report now prints the
+measured duty cycle beside the number and says so. [trial-jdbc.md](trial-jdbc.md).
+
+**What to do next is [plan.md § Phase 6](plan.md#phase-6--thread-state-and-the-whole-application-coefficient--partly-done)** —
+the whole-application parallelism coefficient. Its design is settled and the measurement that settled
+it is recorded: reading a thread's CPU costs 285 ns, which is affordable, but the clock's resolution
+is 15.625 ms, sixteen times the sampling step, so the coefficient has to be built on thread state
+with the duty-cycle bound printed beside it.
 
 **Two things worth knowing before reading anything else**, because they govern the rest:
 
@@ -46,7 +58,8 @@ label. Propagation fixes that and makes per-operation parallelism a real number 
 | [case.md](case.md) | observations of existing tools failing at something, and where they are better than us | you want to know why this exists at all |
 | [trial-calcite.md](trial-calcite.md) |  Apache Calcite — the first end-to-end result on foreign code, and where the coarse tier was checked against a stopwatch the harness already had | you want the first end-to-end result on code we did not write |
 | [trial-lucene.md](trial-lucene.md) | the same, Apache Lucene — concurrent, the first head-to-head against a timed-wrapper profiler, and where the coarse tier meets the edge of its own tier | you want the second, and the strongest argument for sampling we have |
-| [trial-netty.md](trial-netty.md) | the same, Netty — event loops, the first test of the thread-state column on foreign code, and the negative control for the coarse tier's waiting column | you want the third, and what a flame graph does with a handler chain |
+| [trial-netty.md](trial-netty.md) | the same, Netty — event loops, the first test of the thread-state column on foreign code, and the negative control for the coarse tier's waiting column: it reads 0.0% because a loopback request really does not wait | you want the third, and what a flame graph does with a handler chain |
+| [trial-jdbc.md](trial-jdbc.md) | the same, PostgreSQL over a socket — the first workload here with any waiting in it, and where `working` was measured wrong by 55x | you want the fourth, and the trial that found a defect in a column we had shipped |
 | [ideas.md](ideas.md) | things worth doing that we have not committed to | you want to know what was considered and deferred |
 | [../README.md](../README.md) | how to use it and how to run the bench | you want to run something |
 
@@ -87,9 +100,10 @@ label. Propagation fixes that and makes per-operation parallelism a real number 
 | `trial-calcite/` | the Calcite trial, in its own module so its dependencies cannot leak into the profiler |
 | `trial-lucene/` | the Lucene trial — the corpus, the wrappers that place the labels, and four instrumentation configurations to compare |
 | `trial-netty/` | the Netty trial — the HTTP pipeline, the load generator, and the three-way A/B |
+| `trial-jdbc/` | the PostgreSQL trial — a container driven by plain `docker run`, a HikariCP pool, and the CPU-time truth the thread-state column is held against |
 | `trial-common/` | shared by every trial and depending on nothing but the JDK: the JFR recording and the collapsed-stack analysis |
 
-## Running the three trials
+## Running the four trials
 
 Each is a separate Gradle module, so nothing a trial needs — Calcite, Lucene, Netty, a logging
 binding — can reach the profiler, which depends on nothing but the Kotlin stdlib.

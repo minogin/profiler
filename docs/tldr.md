@@ -117,24 +117,38 @@ that and their numbers were correct.
 ## Where it stands
 
 Built and verified: the bench, the fine tier, the check of the sampler against known truth,
-bounding what a share is worth, and three trials on foreign code — Calcite; Lucene, where eight
+bounding what a share is worth, and four trials on foreign code — Calcite; Lucene, where eight
 clauses of one query were separated that a flame graph could not tell apart at all, on eight
-threads, at a cost of 6.5% against 35% for the way a production search engine does it; and Netty,
+threads, at a cost of 6.5% against 35% for the way a production search engine does it; Netty,
 where four handlers sharing one class are four rows here and one indistinguishable blob in a flame
-graph.
+graph; and PostgreSQL over a socket, which is the first workload here that waits for anything.
 
 Released as v0.1.0 — Apache-2.0, one dependency, Java 21+, and a report you can read: what every
 column and warning means is [output.md](output.md).
 
-**The coarse tier is built too**, same-thread: a label around a logical operation — a request, a
-query — measures how long each execution took, exactly, and cross-tabulates the fine breakdown
-underneath it. That is the one part of the report that is measured rather than sampled, and the only
-place percentiles exist.
+**The coarse tier is built too**: a label around a logical operation — a request, a query —
+measures how long each execution took, exactly, and cross-tabulates the fine breakdown underneath it.
+That is the one part of the report that is measured rather than sampled, and the only place
+percentiles exist.
 
-Not built: following work across thread hand-offs and coroutines, the whole-application parallelism
-coefficient, the annotation and agent surface, JFR output. Thread
-state and per-operation concurrency *are* built — they are the waiting, elapsed and in-flight columns.
-Coroutines and virtual threads are untested and so unclaimed. [plan.md](plan.md) has the order.
+**And work now keeps its logical operation when it crosses a thread.** Wrap a pool with
+`.propagating()` and the pieces of a request are counted as part of it. On Lucene that took the
+labelled time falling outside every span from 88.5% to nothing, and two columns follow from it:
+`inside`, the threads a request ties up, and `working`, the ones actually on a CPU. Work that
+outlives the request that forked it is detected and excluded rather than quietly billed to it.
+
+Not built: the whole-application parallelism coefficient, the annotation and agent surface, JFR
+output. The coroutine module was dropped deliberately — the mechanism is the same one, and there is
+no coroutine workload here to point it at ([ideas.md](ideas.md) item 25). Virtual threads are
+untested and so unclaimed, and the slot registry would not enjoy them. [plan.md](plan.md) has the
+order.
+
+**One number carries a warning, and it is worth knowing before you read a report.** `working` is
+built on Java thread state, which reports a thread stopped inside a *native* call — a socket read, a
+file read — as runnable. Against PostgreSQL the column read 55x more CPU than the machine actually
+spent. The report now prints the measured duty cycle beside it and says so; `inside` is unaffected.
+The lesson generalises: this tool sees waiting that another *thread* caused, and is blind to waiting
+that the *operating system* is doing on your behalf unless the duty cycle catches it.
 
 One thing worth carrying away, because it cost a day to learn: **a share is not a counterfactual.**
 The rule holding 46% of the time was worth 275× when removed, because it was creating work for

@@ -24,8 +24,8 @@ words, is [tldr.md](tldr.md).
 | — | **Trial 4 — PostgreSQL over a socket: the first workload here with waiting in it** | **done — found a defect** |
 | — | Trials 5+ — a compiler, two negative controls | later |
 | 4 | The coarse tier — contexts, spans, cross-tabulation | **done** |
-| 5 | Crossing threads — propagation, and per-operation parallelism | next |
-| 6 | Thread state and the whole-application parallelism coefficient | **partly done** |
+| 5 | Crossing threads — propagation, and per-operation parallelism | **done**; the coroutines module dropped, [ideas.md](ideas.md) item 25 |
+| 6 | Thread state and the whole-application parallelism coefficient | **partly done**; what remains is designed and measured, not started |
 | 7 | Library surface — annotations, agent, results API | **v0.1.0 released**; annotations and the agent not started |
 | 8 | JFR output | not started |
 
@@ -39,6 +39,11 @@ Stack: Kotlin/JVM, Gradle, nothing beyond the Kotlin stdlib. Output to the conso
 ---
 
 ## What happens next, in order
+
+> **This section is history.** It was written when the coarse tier was the next thing to build; the
+> coarse tier, all of phase 5 and a fourth trial have happened since. For where the project actually
+> stands, read the table above and the phase sections below. It is kept because step 2 was a pause
+> that earned its place, and deleting the record of a good decision teaches nobody anything.
 
 **Steps 1 and 2 are done, and so is what came after them.** What remains here is step 3, the coarse
 tier. The record of the first two is kept below rather than deleted, because step 2 was a pause
@@ -866,7 +871,7 @@ for sampling this project has produced.
 **What did not come up:** stack depth. Lucene's deepest sample was 44 frames with zero truncation,
 so the argument that beat Calcite hardest was irrelevant here.
 
-## Trials 3+ — the rest of the list · next
+## Trials 3+ — the rest of the list · three done, and the fourth changed the list
 
 Two data points now, and they disagreed usefully — Calcite said the tool needed a non-lexical form,
 Lucene said the lexical one was back and that the danger had moved from *leaking* a label to
@@ -1059,7 +1064,7 @@ Each answered a different question, and the third answered one we did not ask:
 under a context belong to that context, so *"the labels miss most of the run"* becomes *"three
 quarters of a request is inside Netty's codec and write path"*.
 
-## Phase 5 — crossing threads · next, and the trials said why
+## Phase 5 — crossing threads · done, and the trials said why
 
 Where a logical operation stops being a thread-local concept.
 
@@ -1395,7 +1400,7 @@ to count an operation's ticks rather than its slots; counting *occupied instance
 identical idiom with the stamp on the context object instead of in an array — one write per live
 context per tick, on the thread that has a core to itself.
 
-## Trial 4 — PostgreSQL over a socket · in progress
+## Trial 4 — PostgreSQL over a socket · done, and it found a defect
 
 **Three trials in and nothing has ever waited.** Calcite plans on one thread and is pure CPU. Lucene's
 index is page-cached, so its clauses read `waiting 0.0%`. Netty's request is loopback and

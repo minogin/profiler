@@ -56,7 +56,7 @@ for one rule and off by 57× for another, with no marker distinguishing them, be
 lives in a base class's internal structure. **The ranking inverts: the flame graph shows
 `JoinCommuteRule` at 30% and merge join at 0.8%, and the truth is the other way round.** Not
 "failed to answer" — answered confidently, and wrongly. Full tables in
-[trial-calcite.md](trial-calcite.md#1-the-candidate-and-whether-it-qualifies).
+[trial-calcite.md](trial-calcite.md#1-the-candidate-qualifies).
 
 **Self time points at the standard library.** Over 60% of Calcite's self time is
 `ArrayList.indexOfRange`, `HashMap.putVal`, `String.equals`, `String.hashCode` and number
