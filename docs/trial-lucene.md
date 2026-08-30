@@ -508,3 +508,34 @@ placed — which is a much more useful statement than the same 40% floating free
 | flag | default | what it does |
 |---|---|---|
 | `--coarse` | off | wrap each search in a coarse label. At `--threads 1` it measures a search; above that it measures the phase 5 gap |
+
+## Propagation, 2026-08-30 — the phase this trial justified
+
+The 88.5% recorded above is what phase 5 was built to fix, and this is the same harness with the
+search pool wrapped: `Executors.newFixedThreadPool(threads).propagating()`, behind `--propagate` so
+both readings come out of one binary. `IndexSearcher` takes the executor from us, so the change is
+one call.
+
+| 8 threads, `--coarse` | propagation off | propagation on |
+|---|---|---|
+| outside every span | **88.5%** | **silent**, under the 1% floor |
+| `inside` | 1.00 | 6.57 |
+| `working` | 0.76 | 6.32 |
+| `waiting` | 24.2% | 3.8% |
+| mean span | 3.98 ms | 4.01 ms |
+
+The span not moving is the control: the program is the same, and only what the report could see
+changed. The cross-tabulation moved with it — *"unlabelled 39.8%, clause:prefix 29.1%"* became
+*"clause:prefix 39.9%, clause:phrase 32.9%, unlabelled 20.8%"*, the unlabelled share nearly halving
+as the helper threads' labelled work came inside the span.
+
+**And this trial is where `working` stopped being readable as a speedup.** One thread against eight,
+same session:
+
+```
+1 thread    span 14.04 ms   busy/exec 14.04 ms   working 1.00
+8 threads   span  4.01 ms   busy/exec 25.31 ms   working 6.32
+```
+
+3.50x faster, 6.32 threads' worth of occupancy, 1.80x more total CPU spent. All three are true. The
+full record is in [findings.md](findings.md#propagation-on-lucene-and-what-working-is-not).

@@ -211,7 +211,7 @@ request                  3,203,348   29.9 us   20.5 us   45.1 us  180.2 us  17.0
 |---|---|---|
 | **executions** | completed executions, counted exactly | not sampled. If this disagrees with what you think ran, a label is leaking |
 | **mean, p50, p90, p99, max** | **measured**, two timestamps per execution | the only numbers in the whole report that are not sampled. Percentiles come from a log-bucket histogram: **at most 12.5% high, never low** |
-| **busy/exec** | thread-time on a CPU inside one execution — sampled | **`mean − busy/exec` is the waiting**, quantified. This is the pair the fine tier cannot give you |
+| **busy/exec** | thread-time on a CPU inside one execution, **summed over the threads in it** — sampled | `busy/exec = working × mean`, so it exceeds `mean` whenever work fans out. Where it does not, `mean − busy/exec` is the waiting quantified — the pair the fine tier cannot give you |
 | **waiting** | that gap as a share | 0.0% here because the demo never blocks. On anything with I/O or a lock it is the finding |
 | **inside** | threads in one execution at once, a parked one counted in full | what a request *ties up*. 1.00 here because this demo hands nothing between threads |
 | **working** | of those, the ones a sample caught on a CPU | what splitting the work *bought*. `working = inside × (1 − waiting)` |
@@ -263,16 +263,37 @@ factorisation has to count both sides the same way.
 **They differ by exactly the `waiting` column**, which is why the three sit together:
 `working = inside × (1 − waiting)`. A wide gap between them means the request is waiting on itself.
 
+**And `working` is what relates `busy/exec` to the span:** `busy/exec = working × mean`. On a
+fanned-out operation `busy/exec` is therefore *larger* than the span — six threads inside a 4 ms
+search is 25 ms of thread-time, which is right and looks alarming the first time. The old shortcut
+`mean − busy/exec = waiting` only ever held because nothing could cross a thread; the `waiting`
+column is the reading that holds either way.
+
 **Both read 1.00 until a context crosses a thread**, as in the demo above: every occupied execution
 is occupied by the one thread that created it. That made it a known answer to calibrate the instance
 stamping against before propagation existed, and it is still what pins the same-thread case now that
 it does.
 
-**The caveat on `working`, and it is a real limit rather than a defect.** What gets measured is
-`min(what the code could do, threads actually free)`. A saturated pool reads it low: on the bench,
-seven drivers against the same eight helpers leaves nothing to fan out to and `working` falls back
-to about 1. That is the truth about *that run*, not about the code — which is why the counterfactual
-sweep in `ideas.md` item 22 survives this and is not replaced by it.
+**Two caveats on `working`, and both are real limits rather than defects.**
+
+*It reads low when the pool is saturated.* What gets measured is
+`min(what the code could do, threads actually free)`. On the bench, seven drivers against the same
+eight helpers leaves nothing to fan out to and `working` falls back to about 1. That is the truth
+about *that run*, not about the code.
+
+*And it reads high as a speedup.* `working` is `work ÷ span` **of the run it measured**, and
+parallelising usually costs extra work — per-slice setup, cache pressure, an all-core clock below
+single-core boost. Measured on Lucene, the same search at one thread and at eight:
+
+```
+1 thread    span 14.04 ms   busy/exec 14.04 ms   working 1.00
+8 threads   span  4.01 ms   busy/exec 25.31 ms   working 6.32
+```
+
+The speedup is **3.50×**. `working` says **6.32**, because the eight-thread run spends 1.80× more
+total CPU to answer the same query. So `working` bounds the speedup from above and can overstate it
+by a lot. Only re-running at a different thread count measures what parallelism actually bought —
+`ideas.md` item 22, which this column does not replace.
 
 ### `N% of the thread-time inside coarse executions was inside one that had ALREADY BEEN CLOSED`
 

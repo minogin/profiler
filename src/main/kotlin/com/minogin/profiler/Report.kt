@@ -312,10 +312,16 @@ class CoarseStat internal constructor(
      *
      * This is the number the fine tier structurally cannot produce, and the one that is a property
      * of the code rather than of the load — a request that splits four ways splits four ways for one
-     * client or a thousand. The honest caveat: what gets measured is
-     * `min(what the code could do, threads actually free)`, so a saturated pool reads it low. On the
-     * bench, seven drivers against eight helpers leaves nothing to fan out to and it falls back to
-     * about 1 — which is the truth about that run, not a defect in the number.
+     * client or a thousand.
+     *
+     * **Two limits, in opposite directions, and both are real.** It reads *low* when the pool is
+     * saturated, because what gets measured is `min(what the code could do, threads actually free)`:
+     * on the bench, seven drivers against eight helpers leaves nothing to fan out to and it falls
+     * back to about 1. And it reads *high* as a speedup, because it is `work / span` of the run it
+     * measured and parallelising usually costs extra work. On Lucene the same search is 14.04 ms on
+     * one thread and 4.01 ms on eight — a 3.50x speedup — while this reads **6.32**, the difference
+     * being the 1.80x more total CPU the parallel run spends. Re-running at another thread count is
+     * the only thing that measures what parallelism bought; see `ideas.md` item 22.
      */
     val working: Double
         get() = if (instanceTicks == 0L) Double.NaN else runningInclusiveHits.toDouble() / instanceTicks
@@ -739,7 +745,18 @@ class Report internal constructor(
      * The rule: **a line you add here needs a paragraph there, and a line you reword here needs
      * that paragraph reworded.** `output.md` carries the same warning pointing back at this file.
      */
-    /** Thread-time actually on a CPU inside one execution of [c], on average. */
+    /**
+     * Thread-time actually on a CPU inside one execution of [c], on average — **summed over every
+     * thread that was in it**, which is why it can be larger than the span.
+     *
+     * `busy/exec = working x mean span`, so an execution fanned across six threads reports six spans
+     * of thread-time. Measured on Lucene: a 4.01 ms search with `working` 6.32 reports 25.31 ms here.
+     *
+     * That makes `mean - busy/exec` the waiting **only while `inside` is 1**, which was every case
+     * this tier had until a context could cross a thread. Use [CoarseStat.waitingHits] as a share
+     * for the general answer; the subtraction is a shortcut that fan-out invalidates, and the
+     * report's legend now says so.
+     */
     fun busyPerExecutionNanos(c: CoarseStat): Double =
         if (c.count == 0L) Double.NaN else c.runningInclusiveHits * stepNanos / c.count
 
@@ -888,8 +905,11 @@ class Report internal constructor(
         appendLine("executions, mean and the percentiles are MEASURED, two timestamps per execution - the only")
         appendLine("  numbers here that are not sampled. Percentiles round UP to their bucket: at most 12.5%")
         appendLine("  high and never low, because a latency figure may overstate and must not understate")
-        appendLine("busy/exec is thread-time on a CPU per execution, sampled: mean - busy/exec is the WAITING,")
-        appendLine("  which is the one thing a fine label can never tell you. waiting is that as a share")
+        appendLine("busy/exec is thread-time on a CPU per execution, sampled, SUMMED OVER THE THREADS in it -")
+        appendLine("  so it exceeds mean whenever inside is above 1, and busy/exec = working x mean. Where the")
+        appendLine("  work does not leave its thread, mean - busy/exec is the WAITING, which is the one thing a")
+        appendLine("  fine label can never tell you. waiting is that as a share, and is the reading that holds")
+        appendLine("  either way")
         appendLine("inside is THREADS in one execution at once, a parked one counted: what a request ties up.")
         appendLine("  working is the ones on a CPU - what splitting the work bought you, the T1/T8 of the")
         appendLine("  work-span model. working = inside x (1 - waiting), and a caller parked on its own join")

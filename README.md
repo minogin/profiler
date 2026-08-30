@@ -428,8 +428,10 @@ million of them the profiler's p50, p90 and p99 agree to **+0.00%**.
 
 Propagation across executors landed after that: `.propagating()` on a pool, and work handed to it
 stays inside the execution that forked it. Measured on the bench against its own stopwatch, a request
-fanned across eight helpers reports **4.00** threads inside against **4.00** measured, and the
-labelled thread-time falling outside every span drops from **76.4%** to **0.0%**. Two columns rather
+fanned across eight helpers reports **4.00** threads inside against **4.00** measured. On Lucene —
+somebody else's code, one call on the pool it is handed — the labelled thread-time falling outside
+every span went from **88.5%** to silent and `waiting` from **24.2%** to **3.8%**, with the mean span
+unchanged, while Calcite and Netty stayed silent as controls. Two columns rather
 than one, because they answer different questions: `inside` counts the threads a request ties up,
 `working` counts the ones on a CPU — and on that run the difference is 0.99 of a thread, which is the
 caller parked on its own join.

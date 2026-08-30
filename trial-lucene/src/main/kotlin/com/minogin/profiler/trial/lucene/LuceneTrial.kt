@@ -2,6 +2,7 @@ package com.minogin.profiler.trial.lucene
 
 import com.minogin.profiler.NO_OP
 import com.minogin.profiler.coarse
+import com.minogin.profiler.propagating
 import com.minogin.profiler.Profiler
 import com.minogin.profiler.getOpaque
 import com.minogin.profiler.trial.analyzeJfr
@@ -118,6 +119,15 @@ class Bed(
     val threads: Int,
     val mode: Placement,
     val topK: Int = 100,
+    /**
+     * Whether the search pool carries the coarse execution the calling thread was inside.
+     *
+     * A switch and not a fact, so the before and the after are one binary. Without it a search
+     * fanned across eight threads put 88.5% of its labelled thread-time outside every span and read
+     * 24.5% waiting while those threads worked; the point of the phase is that the same run with
+     * this on does not. Comparing against a build that no longer exists would prove nothing.
+     */
+    val propagate: Boolean = true,
 ) : AutoCloseable {
 
     private val directory = FSDirectory.open(corpus.dir)
@@ -138,8 +148,19 @@ class Bed(
             Thread(r).also { it.isDaemon = true; workers += it }
         } else null
 
+    /**
+     * What the searcher is handed: the pool, wrapped so a slice runs inside the search that forked
+     * it. The whole of the change, and it is one call — which is the claim the library makes and
+     * this is where it is tested on code we did not write.
+     *
+     * The wrapper delegates to the pool underneath, so the thread factory above still runs and
+     * [workers] is still populated. `--stacks` depends on that.
+     */
+    private val searchPool: ExecutorService? =
+        if (pool != null && propagate) pool.propagating() else pool
+
     val searcher: IndexSearcher =
-        if (pool != null) SlicedSearcher(reader, pool) else IndexSearcher(reader)
+        if (searchPool != null) SlicedSearcher(reader, searchPool) else IndexSearcher(reader)
 
     val trialQuery = TrialQuery(corpus, mode)
 
@@ -465,10 +486,16 @@ private fun load(
      * quantity the tier cannot yet represent, and that is a demonstration rather than a setting.
      */
     coarse: Boolean = false,
+    /** Whether the search pool carries the caller's coarse execution. See [Bed.propagate]. */
+    propagate: Boolean = true,
 ) {
     val searchCoarse = if (coarse) Profiler.registerCoarse("search") else -1
-    Bed(corpus, threads, mode).use { bed ->
-        println("threads=$threads placement=$mode sampler=$sampler; warm-up $warmups searches, then searching for $seconds s")
+    Bed(corpus, threads, mode, propagate = propagate).use { bed ->
+        println(
+            "threads=$threads placement=$mode sampler=$sampler" +
+                    (if (coarse) ", coarse label on, propagation ${if (propagate) "ON" else "OFF"}" else "") +
+                    "; warm-up $warmups searches, then searching for $seconds s"
+        )
         val warm = repeatSearch(bed, warmups)
         println(String.format(Locale.ROOT, "warm-up: first %.1f ms, last %.2f ms", millis(warm[0]), millis(warm.last())))
         bed.trialQuery.clauses.reset()
@@ -492,13 +519,17 @@ private fun load(
         while (System.nanoTime() < deadline) {
             val probing = prober?.probing == true
             val t0 = System.nanoTime()
-            // A search is the obvious coarse operation here, and at threads>1 it is also the first
-            // one this tool has met that does not fit in the tier. Lucene hands one slice per segment
-            // to a pool, so the context stays on the calling thread while most of the work happens on
-            // threads that never see it. The span is still exactly right — it is two timestamps on
-            // one thread — but `busy/exec` counts only the caller, so `span - busy` reads as waiting
-            // when it is really other threads working. That is not a defect in the measurement; it is
-            // the absence of propagation, which is phase 5, and this is what it looks like.
+            // A search is the obvious coarse operation here, and it is the workload phase 5 was
+            // justified on. Lucene hands one slice per segment to a pool; without propagation the
+            // context stays on the calling thread while most of the work happens on threads that
+            // never see it, so `busy/exec` counts only the caller and `span - busy` reads as waiting
+            // when it is really other threads working. Measured that way: 88.5% of labelled
+            // thread-time outside every span, and busy/exec falling 14.87 ms to 3.10 ms between one
+            // thread and eight.
+            //
+            // With `--propagate` on — the default now — the pool is wrapped and the slices run inside
+            // the search that forked them. `--propagate=off` still runs the other way, because the
+            // before and the after have to be the same binary.
             Sink.last = if (searchCoarse < 0) bed.searchOnce() else coarse(searchCoarse) { bed.searchOnce() }
             val took = System.nanoTime() - t0
             searches++
@@ -663,6 +694,7 @@ fun main(args: Array<String>) {
                 stacks = opt["stacks"]?.toInt() ?: 0,
                 gapTrigger = opt["gaps"]?.toInt() ?: 0,
                 coarse = opt["coarse"] != null,
+                propagate = opt["propagate"] != "off",
             )
         }
     }

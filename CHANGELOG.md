@@ -33,6 +33,35 @@ every span collapses from **76.4%** to **0.0%**. Root calls are conserved exactl
 the escaping arm is still runnable as `--propagate=off`, so the before and after are an A/B in one
 binary.
 
+### Propagation, verified on Lucene
+
+The acceptance test for all of the above, on code we did not write. One `.propagating()` call on the
+pool the Lucene harness hands to `IndexSearcher`, at 8 threads:
+
+| | propagation off | propagation on |
+|---|---|---|
+| labelled thread-time outside every span | **88.5%** | **silent** |
+| `working` | 0.76 | **6.32** |
+| `waiting` | 24.2% | **3.8%** |
+| mean span | 3.98 ms | 4.01 ms |
+
+The span not moving is the control — the program is unchanged, only what the report could see. Both
+negative controls stayed silent: Calcite and Netty read `inside` 1.00, `working` 1.00, no escape line
+and no stale line.
+
+**`busy/exec` can now exceed the span, and the legend was corrected for it.** It is thread-time
+summed over the threads in an execution, so `busy/exec = working × mean` — 6.32 threads in a 4.01 ms
+search is 25.31 ms. The old wording, *"mean − busy/exec is the WAITING"*, held only while nothing
+could cross a thread. `waiting` is the reading that holds either way.
+
+**`working` is not the speedup, and is documented as bounding it from above.** The same Lucene search
+is 14.04 ms on one thread and 4.01 ms on eight — a 3.50× speedup — while `working` reads 6.32,
+because the parallel run spends 1.80× more total CPU on the same query. Only re-running at another
+thread count measures what parallelism actually bought.
+
+**Propagation stays opt-in.** Lucene needed one call at the one place the pool is constructed, so no
+auto-wrapping helper is being added.
+
 ### Work that outlives its span
 
 The failure propagation makes easier rather than harder, and the one direction that cannot be

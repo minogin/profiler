@@ -1172,7 +1172,7 @@ Six steps. Each one is a commit, and each has a number that must move before the
 | **5b** | `captureCoarse` / `withCoarse` and the wrappers · **done** | `inside` rises to the bench's measured fan-out — 4.00 against 4.00, within 0.1%; the span goes from accounting for 0.2% of its own work to 105%; outside-coarse collapses 76.4% → 0.0%. [findings.md](findings.md#propagation-and-the-same-three-numbers-inverted) |
 | **5c** | the stale-context detector · **done** | `--fanout --escape` stages an un-joined chunk per request: 18.33% of coarse thread-time caught inside a finished execution, against **0.00%** with nothing staged. Fatal under strict, and both rungs of the ladder now fire under `--leakcheck`. [findings.md](findings.md#work-that-outlives-the-span-that-forked-it) |
 | **5d** | the `inside` and `working` columns · **done in 5b** | landed with the mechanism rather than after it, because the pair is what the measurement is read through. See "Two parallelisms" below, which needed amending: there are three groupings, not two |
-| **5e** | Lucene at eight threads, clock trace beside it | 88.5% outside-coarse collapses; Calcite and Netty stay silent |
+| **5e** | Lucene at eight threads, clock trace beside it · **done** | 88.5% outside-coarse went silent, `working` 0.76 → 6.32, `waiting` 24.2% → 3.8%, mean span unchanged at 4.0 ms. Calcite and Netty silent. [findings.md](findings.md#propagation-on-lucene-and-what-working-is-not) |
 | **5f** | `profiler-coroutines`, a second module | the core POM keeps saying it has no dependencies; the suspended-span decision written down deliberately |
 
 **5a is a commit of its own, before any propagation exists.** It costs a round trip and it is the
@@ -1202,7 +1202,8 @@ clock fell from 205.5% to 144.4% of nominal across the four minutes of the run.
 hand-off you miss then shows up as *lost* attribution — outside-coarse rises, and the report already
 names that — rather than as work silently billed to the wrong operation. An auto-wrapping helper is
 the convenient version and its failure mode is the silent one, so the decision on whether it earns
-its place waits until 5e says what Lucene actually needed.
+its place waits until 5e says what Lucene actually needed. **Answered in 5e: it does not.** Lucene
+needed one call at the one place the pool is constructed, so opt-in stays and no helper is built.
 
 *What 5b built.* `captureCoarse()` on the forking thread, `withCoarse(ctx) { }` on the receiving one,
 and wrappers over them: `Runnable`, `Callable`, `Executor`, `ExecutorService` and
@@ -1248,8 +1249,34 @@ then read 0.00%.
 *What this unlocks, and it is why the ordering put it here.* The standing argument against
 propagating automatically is that it would carry a context into fire-and-forget work that outlives
 the request — inventing attribution, which nothing could then detect. Something can now detect it.
-That does not settle the auto-wrap question, which still waits on 5e, but it removes its strongest
-objection.
+That does not settle the auto-wrap question on its own — 5e did, and the answer was that opt-in
+sufficed — but it removes the objection that would have made an agent unsafe in phase 7.
+
+*What 5e measured.* One `.propagating()` call on the pool the Lucene harness hands to
+`IndexSearcher`, behind `--propagate` so the before and after are one binary. The escape line went
+from **88.5%** to silent, `working` from 0.76 to **6.32**, `waiting` from 24.2% to **3.8%** — and the
+mean span did not move, 3.98 ms against 4.01 ms, so the program was not changed, only what could be
+seen of it. Both controls stayed silent. Four windows within 3% of each other on the clock, so none
+of it is the machine.
+
+*And it found a sentence that fan-out had made false.* `busy/exec` is thread-time summed over the
+threads in an execution — `busy/exec = working x mean` — so a 4.01 ms search with 6.32 threads inside
+reports 25.31 ms. The legend said *"mean - busy/exec is the WAITING"*, which was true only while
+nothing could cross a thread. Corrected in `render()` and [output.md](output.md); `waiting` is the
+reading that holds either way.
+
+*The larger finding: `working` is not the speedup.* Same session, same binary — 14.04 ms at one
+thread against 4.01 ms at eight is a **3.50x** speedup, while `working` reads **6.32**, because the
+parallel run spends **1.80x more total CPU** on the same query. `working` therefore bounds the
+speedup from above and can overstate it badly. That is now stated wherever the column is documented,
+and it sharpens [ideas.md](ideas.md) item 22 rather than competing with it: only re-running at
+another thread count can see the extra work, so only the sweep answers *what did parallelism buy*.
+
+*The auto-wrap decision, which 5b parked here.* **Opt-in stays; no auto-wrapping helper is built.**
+Lucene needed exactly one call, at the one place the pool is constructed, and a helper would have
+saved nothing. The caveat that argues the other way is untouched: this pool is ours to wrap, and a
+target that builds its own internally cannot be wrapped from outside at all — which is the bytecode
+agent in phase 7, not a helper here.
 
 ### Two parallelisms, and the identity that relates them · settled before any of it was built, amended in 5b
 

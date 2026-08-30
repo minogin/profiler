@@ -1610,6 +1610,69 @@ session and names the operation; work under a finished execution does the same, 
 100.0% of coarse thread-time, and neither stops a non-strict one. The strict path is exercised there
 rather than in `--fanout`, where a stopped session would measure nothing.
 
+### Propagation on Lucene, and what `working` is not
+
+**The acceptance test for the whole phase, on code we did not write.** Run 2026-08-30, one
+`.propagating()` call on the pool the harness hands to `IndexSearcher`, `--threads 8 --coarse`, 20 s
+each. The four windows ran at near-identical clocks — **203.9%**, **198.3%**, **204.5%** and
+**204.5%** of nominal, 11–14 samples each, none failed — so the difference below is not the machine.
+
+| Lucene, 8 threads | propagation off | propagation on |
+|---|---|---|
+| labelled thread-time outside every span | **88.5%** | **silent** (under the 1% floor) |
+| `inside` | 1.00 | **6.57** |
+| `working` | 0.76 | **6.32** |
+| `waiting` | 24.2% | **3.8%** |
+| `busy/exec` | 3.01 ms | 25.31 ms |
+| mean span | 3.98 ms | 4.01 ms |
+| stale contexts | silent | silent |
+
+**The mean span did not move**: 3.98 ms against 4.01 ms. Propagation changed what the report could
+see and not what the program did, which is the thing to check first and the easiest to forget.
+
+**The cross-tabulation is the part that changed shape.** Off, a search was *"unlabelled 39.8%,
+clause:prefix 29.1%"*; on, it is *"clause:prefix 39.9%, clause:phrase 32.9%, unlabelled 20.8%"*. The
+unlabelled share nearly halved because the helper threads' labelled work is now inside the span
+instead of nowhere.
+
+**Both negative controls stayed silent**, which is what makes the collapse attributable. Calcite:
+`inside` 1.00, `working` 1.00, `busy/exec` 7.03 ms against a 7.03 ms mean — single-threaded, so
+thread-time and span are the same number. Netty: `inside` 1.00, `working` 1.00, 13.8 µs against
+13.9 µs. Neither shows an escape line or a stale line.
+
+**`busy/exec` now exceeds the span, and the legend was wrong about it.** It is thread-time summed
+over every thread in the execution — `busy/exec = working x mean` — so 6.32 threads in a 4.01 ms
+search is 25.31 ms. The printed legend said *"mean - busy/exec is the WAITING"*, which held only
+while nothing could cross a thread and is false the moment something does. Corrected in `render()`
+and in [output.md](output.md); the `waiting` column is the reading that holds either way. Nothing
+was measured wrongly — a sentence about the numbers was.
+
+#### `working` is not the speedup, and Lucene is where that stops being a quibble
+
+Measured in the same session, same binary, clock **207.0%**:
+
+```
+1 thread    span 14.04 ms   busy/exec 14.04 ms   working 1.00
+8 threads   span  4.01 ms   busy/exec 25.31 ms   working 6.32
+```
+
+**The speedup is 3.50x. `working` says 6.32.** Both are correct and they are not the same quantity.
+`working` is `work / span` *of the run it measured*, and parallelising this search costs **1.80x more
+total CPU** — 25.31 ms against 14.04 ms to answer the same query. Six threads' worth of occupancy
+buys three and a half threads' worth of answer.
+
+That gap is real work: per-slice setup, cache pressure, and an all-core clock below single-core
+boost. It means **`working` bounds the speedup from above and can overstate it by a lot**, which is
+the honest limit on the number and now stated wherever it is documented. It also sharpens
+[ideas.md](ideas.md) item 22: the thread sweep is not a nicer version of `working`, it is the only
+thing that answers *what did parallelising buy* — because the counterfactual run is the only place
+the extra work shows up.
+
+**What Lucene needed was one call**, on a pool the harness constructs and hands over. That is the
+evidence the auto-wrap decision was parked on, and it says opt-in was enough *here*. The caveat it
+does not remove: we own this pool. A target that builds its own internally cannot be wrapped from
+outside at all, which is what the bytecode agent in phase 7 is for.
+
 ## Open questions
 
 **What the bench's duration tolerance should be on a warm machine.** Settled above that `--coarse` is
