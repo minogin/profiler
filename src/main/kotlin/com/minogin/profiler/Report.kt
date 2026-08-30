@@ -920,17 +920,76 @@ class Report internal constructor(
      * what is hot; a span says how long one execution took. Only the pair says *of the time this
      * request spent, this much was that operation*.
      */
+    /**
+     * Every explanation, collected, after every number.
+     *
+     * It used to sit *between* the two tables, so the report read numbers, prose, numbers, prose —
+     * with `=` and `-` rules doing duty as both table borders and section breaks and not a blank
+     * line anywhere. That was reported the first time somebody who had not written it tried to read
+     * one: *"a wall of text, good for AI, very bad for a human"*. Explaining a column and
+     * interleaving the explanation with the data are not the same decision, and only the first one
+     * had ever been made.
+     *
+     * It is also shorter than it was, and not by cutting. Two of the paragraphs existed to correct a
+     * name that promised the wrong thing — `share`, which is occupancy and not CPU, and `busy/exec`,
+     * which summed over threads and so could exceed the span beside it. The first was renamed to
+     * `occupancy%` and the second dropped as derivable from `working x mean`. A name that carries
+     * its own caveat needs no paragraph, and unlike a paragraph it still works on the tenth run.
+     *
+     * ⚠ Every line here is also a paragraph in docs/output.md. Reword one, reword the other, in the
+     * same commit.
+     */
+    private fun StringBuilder.renderLegend() {
+        appendLine()
+        appendLine("HOW TO READ THIS")
+        appendLine("occupancy% and occupancy are the same quantity, relative and absolute: sampled thread-time,")
+        appendLine("  with waiting counted in full. NOT CPU - the duty cycle above bounds how much of it was")
+        appendLine("  waiting. occupancy is absolute, so unlike the percentage it does not move when a label is")
+        appendLine("  added or removed, which makes it the column to compare between two runs")
+        appendLine("waiting is the share of samples whose thread was parked, blocked or waiting; a thread the")
+        appendLine("  scheduler merely preempted still reads runnable, so this is waiting another thread caused")
+        appendLine("elapsed is wall clock with at least one thread inside, and in flight is occupancy / elapsed -")
+        appendLine("  occupancy sums across threads and elapsed does not, so 100 s of waiting is a convoy to be")
+        appendLine("  broken up at 15 in flight and steady contention to be designed out at 1.7. Not latency: it")
+        appendLine("  is every execution's interval unioned, so it says nothing about any single one of them")
+        appendLine("in flight counts EXECUTIONS at once, over the threads there were - never threads spent on one")
+        appendLine("  execution. It tracks your arrival rate until it saturates at your pool, so it is a property")
+        appendLine("  of this run and not of your code; read it against the denominator")
+        appendLine("noise is 1/sqrt(hits), the error chance alone gives")
+        appendLine("implied/call is hits x step / calls; 'over 1 tick' is occupancy inside executions that")
+        appendLine("  outlived a tick")
+        if (coarse.any { it.count > 0 || it.inclusiveHits > 0 }) {
+            appendLine()
+            appendLine("  for coarse operations:")
+            appendLine("  executions, mean and the percentiles are MEASURED, two timestamps per execution - the")
+            appendLine("    only numbers here that are not sampled. Percentiles round UP to their bucket, at most")
+            appendLine("    12.5% high and never low, and never above max, which is exact")
+            appendLine("  inside is THREADS in one execution at once, a parked one counted: what a request ties up.")
+            appendLine("    working is the ones on a CPU - what splitting the work bought you, the T1/T8 of the")
+            appendLine("    work-span model. working = inside x (1 - waiting), and a caller parked on its own join")
+            appendLine("    is the gap between them. A saturated pool reads working low, and it is an upper bound")
+            appendLine("    on the speedup rather than the speedup itself")
+            appendLine("  working printed as a/b means the measured CPU duty cycle only supports b of it - the")
+            appendLine("    threads are stopped in NATIVE calls, which Java thread state reports as RUNNABLE")
+            appendLine("  the 'was:' lines are the cross-tabulation: which fine operations ran under this one")
+        }
+    }
+
     private fun StringBuilder.renderCoarse() {
         val seen = coarse.filter { it.count > 0 || it.inclusiveHits > 0 }
         if (seen.isEmpty()) return
-        appendLine("=".repeat(WIDTH))
+        appendLine()
+        appendLine("COARSE OPERATIONS")
         appendLine(
             String.format(
-                // 130 columns exactly, to the report's WIDTH. Two new columns had to come out of
-                // the existing ones rather than out of the page: this table is read on a console.
-                Locale.ROOT, "%-20s %11s %9s %9s %9s %9s %9s %9s %8s %6s %9s %11s",
+                // `busy/exec` is gone: it was `working x mean`, both of which are printed beside it,
+                // and its name did not say it summed over the threads in the execution — which is
+                // why it could exceed the span next to it and look like a defect. It existed for the
+                // old headline "mean - busy/exec is the waiting", and that stopped being true the
+                // moment work could cross a thread. `waiting` is the reading that survives.
+                Locale.ROOT, "%-25s %11s %10s %10s %10s %10s %10s %8s %6s %9s %11s",
                 "coarse operation", "executions", "mean", "p50", "p90", "p99", "max",
-                "busy/exec", "waiting", "inside", "working", "in flight"
+                "waiting", "inside", "working", "in flight"
             )
         )
         appendLine("-".repeat(WIDTH))
@@ -940,11 +999,11 @@ class Report internal constructor(
                 else (c.inclusiveHits - c.runningInclusiveHits).toDouble() / c.inclusiveHits
             appendLine(
                 String.format(
-                    Locale.ROOT, "%-20s %,11d %9s %9s %9s %9s %9s %9s %7.1f%% %6s %9s %11s",
+                    Locale.ROOT, "%-25s %,11d %10s %10s %10s %10s %10s %7.1f%% %6s %9s %11s",
                     c.name, c.count,
                     duration(c.meanSpanNanos), duration(c.percentileNanos(0.50)),
                     duration(c.percentileNanos(0.90)), duration(c.percentileNanos(0.99)),
-                    duration(c.spanMaxNanos.toDouble()), duration(busyPerExecutionNanos(c)),
+                    duration(c.spanMaxNanos.toDouble()),
                     waitShare * 100,
                     if (c.inside.isNaN()) "-" else String.format(Locale.ROOT, "%.2f", c.inside),
                     // Value over its ceiling when the duty cycle contradicts it, the same idiom
@@ -989,28 +1048,7 @@ class Report internal constructor(
             val rest = parts.size - 6
             appendLine("  ${c.name} was: $shown" + if (rest > 0) ", and $rest more" else "")
         }
-        appendLine("-".repeat(WIDTH))
-        // ⚠ THE COARSE LEGEND. Also a paragraph in docs/output.md § The coarse table.
-        appendLine("executions, mean and the percentiles are MEASURED, two timestamps per execution - the only")
-        appendLine("  numbers here that are not sampled. Percentiles round UP to their bucket: at most 12.5%")
-        appendLine("  high and never low, because a latency figure may overstate and must not understate")
-        appendLine("busy/exec is thread-time on a CPU per execution, sampled, SUMMED OVER THE THREADS in it -")
-        appendLine("  so it exceeds mean whenever inside is above 1, and busy/exec = working x mean. Where the")
-        appendLine("  work does not leave its thread, mean - busy/exec is the WAITING, which is the one thing a")
-        appendLine("  fine label can never tell you. waiting is that as a share, and is the reading that holds")
-        appendLine("  either way")
-        appendLine("working printed as a/b means the measured CPU duty cycle only supports b of it - the threads")
-        appendLine("  are stopped in NATIVE calls, which Java thread state reports as RUNNABLE. See the warning below")
-        appendLine("inside is THREADS in one execution at once, a parked one counted: what a request ties up.")
-        appendLine("  working is the ones on a CPU - what splitting the work bought you, the T1/T8 of the")
-        appendLine("  work-span model. working = inside x (1 - waiting), and a caller parked on its own join")
-        appendLine("  is the gap between them. A saturated pool reads working low: it is min(what the code")
-        appendLine("  could do, threads actually free)")
-        appendLine("in flight is executions at once out of the threads there were — your load, not your code")
-        appendLine("share and occupancy mean what they do in the fine table, and are here because a coarse")
-        appendLine("  label gives you everything a fine one does and more - the only reason to prefer fine is")
-        appendLine("  what a context costs. occupancy is INCLUSIVE: everything under this operation")
-        appendLine("the 'was:' lines are the cross-tabulation: which fine operations ran under this one")
+        if (seen.any { it.inclusiveHits > 0 }) appendLine("-".repeat(WIDTH))
         // The one signal for work escaping its context, which neither the floor check nor the
         // balance check can see. Stated as a measurement with both readings, because it cannot tell
         // "I bracketed part of the program" from "work escaped to another thread" and guessing would
@@ -1152,20 +1190,38 @@ class Report internal constructor(
         // The bound belongs beside the sampling rate, not in a footnote: both say how much the
         // numbers below are worth, one against chance and one against stalling.
         for (l in duty.lines()) appendLine(l)
-        appendLine("=".repeat(WIDTH))
-        appendLine(
+        appendLine()
+        appendLine("OPERATIONS")
+        if (operations.any { it.hits > 0 }) appendLine(
             String.format(
                 Locale.ROOT, "%-26s %8s %10s %8s %9s %11s %13s %8s %6s %10s %7s",
-                "operation", "share", "occupancy", "waiting", "elapsed", "in flight",
+                // `occupancy%` and not `share`, because it is the same quantity as the column beside
+                // it — one relative, one absolute. Calling one of them `share` invented a
+                // distinction that does not exist and hid the one that does: neither is CPU. A
+                // reader does not misread `occupancy%` as processor time, which is what a paragraph
+                // of legend used to be for.
+                "operation", "occupancy%", "occupancy", "waiting", "elapsed", "in flight",
                 "calls", "hits", "noise", "impl/call", "over 1t"
             )
         )
-        appendLine("-".repeat(WIDTH))
+        if (operations.any { it.hits > 0 }) appendLine("-".repeat(WIDTH))
         // Operations the sampler never caught are folded away rather than printed as a screen of
         // zeroes — Calcite's report carried twenty-five rules at 0.000%. Folded, not dropped: the
         // count says how many there were, and a *called* operation with no samples is a real
         // finding, since it means the label is on something too small to see.
         val (seen, unseen) = operations.partition { it.hits > 0 }
+        // A table with no rows is two rules around nothing, and the twenty lines of column
+        // explanation that used to follow it explained columns that had no data. Say what happened
+        // instead: an empty table is nearly always a run too short for the sampler to catch, and
+        // that is worth naming rather than leaving the reader to infer from a blank.
+        if (seen.isEmpty()) {
+            appendLine(
+                if (labelledHits == 0L && ticks < MIN_TICKS_FOR_A_TABLE)
+                    "  nothing was sampled — $ticks ticks is too few for the sampler to catch anything. " +
+                            "Run for longer, or lower stepMillis."
+                else "  nothing was sampled."
+            )
+        }
         for (op in seen.sortedByDescending { it.hits }) {
             appendLine(
                 String.format(
@@ -1177,7 +1233,7 @@ class Report internal constructor(
                 )
             )
         }
-        appendLine("-".repeat(WIDTH))
+        if (operations.any { it.hits > 0 }) appendLine("-".repeat(WIDTH))
         if (unseen.isNotEmpty()) {
             val called = unseen.filter { it.calls > 0 }
             appendLine(
@@ -1188,29 +1244,6 @@ class Report internal constructor(
                                 (if (called.size > 4) ", …" else ""))
             )
         }
-        // ⚠ THE LEGEND. Every line below is also a paragraph in docs/output.md § The table.
-        // Reword one, reword the other, in the same commit. See the note on render().
-        appendLine("share is of labelled samples and is occupancy: waiting counts in full, which is what the")
-        appendLine("  latency question wants — the duty cycle above bounds how much of it was waiting")
-        appendLine("occupancy is hits x step as thread-time: absolute, so unlike share it does not move when a")
-        appendLine("  label is added, moved or removed — which makes it the column to compare between two runs")
-        appendLine("waiting is the share of those samples whose thread was parked, blocked or waiting; a thread")
-        appendLine("  the scheduler merely preempted still reads runnable, so this is waiting on another thread")
-        appendLine("elapsed is wall clock with at least one thread inside, and in flight is occupancy / elapsed —")
-        appendLine("  occupancy sums across threads and elapsed does not, so 100 s of waiting is a convoy to be")
-        appendLine("  broken up at 15 in flight and steady contention to be designed out at 1.7. Not latency: it")
-        appendLine("  is every execution's interval unioned, so it says nothing about any single one of them")
-        appendLine("in flight counts EXECUTIONS at once, over the threads there were — never threads spent on one")
-        appendLine("  execution. It tracks your arrival rate until it saturates at your pool, so it is a property")
-        appendLine("  of this run and not of your code; read it against the denominator, where near the ceiling")
-        appendLine("  means the pool is pinned in this label. It is here because elapsed needs it as the divisor")
-        appendLine("noise is 1/sqrt(hits), the error chance alone gives")
-        appendLine(
-            String.format(
-                Locale.ROOT,
-                "implied/call is hits x step / calls; 'over 1 tick' is occupancy inside executions that outlived a tick",
-            )
-        )
         renderCoarse()
         appendLine(
             String.format(
@@ -1270,6 +1303,8 @@ class Report internal constructor(
         appendLine("-".repeat(WIDTH))
         // Said in the output rather than in a document, because the one time it mattered it was
         // worth a factor of 275 and nothing on the screen hinted at it.
+        renderLegend()
+        appendLine()
         appendLine("A share is where time went. It is not what removing the operation would save:")
         appendLine("in the one trial run against real code, an operation holding 46% of the time was worth")
         appendLine("275x when removed, because it was creating work for everything else as well as doing")
@@ -1352,6 +1387,9 @@ class Report internal constructor(
         const val COVERAGE_GAP = 0.005
 
         /** How wide the report's rules and column layout are. */
+        /** Below this many ticks, an empty table is the run being short rather than a finding. */
+        const val MIN_TICKS_FOR_A_TABLE = 50
+
         const val WIDTH = 130
 
         /** The short-operation bias, so the check cannot accuse an operation of the sampler's own error. */

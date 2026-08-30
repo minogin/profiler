@@ -97,6 +97,32 @@ labelled occupancy and the bound becomes tight again.
 
 ---
 
+## The shape of the report
+
+Sections, in order, each with a heading and a blank line before it:
+
+```
+(header)            how many samples, what they cover, and the duty cycle that bounds them
+OPERATIONS          the fine table, or one line saying why it is empty
+COARSE OPERATIONS   the coarse table, present only if you placed a coarse label
+(warnings)          anything the run wants to tell you about itself
+HOW TO READ THIS    every column explained, once, at the bottom
+```
+
+**The explanations are last on purpose.** They used to sit *between* the two tables, so the report
+read numbers, prose, numbers, prose — reported the first time somebody who had not written it tried
+to read one: *"a wall of text, good for AI, very bad for a human."* Explaining a column and
+interleaving that explanation with the data are two different decisions, and only the first had been
+made.
+
+**Two columns were renamed or removed rather than explained.** `share` became `occupancy%`, because
+it is the same quantity as the `occupancy` beside it and calling one of them a *share* invented a
+distinction that does not exist while hiding the one that does — neither is CPU. `busy/exec` was
+dropped: it is `working × mean`, both of which are printed, and its name did not say it summed over
+the threads in an execution, which is why it could exceed the span next to it and look like a defect.
+A name that carries its own caveat needs no paragraph, and unlike a paragraph it still works on the
+tenth run.
+
 ## The table
 
 ```
@@ -200,9 +226,9 @@ Present only if you placed a coarse label. It answers the question the table abo
 cannot: **how long did one execution take.**
 
 ```
-coarse operation        executions      mean       p50       p90       p99       max busy/exec  waiting inside working   in flight
+coarse operation           executions       mean        p50        p90        p99        max  waiting inside   working   in flight
 ----------------------------------------------------------------------------------------------------------------------------------
-request                  3,203,348   29.9 us   20.5 us   45.1 us  180.2 us  17.01 ms   29.8 us     0.0%   1.00    1.00      7.96/8
+request                     3,203,348    29.9 us    20.5 us    45.1 us   180.2 us   17.01 ms     0.0%   1.00      1.00      7.96/8
 ----------------------------------------------------------------------------------------------------------------------------------
   request was: flushBatch 38.7%, validateRecord 37.9%, parseRecord 10.3%, unlabelled 7.2%, indexRecord 5.9%
 ```
@@ -211,7 +237,6 @@ request                  3,203,348   29.9 us   20.5 us   45.1 us  180.2 us  17.0
 |---|---|---|
 | **executions** | completed executions, counted exactly | not sampled. If this disagrees with what you think ran, a label is leaking |
 | **mean, p50, p90, p99, max** | **measured**, two timestamps per execution | the only numbers in the whole report that are not sampled. Percentiles come from a log-bucket histogram: **at most 12.5% high, never low** |
-| **busy/exec** | thread-time on a CPU inside one execution, **summed over the threads in it** — sampled | `busy/exec = working × mean`, so it exceeds `mean` whenever work fans out. Where it does not, `mean − busy/exec` is the waiting quantified — the pair the fine tier cannot give you |
 | **waiting** | that gap as a share | 0.0% here because the demo never blocks. On anything with I/O or a lock it is the finding |
 | **inside** | threads in one execution at once, a parked one counted in full | what a request *ties up*. 1.00 here because this demo hands nothing between threads |
 | **working** | of those, the ones a sample caught on a CPU | what splitting the work *bought*. `working = inside × (1 − waiting)` |

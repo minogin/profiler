@@ -25,16 +25,16 @@ import com.minogin.profiler.op
  * launches the bench and all four trials as well.
  */
 fun main() {
-    val request = Profiler.registerCoarse("request")
-    val work = Profiler.registerFine("work")
+    val Request = Profiler.registerCoarse("request")
+    val Work = Profiler.registerFine("work")
 
     Profiler.start(stepMillis = 1.0)
 
-    val deadline = System.nanoTime() + 3_000_000_000L
+//    val deadline = System.nanoTime() + 3_000_000_000L
     var sink = 0L
 
-    op(request) {
-        sink += op(work) { work() }
+    op(Request) {
+        sink += op(Work) { work() }
     }
 
 //    while (System.nanoTime() < deadline) {

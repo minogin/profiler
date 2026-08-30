@@ -47,6 +47,37 @@ something to do, it graduates into [ideas.md](ideas.md) and is marked here as ha
 
 ---
 
+### The report is a wall of text, and the order is wrong
+*2026-08-30, Andrey, second run. **Fixed the same day.***
+
+> "It's a wall of text. Good for AI, very bad for a human. And funny thing is that there comes some
+> result, then description and then suddenly coarse tier comes out. No line breaks, no headers."
+
+Exactly right, and the structure was: header, fine table, **fifteen lines of legend**, coarse table,
+its legend, warnings. So the reading order was numbers → prose → numbers → prose, with `=` and `-`
+rules serving as both table borders and section breaks, and not one blank line in the whole report.
+On a short run it printed two table headers, zero rows, and twenty lines explaining columns that had
+no data.
+
+The verbosity came from a principle this project repeats often — a number nobody can interpret is
+worse than no number — applied without ever asking *where on the page* the explanation belongs.
+Those are two different decisions and only the first one had been made.
+
+**Fixed:** named section headings with blank lines, every legend collected at the bottom under
+`HOW TO READ THIS`, an empty table replaced by a line saying why it is empty, and rules printed only
+where there is something to rule off.
+
+**And two columns were fixed by naming rather than by explaining**, which was Andrey's suggestion and
+is the better half of the change: `share` → `occupancy%`, since it is the same quantity as the
+`occupancy` column beside it and neither is CPU; and `busy/exec` dropped, since it is `working ×
+mean` with both already printed and its name never said it summed over threads. Two legend paragraphs
+stopped being necessary rather than being moved. A name that carries its own caveat still works on
+the tenth run, which a paragraph does not.
+
+*Not changed:* the 130-column width. I claimed it was wider than most terminals; asked for evidence,
+I had none, and the pasted output showed no wrapping at all. It was a complaint I added to a report
+that had not made it.
+
 ### `p99` printed larger than `max`, on a single execution
 *2026-08-30, Andrey, from the first real run in the sandbox. **Fixed the same day.***
 
