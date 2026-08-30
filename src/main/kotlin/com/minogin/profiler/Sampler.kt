@@ -226,6 +226,45 @@ internal class Sampler(
     internal var labelledOutsideCoarse: Long = 0; private set
 
     /**
+     * Samples that caught a thread inside a coarse execution the owner had already closed, per type.
+     *
+     * **Attribution invented rather than lost, which is the one direction that cannot be recovered
+     * from.** A context handed to a pool outlives the slot it came from: the thread that opened the
+     * request closes its span and moves on, and anything still mounted on that context goes on being
+     * sampled into an execution that has finished. Nothing else here can see it — the balance check
+     * looks at a thread's own slot, the floor check at sizes, and [labelledOutsideCoarse] at work
+     * with no context at all. This is work with a context that is no longer real.
+     *
+     * These samples are **excluded** from every number the type reports. Crediting them lets
+     * `busy/exec` exceed the mean span it is supposed to sit inside, which is arithmetically
+     * impossible and reads as a finding rather than as a fault. Counted here instead, and named in
+     * the report against the type they would have contaminated.
+     *
+     * It is also the failure mode that grows with propagation rather than shrinking, which is why it
+     * arrives with it: before contexts could cross a thread, none of this was reachable.
+     */
+    internal val coarseStaleHits = LongArray(MAX_COARSE_TYPES)
+
+    /**
+     * Samples that caught a thread under at least one closed execution, counted **once per sample**.
+     *
+     * Deliberately not the sum of [coarseStaleHits], which counts per type: a sample under a closed
+     * request containing a closed sub-operation is two entries there and one thread here. Only the
+     * per-sample count can be divided by anything and give a share, and the first version of this
+     * divided the per-type sum by a different population and printed 102.3%.
+     */
+    internal var staleContextHits: Long = 0; private set
+
+    /**
+     * Samples that caught a thread inside a coarse execution at all, open or closed.
+     *
+     * The denominator [staleContextHits] belongs over, and the only one it cannot exceed. Not
+     * *labelled* samples: a thread can be inside a request without being inside a fine label, and
+     * that time is just as much the request's.
+     */
+    internal var coarseSampleHits: Long = 0; private set
+
+    /**
      * Per thread, every sample taken at its slot and those of them that were inside some operation.
      *
      * Paired with the duty cycle's per-thread CPU fractions to bound the error on the shares — see
@@ -376,9 +415,32 @@ internal class Sampler(
                 // perfectly predicted.
                 val ctx = s.contextOpaque()
                 if (ctx != null) {
+                    coarseSampleHits++
                     val t = ctx.type
-                    coarseHits[t]++
-                    if (!waiting) coarseRunningHits[t]++
+                    // Is the thread *still* in this context, now that we have seen it closed?
+                    //
+                    // The two reads are not atomic: the slot is read at the top of the visit and the
+                    // closed flag some microseconds later, so a thread that legitimately unmounted
+                    // just before its execution ended looks stale though it never was. A clean join
+                    // does exactly that — the helper releases the context, and only then does the
+                    // owner learn it can close — so this benign ordering is the *common* case, not a
+                    // rare one. Measured before this check existed: 1.14% of coarse thread-time on a
+                    // run where nothing had escaped at all, which is over the strict threshold and
+                    // stopped a correct session a second into a sixty-second run.
+                    //
+                    // Re-reading the slot separates the two. If the thread has moved on, the sample
+                    // was taken while the execution was open and is credited normally. If it is
+                    // still mounted on an execution that has ended, that is the real thing. One
+                    // extra opaque read, and only on the rare visit that sees a closed context.
+                    var stillMounted = -1
+                    if (ctx.isClosed()) stillMounted = if (s.contextOpaque() === ctx) 1 else 0
+                    // A context confirmed stale is excluded from its own self counters as well as
+                    // from the inclusive walk below. Everything about this execution is over; the
+                    // only honest thing left to record is that somebody is still working under it.
+                    if (stillMounted != 1) {
+                        coarseHits[t]++
+                        if (!waiting) coarseRunningHits[t]++
+                    }
                     val fine = if (c < 0) NO_OP_INDEX else c
                     // Everything else is credited up the chain, each type at most once per sample.
                     // Inclusive and not self, because the question a coarse label is asked is *what
@@ -387,6 +449,7 @@ internal class Sampler(
                     var p: CoarseContext? = ctx
                     var d = 0
                     var n = 0
+                    var anyStale = false
                     while (p != null && d < MAX_COARSE_DEPTH) {
                         val pt = p.type
                         var seen = false
@@ -396,7 +459,20 @@ internal class Sampler(
                             j++
                         }
                         if (!seen) {
+                            // Recorded in the chain either way, stale or not, so that a type
+                            // appearing twice at different depths is still counted at most once.
                             chain[n++] = pt
+                            var stale = false
+                            if (p.isClosed()) {
+                                if (stillMounted < 0) {
+                                    stillMounted = if (s.contextOpaque() === ctx) 1 else 0
+                                }
+                                stale = stillMounted == 1
+                            }
+                            if (stale) {
+                                coarseStaleHits[pt]++
+                                anyStale = true
+                            } else {
                             coarseInclusiveHits[pt]++
                             if (!waiting) coarseRunningInclusiveHits[pt]++
                             // The pair, and the whole reason both halves are read in one visit.
@@ -412,10 +488,12 @@ internal class Sampler(
                                 p.tickStamp = ticks
                                 coarseInstanceTicks[pt]++
                             }
+                            }
                         }
                         p = p.parent
                         d++
                     }
+                    if (anyStale) staleContextHits++
                 } else if (c >= 0) {
                     // Labelled work, under no coarse span at all. See labelledOutsideCoarse.
                     labelledOutsideCoarse++
@@ -473,6 +551,10 @@ internal class Sampler(
             if (now >= nextReclaim) {
                 Profiler.reclaimDeadSlots()
                 nextReclaim = now + RECLAIM_NANOS
+                // Once a second and not per tick: it divides two running totals, and the answer
+                // cannot become interesting in a millisecond. Under strict this is the second thing
+                // that stops a session, and the only one the sampler decides for itself.
+                if (strict) checkStaleContexts()
             }
 
             if (prev == 0L) {
@@ -508,6 +590,33 @@ internal class Sampler(
      *
      * Stops sampling rather than the application: this is somebody else's process.
      */
+    /**
+     * Stops the session if too much work is being billed to executions that have finished.
+     *
+     * **Both halves of the condition matter**, and the share alone would be unusable. A helper that
+     * finishes a few microseconds after the join it was supposed to beat is a harmless race, and
+     * every fan-out has them; stopping a correct run over three samples is the loudest wrong answer
+     * this tool can give, and the floor check was already downgraded once for doing exactly that.
+     * So a minimum count keeps a handful of samples from being evidence of anything, and the share
+     * keeps a long run from tripping on an absolute number it was always going to reach.
+     *
+     * Fatal rather than a warning because of the direction: a below-floor label reports a number too
+     * imprecise to rank, which costs the reader nothing if ignored, while this one reports work
+     * belonging to an execution that had already ended — a plausible number that is simply false.
+     * That is the same category as a leaked label, and it gets the same treatment.
+     */
+    private fun checkStaleContexts() {
+        if (staleContextHits < STALE_MIN_HITS) return
+        if (coarseSampleHits <= 0L) return
+        val share = staleContextHits.toDouble() / coarseSampleHits
+        if (share <= STALE_MAX_SHARE) return
+        var worst = -1
+        for (t in 0 until MAX_COARSE_TYPES) {
+            if (worst < 0 || coarseStaleHits[t] > coarseStaleHits[worst]) worst = t
+        }
+        fail(staleContextMessage(Profiler.coarseNameOf(worst), staleContextHits, share))
+    }
+
     internal fun fail(reason: String) {
         if (failure != null) return
         failure = reason
@@ -575,6 +684,22 @@ internal class Sampler(
     private companion object {
         /** Once a second: this walks the whole ceiling, so it is not a per-tick cost. */
         const val RECLAIM_NANOS = 1_000_000_000L
+
+        /**
+         * Stale samples below which nothing is concluded, however large the share.
+         *
+         * A ratio taken against a small number is not evidence — the same lesson the long-instance
+         * detector's minimum instance count was learned from, where a quiet machine dropped the
+         * floor far enough that one long execution in two thousand cleared it three times over and
+         * meant nothing whatever.
+         */
+        const val STALE_MIN_HITS = 20L
+
+        /**
+         * Of the time spent inside coarse executions, the most that may be inside finished ones
+         * before the session stops.
+         */
+        const val STALE_MAX_SHARE = 0.01
     }
 
 }

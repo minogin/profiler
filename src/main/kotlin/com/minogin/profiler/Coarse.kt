@@ -1,5 +1,8 @@
 package com.minogin.profiler
 
+import java.lang.invoke.MethodHandles
+import java.lang.invoke.VarHandle
+
 /**
  * Ceiling on distinct coarse types. Same reasoning as [MAX_OPERATIONS] and a much smaller number:
  * coarse labels go on logical operations — serving a query, expanding a frontier — and fifty is
@@ -53,7 +56,44 @@ class CoarseContext @PublishedApi internal constructor(
      */
     @JvmField
     internal var tickStamp: Long = -1L
+
+    /**
+     * Whether the thread that opened this execution has closed it.
+     *
+     * **The one thing a borrowed context cannot tell you by looking at it.** A context that has been
+     * handed to a pool outlives the slot it came from: the owner closes its span and moves on, and
+     * any thread still mounted on it goes on being sampled into an execution that has finished. That
+     * is not attribution lost, which the report can already name — it is attribution *invented*, and
+     * without this flag nothing in the output would say so.
+     *
+     * Written once by the owning thread the moment it restores its slot, read by the sampler for
+     * every occupied context it visits. Opaque on both sides for the reason [OpSlot.current] is: a
+     * plain write here is a dead store from the writer's point of view and the JIT would be within
+     * its rights to drop it, while a volatile one buys ordering nothing here needs and costs a fence
+     * per coarse execution. A read a few nanoseconds stale is the same bargain every other field in
+     * this design makes.
+     */
+    @JvmField
+    internal var closed: Boolean = false
+
+    internal companion object {
+        @JvmStatic
+        val CLOSED: VarHandle = MethodHandles.lookup()
+            .findVarHandle(CoarseContext::class.java, "closed", Boolean::class.javaPrimitiveType)
+    }
 }
+
+/**
+ * Marks this execution finished, so a thread still mounted on it can be detected.
+ *
+ * `@PublishedApi` because [coarse] is inline and closes the context in a `finally` the compiler
+ * writes — the same reason [OpSlot.recordSpan] carries it.
+ */
+@PublishedApi
+internal fun CoarseContext.markClosed() = CoarseContext.CLOSED.setOpaque(this, true)
+
+/** Whether the owner has closed this execution. Read by the sampler, once per occupied context. */
+internal fun CoarseContext.isClosed(): Boolean = CoarseContext.CLOSED.getOpaque(this) as Boolean
 
 /**
  * A log-bucket histogram of span durations: fixed memory, any percentile to a known precision.
@@ -193,6 +233,9 @@ inline fun <T> coarse(type: Int, body: () -> T): T {
         // Restored before the span is recorded, so the recording itself is never billed to the
         // execution it is closing.
         slot.setContextOpaque(parent)
+        // Marked the moment this thread leaves it, and before the span is recorded: from here on,
+        // any thread still mounted on this context is working under an execution that is over.
+        ctx.markClosed()
         slot.recordSpan(type, System.nanoTime() - ctx.startNanos)
     }
 }
@@ -221,5 +264,6 @@ fun exitCoarse() {
     val s = Profiler.slot()
     val ctx = s.contextOpaque() ?: return
     s.setContextOpaque(ctx.parent)
+    ctx.markClosed()
     s.recordSpan(ctx.type, System.nanoTime() - ctx.startNanos)
 }

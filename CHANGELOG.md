@@ -33,6 +33,29 @@ every span collapses from **76.4%** to **0.0%**. Root calls are conserved exactl
 the escaping arm is still runnable as `--propagate=off`, so the before and after are an A/B in one
 binary.
 
+### Work that outlives its span
+
+The failure propagation makes easier rather than harder, and the one direction that cannot be
+recovered from: a task handed to another thread and never waited for goes on being billed to a
+request that has already finished. Attribution invented, not lost.
+
+A `closed` flag on the context, written once by the owner as it restores its slot and read by the
+sampler for every occupied context it visits. Nothing else could see this — the balance check reads a
+thread's own slot and finds it clean, the floor check reads sizes, and the outside-every-span line
+reads work with no context at all.
+
+Those samples are **excluded** from every number the type reports rather than folded in: crediting
+them lets `busy/exec` exceed the `mean` span it sits inside, which cannot happen and would read as a
+finding. Under `strict` it stops the session, above a share and a minimum sample count, which is the
+same treatment a leaked label gets. `--leakcheck` now stages both and asserts each fires only under
+strict.
+
+Measured: **18.3%** of coarse thread-time with the bench staging an un-joined chunk per request,
+**0.00%** with nothing staged. Getting the second number needed a second read — a clean join has the
+helper release the context just before the owner closes it, which falls between the sampler's two
+reads and read 1.14% stale on a correct run. On seeing a closed context the sampler now re-reads the
+slot and asks whether the thread is still in it.
+
 ### The coarse tier
 
 The half the fine tier could not reach: **how long did one execution take.** A `coarse(type) { }`

@@ -13,6 +13,17 @@ const val STAGE_HOOK = 4
 internal const val CLOCK_CHUNK = 256
 
 /**
+ * Root calls in a chunk dispatched under a request that will not wait for it.
+ *
+ * Four ordinary chunks, so that it reliably outlives the join it was never part of. At one chunk it
+ * usually finished while the request was still open and only its tail was stale, which measured
+ * 0.81% of coarse thread-time — real, but close enough to nothing that a threshold separating it
+ * from a clean run would have had almost no room in it. The staging is artificial either way; what
+ * it has to be is unambiguous.
+ */
+internal const val ESCAPE_CHUNK = 256 * 4
+
+/**
  * A gap between two consecutive clock checks longer than this is taken to be the thread having
  * been off the CPU rather than slow.
  *
@@ -86,6 +97,8 @@ class Worker(
      * existing one — see [runFannedOut].
      */
     private val fanout: Fanout? = null,
+    /** Whether each request leaves one chunk un-joined on purpose. See [Bench.escape]. */
+    private val escape: Boolean = false,
 ) : Thread("bench-$id") {
 
     @Volatile var stage: Int = 0
@@ -157,12 +170,14 @@ class Worker(
     var fanoutSpanNanos: Long = 0; private set
 
     /**
-     * Chunks this worker dispatched. Times [CLOCK_CHUNK] it is exactly how many root calls its
-     * requests asked for, which is the conservation check: the helpers must have run precisely that
-     * many and not one more. Counts, not durations, so it says the same thing whatever speed the
-     * machine chose to run at.
+     * Root calls this worker dispatched to the pool — the conservation check: the helpers must have
+     * run precisely this many and not one more.
+     *
+     * Calls rather than chunks, because a staged escape is deliberately a *longer* chunk than the
+     * rest and counting chunks would make the two disagree by construction. Counts either way, so it
+     * says the same thing whatever speed the machine chose to run at.
      */
-    var fanoutChunks: Long = 0; private set
+    var fanoutDispatchedCalls: Long = 0; private set
 
     /** Hook analysis: the hook timed alone, and leaf operations timed with and without it. */
     var hookDirect: Double = Double.NaN
@@ -193,7 +208,7 @@ class Worker(
         requestsDropped = 0
         fanoutOccupancyNanos = 0
         fanoutSpanNanos = 0
-        fanoutChunks = 0
+        fanoutDispatchedCalls = 0
     }
 
     override fun run() {
@@ -338,6 +353,7 @@ class Worker(
      * exists to reproduce: the request's span covers work that its own samples will never see.
      */
     private fun runFannedOut(f: Fanout, reqType: Int) {
+        val escaping = escape
         var i = idx
         val d = deadline
         val started = System.nanoTime()
@@ -360,7 +376,16 @@ class Worker(
                 i += CLOCK_CHUNK
                 c++
             }
-            dispatched += chunks
+            dispatched += chunks.toLong() * CLOCK_CHUNK
+            // One more that this request will not wait for. It is still dispatched under the
+            // request's context, so when exitCoarse runs a moment later there is a helper working
+            // inside an execution that has ended — which is precisely the thing to be detected, and
+            // a check nobody has watched fire is a check nobody knows is wired up.
+            if (escaping) {
+                f.submitEscaping(i, ESCAPE_CHUNK, req)
+                i += ESCAPE_CHUNK
+                dispatched += ESCAPE_CHUNK
+            }
             f.await(req)
             exitCoarse()
             val span = System.nanoTime() - reqStart
@@ -371,7 +396,7 @@ class Worker(
         }
         fanoutOccupancyNanos = occ
         fanoutSpanNanos = spans
-        fanoutChunks = dispatched
+        fanoutDispatchedCalls = dispatched
         runWallNanos = System.nanoTime() - started
         idx = i
     }
@@ -584,6 +609,11 @@ class Bench(
     val helpers: Int = 0,
     /** Whether a fanned-out chunk carries the coarse execution its driver was inside. See [Fanout]. */
     val propagate: Boolean = true,
+    /**
+     * Whether each request also dispatches one chunk nobody waits for, so it outlives the span it
+     * was forked under. Staged on purpose — see [Fanout.submitEscaping].
+     */
+    val escape: Boolean = false,
 ) {
     private val barrier = CyclicBarrier(threads + helpers + 1)
 
@@ -595,7 +625,7 @@ class Bench(
     val fanout = if (helpers > 0) Fanout(helpers, workload, labeled, barrier, propagate) else null
 
     val workers = List(threads) {
-        Worker(it, it < activeThreads, labeled, workload, barrier, contended, lockOpId, fanout)
+        Worker(it, it < activeThreads, labeled, workload, barrier, contended, lockOpId, fanout, escape)
     }
 
     /** Every thread that runs bench work: the active drivers and the helpers behind them. */

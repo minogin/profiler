@@ -722,6 +722,7 @@ object Profiler {
                 instanceTicks = s.coarseInstanceTicks[t],
                 activeTicks = s.coarseActiveTicks[t],
                 fine = LongArray(MAX_OPERATIONS + 1) { s.pairHits[t * (MAX_OPERATIONS + 1) + it] },
+                staleHits = s.coarseStaleHits[t],
             )
         }
         return Report(
@@ -733,6 +734,8 @@ object Profiler {
             coarse = coarse,
             openContextsAtEnd = openContexts(),
             labelledOutsideCoarse = s.labelledOutsideCoarse,
+            staleContextHits = s.staleContextHits,
+            coarseSampleHits = s.coarseSampleHits,
         )
     }
 }

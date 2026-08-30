@@ -1562,6 +1562,54 @@ off, 447,320,320 against 447,320,320 with it on.
 alive rather than deleting them, so the before and the after are an A/B inside one binary. The mount
 is branched around rather than passed a null, so the off arm runs the code 5a measured.
 
+### Work that outlives the span that forked it
+
+**The detector that had to exist before automatic propagation could be considered.** Phase 5c, run
+2026-08-30. Clock: **171.2%** of nominal over the clean run (97.7–228.9, 119 samples) and **183.4%**
+over the staged one (87.5–234.9, 76 samples — the probe's window ended before the run did, so the
+last minute of that arm has no trace beside it). None failed.
+
+| 1 driver x 8 helpers | nothing staged | one chunk per request left un-joined |
+|---|---|---|
+| stale share of coarse thread-time | **0.00%** | **18.33%** |
+| same, at 7 drivers | **0.00%** | **12.58%** |
+| `inside` against the bench's stopwatch | 5.35 against 5.35 | not gated — see below |
+
+**A context that has been closed is the only signal, and nothing else in the tool can see it.** The
+balance check reads a thread's own slot and finds it clean; the floor check reads sizes; the
+outside-every-span line reads work with *no* context. This is work with a context that is no longer
+real, and the flag on the context is what separates the two.
+
+**These samples are excluded from every number the type reports.** Crediting them lets `busy/exec`
+exceed the mean span it is supposed to sit inside — arithmetically impossible, and it would read as a
+finding rather than as a fault.
+
+**A benign ordering looked exactly like the fault, and cost a correct run.** The sampler reads a
+thread's context and reads the closed flag microseconds later; a helper that unmounts cleanly just
+before its request closes falls between the two. That is not a rare race but the *common* path
+through a clean join — the helper releases the context, and only then can the owner learn it may
+close. Measured at **1.14%** of coarse thread-time on a run where nothing had escaped, which is over
+the 1% strict threshold and stopped a sixty-second session one second in. The fix is a second read
+rather than a wider threshold: on seeing a closed context, re-read the slot and ask whether the
+thread is *still* in it. Benign, and it has already left; genuine, and it stays for as long as the
+work runs. One extra opaque read, only on the rare visit that sees a closed context, and the clean
+run went to 0.00%.
+
+**Staging it needed a longer chunk than the rest, and the first attempt was too subtle.** An
+un-joined chunk the same size as its siblings usually finishes while the request is still open, so
+only its tail is ever stale: **0.81%**, true and far too close to a clean run for any threshold to
+separate. Four times the length makes it unambiguous.
+
+**The fan-out numbers are reported and not gated while an escape is staged**, and that is not
+leniency. The bench's own truth for `inside` sums helper occupancy *at the join*, and an un-joined
+chunk is by definition not there — so the bench under-reports the threads that were in the request
+while the sampler counts all of them. The gap is the staging.
+
+**Both rungs of the fatal ladder now fire under `--leakcheck`.** A leaked label stops a strict
+session and names the operation; work under a finished execution does the same, at 995 samples and
+100.0% of coarse thread-time, and neither stops a non-strict one. The strict path is exercised there
+rather than in `--fanout`, where a stopped session would measure nothing.
+
 ## Open questions
 
 **What the bench's duration tolerance should be on a warm machine.** Settled above that `--coarse` is

@@ -1,6 +1,7 @@
 package com.minogin.profiler
 
 import java.util.concurrent.Callable
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.test.Test
@@ -26,13 +27,43 @@ class PropagateTest {
     /** What the calling thread is inside, read the way the sampler reads it. */
     private fun current(): CoarseContext? = Profiler.slot().contextOpaque()
 
-    /** Runs [body] on a thread of its own and hands back what it returned. */
+    /**
+     * Runs [body] on a thread of its own and hands back what it returned.
+     *
+     * The `finally` is not tidiness. `Profiler` is process-wide and these tests share it: a thread
+     * that takes a slot and dies without giving it back holds that index for the life of the JVM,
+     * and `RegistryTest` asserts that indexes get reused. Releasing is also exactly what the library
+     * asks a caller to do, so the tests may as well be an example of it.
+     */
     private fun <T> onAnotherThread(body: () -> T): T {
         var result: Result<T>? = null
-        val t = Thread { result = runCatching(body) }
+        val t = Thread {
+            try {
+                result = runCatching(body)
+            } finally {
+                Profiler.release()
+            }
+        }
         t.start()
         t.join()
         return result!!.getOrThrow()
+    }
+
+    /**
+     * A pool whose threads give their slots back when they exit.
+     *
+     * Same reason as above, one level further out: a pool thread outlives any single task, so the
+     * release belongs at the end of the thread's life rather than at the end of a task's — which is
+     * what a thread factory is for, and what a real caller with a long-lived pool has to do too.
+     */
+    private fun pool(n: Int): ExecutorService = Executors.newFixedThreadPool(n) { r ->
+        Thread {
+            try {
+                r.run()
+            } finally {
+                Profiler.release()
+            }
+        }
     }
 
     @Test
@@ -139,7 +170,7 @@ class PropagateTest {
     @Test
     fun `a propagating executor service carries the execution through submit`() {
         val t = Profiler.registerCoarse("prop-executor")
-        val pool = Executors.newSingleThreadExecutor().propagating()
+        val pool = pool(1).propagating()
         try {
             val seen = coarse(t) { pool.submit(Callable { current() }).get() }
             assertNotNull(seen, "submit did not carry the context")
@@ -153,7 +184,7 @@ class PropagateTest {
     @Test
     fun `a propagating executor service carries the execution through invokeAll`() {
         val t = Profiler.registerCoarse("prop-invokeall")
-        val pool = Executors.newFixedThreadPool(2).propagating()
+        val pool = pool(2).propagating()
         try {
             val seen = coarse(t) {
                 pool.invokeAll(listOf(Callable { current() }, Callable { current() })).map { it.get() }
@@ -169,12 +200,59 @@ class PropagateTest {
     fun `a propagating executor forwards lifecycle calls to the delegate`() {
         // The methods that carry no work must still reach the pool underneath, or a wrapped pool
         // could never be shut down and the wrapper would leak threads for the life of the process.
-        val underlying = Executors.newSingleThreadExecutor()
+        val underlying = pool(1)
         val pool = underlying.propagating()
         pool.shutdown()
         assertTrue(underlying.awaitTermination(5, TimeUnit.SECONDS))
         assertTrue(underlying.isShutdown, "shutdown did not reach the delegate")
         assertTrue(pool.isTerminated, "isTerminated did not reach the delegate")
+    }
+
+    // --- a context that outlives its span ---------------------------------------------
+
+    @Test
+    fun `a context is not closed while its owner is inside it`() {
+        val t = Profiler.registerCoarse("prop-open")
+        coarse(t) {
+            val ctx = assertNotNull(current())
+            assertTrue(!ctx.isClosed(), "the execution reported itself finished while it was running")
+        }
+    }
+
+    @Test
+    fun `a context is closed once its owner leaves it`() {
+        // What the sampler reads to tell "a thread is working on this request" from "a thread is
+        // working on a request that ended". Nothing else can distinguish those: the owner's slot is
+        // clean either way, so the balance check sees nothing wrong.
+        val t = Profiler.registerCoarse("prop-closed")
+        var captured: CoarseContext? = null
+        coarse(t) { captured = current() }
+        assertTrue(assertNotNull(captured).isClosed(), "a finished execution did not mark itself closed")
+    }
+
+    @Test
+    fun `a context is closed by the non-lexical form too`() {
+        // enter/exit is the form third-party code forces on you, and it is the form most likely to
+        // be handing work around, so it is the one that must not be missed.
+        val t = Profiler.registerCoarse("prop-closed-nonlexical")
+        enterCoarse(t)
+        val ctx = assertNotNull(current())
+        exitCoarse()
+        assertTrue(ctx.isClosed(), "exitCoarse did not mark the execution closed")
+    }
+
+    @Test
+    fun `a borrowed context outliving its span is visible as closed`() {
+        // The whole failure mode in one test: the task is wrapped inside the request, the request
+        // ends, and only then does the task run. Its context is still mountable and still names the
+        // right operation, which is exactly why this is the dangerous direction - everything looks
+        // plausible. The flag is the only thing that says otherwise.
+        val t = Profiler.registerCoarse("prop-outlives")
+        val task = Callable { current() }
+        val wrapped = coarse(t) { task.propagating() }
+        val seen = assertNotNull(onAnotherThread { wrapped.call() }, "the context did not cross")
+        assertEquals(t, seen.type)
+        assertTrue(seen.isClosed(), "work outliving its span did not look stale")
     }
 
     /**
@@ -187,7 +265,15 @@ class PropagateTest {
     @Test
     fun `schedule deliberately does not carry the execution`() {
         val t = Profiler.registerCoarse("prop-scheduled")
-        val pool = Executors.newSingleThreadScheduledExecutor().propagating()
+        val pool = Executors.newSingleThreadScheduledExecutor { r ->
+            Thread {
+                try {
+                    r.run()
+                } finally {
+                    Profiler.release()
+                }
+            }
+        }.propagating()
         try {
             val delayed = coarse(t) { pool.schedule(Callable { current() }, 1, TimeUnit.MILLISECONDS) }
             assertNull(delayed.get(), "a delayed task inherited a context it will usually outlive")

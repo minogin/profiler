@@ -130,6 +130,12 @@ fun main(args: Array<String>) {
     // A/B in one binary rather than a claim about a build that no longer exists. On by default,
     // because from 5b onwards the tool having propagation is the normal state of affairs.
     val propagate = opt["propagate"] != "off"
+
+    // --escape stages the contaminating failure: each request dispatches one chunk under its context
+    // that nobody joins, so it is still running when the span closes. The detector must fire on it,
+    // and must stay silent without it - a check asserted in one direction only would still pass if
+    // it were wired to nothing, which is the mistake --leakcheck was written to avoid.
+    val escape = opt["escape"] != null
     require(fanoutHelpers == null || (coarseLabels && labels)) {
         "--fanout needs --coarse and labels: the context it is trying to cross is a coarse one"
     }
@@ -348,7 +354,7 @@ fun main(args: Array<String>) {
     } else if (sweep != null) {
         runSweep(sweep, labels, workload, seconds, warmedUp)
     } else if (fanoutHelpers != null) {
-        runFanout(fanoutHelpers, threads, labels, workload, seconds, stepMillis, sampleState, propagate)
+        runFanout(fanoutHelpers, threads, labels, workload, seconds, stepMillis, sampleState, propagate, escape)
     } else {
         val bench = Bench(threads, activeThreads, labels, workload, contended, lockOpId)
         bench.start()
@@ -545,18 +551,23 @@ private fun runFanout(
     stepMillis: Double,
     sampleState: Boolean,
     propagate: Boolean,
+    escape: Boolean,
 ): Boolean {
     val configs = listOf(1, drivers).distinct()
     val rows = ArrayList<FanoutRow>()
     for (d in configs) {
         println("\n--- Fan-out: $d driver(s) x $helpers helpers, $seconds s ---")
-        val bench = Bench(d, d, labels, workload, helpers = helpers, propagate = propagate)
+        val bench = Bench(d, d, labels, workload, helpers = helpers, propagate = propagate, escape = escape)
         bench.start()
         // The helpers are threads the JIT has never seen run this code. Without a re-warm the first
         // entry would measure compilation and the second would not, and the difference would be
         // read as the thing being varied.
         bench.run(SWEEP_REWARM_NANOS)
-        val sampler = Sampler((stepMillis * 1_000_000).toLong(), sampleState = sampleState)
+        // Strict off when an escape is staged, and only then: the point of --escape is to measure how
+        // much escapes, and a strict session would stop at the first second and measure nothing. That
+        // the strict path fires at all is asserted in --leakcheck, where it is the subject rather
+        // than an obstacle.
+        val sampler = Sampler((stepMillis * 1_000_000).toLong(), strict = !escape, sampleState = sampleState)
         val outcome = measureOnce(bench, seconds, sampler)
         println(
             String.format(
@@ -570,7 +581,7 @@ private fun runFanout(
         if (!Profiler.expectBalanced()) println("  ! a label was left open at the end of this entry")
         bench.stop()
     }
-    return reportFanout(rows, propagate)
+    return reportFanout(rows, propagate, escape)
 }
 
 /**
@@ -689,9 +700,85 @@ private fun checkLeakStopsTheSession(): Boolean {
         )
         report.failure?.let { println("    $it") }
     }
-    println(if (ok) "  the ladder is real: one rung, and it fires" else "  THE LADDER IS BROKEN")
+    ok = checkStaleStopsTheSession() && ok
+    println(if (ok) "  the ladder is real: both rungs, and they fire" else "  THE LADDER IS BROKEN")
     return ok
 }
+
+/**
+ * The second fatal condition, staged the same way: work billed to an execution that has finished.
+ *
+ * **A different fault from a leak and it has to be staged differently.** A leak is one thread's slot
+ * left dirty, and `expectBalanced` finds it by looking at that slot. This is a context properly
+ * closed by its owner and still mounted somewhere else — every slot involved is clean, and only the
+ * sampler, walking contexts it did not create, can see it at all.
+ *
+ * The staging is the smallest thing that produces it: capture a context, let its span close, then
+ * work under it. That is exactly what a task handed to a pool and never waited for does, with the
+ * timing made deterministic instead of hoped for.
+ *
+ * Both directions, as above. The strict run must stop and name the operation; the non-strict run
+ * must reach the end with the same work done — otherwise the flag is wired to nothing and the first
+ * half would pass anyway.
+ */
+private fun checkStaleStopsTheSession(): Boolean {
+    val fine = Profiler.register("workedAfterTheSpanClosed")
+    val type = Profiler.registerCoarse("spanThatClosedEarly")
+    println("\n--- Stale check: does work under a finished execution stop the session? ---")
+    var ok = true
+
+    for (strict in listOf(true, false)) {
+        Profiler.start(stepMillis = 1.0, strict = strict)
+        val worker = Thread {
+            // Closed the moment the block ends, and captured on the way out — so from here on this
+            // context names an execution that is over.
+            val ctx = coarse(type) { captureCoarse() }
+            // Long enough for the once-a-second check to run twice, and for the minimum sample count
+            // to be passed several times over. Nothing else in this process is labelled, so the
+            // share is effectively 100% and the threshold is not what is under test here.
+            val until = System.nanoTime() + STALE_STAGE_NANOS
+            var s = 1L
+            withCoarse(ctx) {
+                while (System.nanoTime() < until) s = op(fine) { burn(s, 4096) }
+            }
+            Sink.consume(s)
+            Profiler.release()
+        }
+        worker.start()
+        worker.join()
+        val report = Profiler.stop()
+
+        val stopped = report.failure != null
+        val named = report.failure?.contains("spanThatClosedEarly") == true
+        // The detector must also have kept the contamination out of the type's own numbers, which is
+        // the half a failure message cannot tell you about.
+        //
+        // Not exactly zero credited, and asserting that was wrong: the staged `coarse(type) { }` is
+        // itself a real execution lasting a moment, and a sample can legitimately land inside it. One
+        // did. What has to hold is that the staged work — thousands of samples — is not in there, so
+        // the test is that the stale count dominates rather than that the credited count vanishes.
+        val excluded = report.coarse.firstOrNull { it.name == "spanThatClosedEarly" }
+            ?.let { it.staleHits > 0 && it.inclusiveHits * 100 < it.staleHits } == true
+        val good = stopped == strict && (!strict || named) && excluded
+        if (!good) ok = false
+        println(
+            String.format(
+                Locale.ROOT,
+                "  strict=%-5s  stopped: %-5s (expected %-5s)  named it: %-5s  stale %,d samples, " +
+                        "credited %,d  %s",
+                strict, stopped, strict, named,
+                report.staleContextHits,
+                report.coarse.firstOrNull { it.name == "spanThatClosedEarly" }?.inclusiveHits ?: -1L,
+                if (good) "ok" else "FAIL"
+            )
+        )
+        report.failure?.let { for (line in it.lines()) println("    $line") }
+    }
+    return ok
+}
+
+/** Long enough for the once-a-second stale check to run more than once. */
+private const val STALE_STAGE_NANOS = 2_500_000_000L
 
 /**
  * Everything a third party has to do to use this, and nothing else. No bench, no truth, no

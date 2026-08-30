@@ -1170,7 +1170,7 @@ Six steps. Each one is a commit, and each has a number that must move before the
 |---|---|---|
 | **5a** | fork/join in the bench, **propagation off** · **done** | the defect reproduced where the truth is known: parallelism pinned at 1.0, the span accounting for 0.3% of its own work, 76% outside every span. [findings.md](findings.md#crossing-threads) |
 | **5b** | `captureCoarse` / `withCoarse` and the wrappers · **done** | `inside` rises to the bench's measured fan-out — 4.00 against 4.00, within 0.1%; the span goes from accounting for 0.2% of its own work to 105%; outside-coarse collapses 76.4% → 0.0%. [findings.md](findings.md#propagation-and-the-same-three-numbers-inverted) |
-| **5c** | the stale-context detector | a bench mode that stages an escape on purpose, asserting **both** directions the way `--leakcheck` does |
+| **5c** | the stale-context detector · **done** | `--fanout --escape` stages an un-joined chunk per request: 18.33% of coarse thread-time caught inside a finished execution, against **0.00%** with nothing staged. Fatal under strict, and both rungs of the ladder now fire under `--leakcheck`. [findings.md](findings.md#work-that-outlives-the-span-that-forked-it) |
 | **5d** | the `inside` and `working` columns · **done in 5b** | landed with the mechanism rather than after it, because the pair is what the measurement is read through. See "Two parallelisms" below, which needed amending: there are three groupings, not two |
 | **5e** | Lucene at eight threads, clock trace beside it | 88.5% outside-coarse collapses; Calcite and Netty stay silent |
 | **5f** | `profiler-coroutines`, a second module | the core POM keeps saying it has no dependencies; the suspended-span decision written down deliberately |
@@ -1229,6 +1229,27 @@ not of the wrapper giving up on scheduled pools.
 *The escaping arm survives as a switch.* `--propagate=off` still runs 5a's three assertions, and the
 mount is branched around rather than passed a null, so that arm executes the code 5a measured. The
 before and the after are an A/B inside one binary rather than a claim about a build nobody can run.
+
+*What 5c built.* A `closed` flag on `CoarseContext`, written once by the owner as it restores its
+slot and read by the sampler for every occupied context it visits. Samples caught under a closed
+execution are counted separately and **excluded** from everything that type reports — crediting them
+lets `busy/exec` exceed the mean span it sits inside, which is impossible arithmetic that reads as a
+finding. Fatal under strict above a share, with a minimum sample count beside it so that a handful of
+samples is never evidence.
+
+*The check needed a second read, and finding that out cost a run.* The sampler reads a slot's context
+and reads the closed flag microseconds later, and a clean join goes through exactly that gap: the
+helper releases the context, and only then can the owner close it. A correct run read **1.14%** stale
+and the strict check stopped it one second into sixty. The answer is not a wider threshold but asking
+a sharper question — on seeing a closed context, re-read the slot and ask whether the thread is still
+in it. Benign, and it has already gone; real, and it stays for as long as the work does. Clean runs
+then read 0.00%.
+
+*What this unlocks, and it is why the ordering put it here.* The standing argument against
+propagating automatically is that it would carry a context into fire-and-forget work that outlives
+the request — inventing attribution, which nothing could then detect. Something can now detect it.
+That does not settle the auto-wrap question, which still waits on 5e, but it removes its strongest
+objection.
 
 ### Two parallelisms, and the identity that relates them · settled before any of it was built, amended in 5b
 

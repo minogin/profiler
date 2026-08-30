@@ -76,6 +76,37 @@ private const val WORK_TOLERANCE = 0.25
 private const val OUTSIDE_MAX_SHARE = 0.10
 
 /**
+ * The most coarse thread-time that may be billed to a finished execution when nothing is staged.
+ *
+ * Zero is the honest expectation and not merely the hope: a helper releases the context before it
+ * counts its latch down, so a driver cannot close a span while a helper it is waiting for is still
+ * mounted. Measured, it rounds to **0.00%** in both configurations.
+ *
+ * It did not, at first. Before the sampler confirmed that a thread was *still* mounted on a context
+ * it had seen closed, a clean run read **1.14%** — the benign ordering above, caught between the
+ * sampler's two reads — which was over the strict threshold and stopped a correct sixty-second run
+ * one second in. The floor is kept rather than demanding exact zero because this is a share of a
+ * sampled denominator, not because anything is expected to land in it.
+ */
+private const val STALE_MAX_SHARE = 0.001
+
+/**
+ * The least stale thread-time that must show up when a chunk per request is deliberately left
+ * un-joined.
+ *
+ * Set from measurement: **12.58% to 18.33%** across four runs and both configurations. This sits a
+ * factor of two and a half below the lowest of them, because what it tests is that the detector is
+ * wired up at all rather than how much escapes — and how much escapes depends on how the scheduler
+ * happens to order a race.
+ *
+ * The first version of the staging made the escaping chunk the same size as the rest, and it read
+ * **0.81%**: an un-joined chunk usually finished while the request was still open, so only its tail
+ * was ever stale. True, and far too close to a clean run for a threshold to separate the two. The
+ * chunk is four times longer now — see `ESCAPE_CHUNK`.
+ */
+private const val STALE_MIN_STAGED_SHARE = 0.05
+
+/**
  * One fan-out configuration, as the bench measured it and as the profiler reported it.
  *
  * The two halves are kept side by side on purpose. Every quantity on the bench's side is either a
@@ -88,7 +119,7 @@ internal class FanoutRow(
     val requests: Long,
     /** Root calls the helpers actually ran. */
     val rootCalls: Long,
-    /** Root calls the drivers asked for: chunks dispatched times [CLOCK_CHUNK]. Exact. */
+    /** Root calls the drivers dispatched to the pool. Exact. */
     val expectedRootCalls: Long,
     /**
      * Helper occupancy over request span, by the bench's own stopwatch. The fan-out the pool
@@ -105,6 +136,8 @@ internal class FanoutRow(
     val profilerBusyPerExecNanos: Double,
     /** Labelled thread-time that fell under no coarse span at all. */
     val outsideShare: Double,
+    /** Of the thread-time inside coarse executions, the share inside one already closed. */
+    val staleShare: Double,
     val meanSpanNanos: Double,
 ) {
     /** Whether this configuration achieved enough fan-out for anything to be asserted about it. */
@@ -140,7 +173,7 @@ internal fun fanoutRow(bench: Bench, o: Outcome, sampler: Sampler, stepMillis: D
         helpers = bench.helpers,
         requests = requests,
         rootCalls = o.rootCalls,
-        expectedRootCalls = bench.workers.sumOf { it.fanoutChunks } * CLOCK_CHUNK,
+        expectedRootCalls = bench.workers.sumOf { it.fanoutDispatchedCalls },
         benchHelperThreads = bench.measuredParallelism(),
         profilerInside = if (ticks == 0L) Double.NaN
         else sampler.coarseInclusiveHits[t].toDouble() / ticks,
@@ -149,6 +182,8 @@ internal fun fanoutRow(bench: Bench, o: Outcome, sampler: Sampler, stepMillis: D
         truthWorkPerExecNanos = if (requests == 0L) Double.NaN else o.totB / requests,
         profilerBusyPerExecNanos = sampler.coarseRunningInclusiveHits[t] * stepNanos / count,
         outsideShare = if (labelled == 0L) 0.0 else sampler.labelledOutsideCoarse.toDouble() / labelled,
+        staleShare = if (sampler.coarseSampleHits == 0L) 0.0
+        else sampler.staleContextHits.toDouble() / sampler.coarseSampleHits,
         meanSpanNanos = o.coarseTotals[t]?.let { it.sumNanos.toDouble() / maxOf(1L, it.count) } ?: Double.NaN,
     )
 }
@@ -177,26 +212,29 @@ internal fun fanoutRow(bench: Bench, o: Outcome, sampler: Sampler, stepMillis: D
  *    "the profiler cannot see it" check trivially, which is the shape of vacuous pass this project
  *    has already been caught by once.
  */
-internal fun reportFanout(rows: List<FanoutRow>, propagate: Boolean): Boolean {
+internal fun reportFanout(rows: List<FanoutRow>, propagate: Boolean, escape: Boolean): Boolean {
     var ok = true
     println("\n" + "=".repeat(118))
-    println("PHASE 5 - FAN-OUT, PROPAGATION " + if (propagate) "ON" else "OFF")
+    println(
+        "PHASE 5 - FAN-OUT, PROPAGATION " + (if (propagate) "ON" else "OFF") +
+                (if (escape) ", ONE CHUNK PER REQUEST DELIBERATELY NOT JOINED" else "")
+    )
     println("=".repeat(118))
     println(
         String.format(
-            Locale.ROOT, "%9s %9s %12s %10s %10s %10s %12s %12s %9s",
+            Locale.ROOT, "%9s %9s %12s %10s %10s %10s %12s %12s %9s %8s",
             "drivers", "helpers", "requests", "bench in", "inside", "working",
-            "work/exec", "busy/exec", "outside"
+            "work/exec", "busy/exec", "outside", "stale"
         )
     )
     println("-".repeat(118))
     for (r in rows) {
         println(
             String.format(
-                Locale.ROOT, "%9d %9d %,12d %10.2f %10.2f %10.2f %12s %12s %8.1f%%",
+                Locale.ROOT, "%9d %9d %,12d %10.2f %10.2f %10.2f %12s %12s %8.1f%% %7.2f%%",
                 r.drivers, r.helpers, r.requests, r.benchInside, r.profilerInside, r.profilerWorking,
                 duration(r.truthWorkPerExecNanos), duration(r.profilerBusyPerExecNanos),
-                r.outsideShare * 100
+                r.outsideShare * 100, r.staleShare * 100
             )
         )
     }
@@ -206,6 +244,7 @@ internal fun reportFanout(rows: List<FanoutRow>, propagate: Boolean): Boolean {
     println("inside    is inclusiveHits / instanceTicks, sampled; working is the running half of it")
     println("work/exec is the run's total work over its requests; busy/exec is what the span could see")
     println("outside   is labelled thread-time that fell under no coarse span at all")
+    println("stale     is the share of time inside coarse executions that was inside a CLOSED one")
 
     // --- 1. conservation, exact and clock-independent --------------------------------
     println("\n  root calls: dispatched against executed")
@@ -237,6 +276,12 @@ internal fun reportFanout(rows: List<FanoutRow>, propagate: Boolean): Boolean {
     }
 
     // --- 3. the direction the switch selected -------------------------------------------
+    if (escape) {
+        println()
+        println("  the fan-out numbers below are REPORTED AND NOT GATED while an escape is staged:")
+        println("    the bench sums helper occupancy at the join, and an un-joined chunk is not there,")
+        println("    so its own truth is short by exactly the thing being staged")
+    }
     for (r in fanned) {
         println(
             String.format(
@@ -246,7 +291,36 @@ internal fun reportFanout(rows: List<FanoutRow>, propagate: Boolean): Boolean {
             )
         )
         val good = if (propagate) checkPropagated(r) else checkEscaped(r)
-        if (!good) ok = false
+        // Not gated when a chunk per request is deliberately un-joined, and this is not leniency.
+        // The bench's own truth for `inside` is helper occupancy summed *at the join*, and an
+        // un-joined chunk is by definition not there — so the bench under-reports the threads that
+        // were in the request while the sampler counts them all. The gap is the staging, not the
+        // instrument, and gating on it would report a fault the moment we staged a different one.
+        if (!good && !escape) ok = false
+    }
+
+    // --- 4. the stale-context detector, asserted in both directions --------------------
+    //
+    // Both directions, because a check asserted only when it is supposed to fire would pass just as
+    // happily if it were wired to nothing at all. That is the mistake --leakcheck exists to avoid
+    // and the reasoning is identical here.
+    println()
+    println(
+        if (escape) "  the stale-context detector, with one chunk per request left un-joined:"
+        else "  the stale-context detector, with nothing staged - it must stay silent:"
+    )
+    for (r in rows) {
+        val bad = if (escape) r.staleShare < STALE_MIN_STAGED_SHARE else r.staleShare > STALE_MAX_SHARE
+        if (bad) ok = false
+        println(
+            String.format(
+                Locale.ROOT, "    %d x %d   %.2f%% of coarse thread-time was inside a closed execution   %s",
+                r.drivers, r.helpers, r.staleShare * 100,
+                if (!bad) (if (escape) "detected" else "silent")
+                else if (escape) "NOT DETECTED - the escape was staged and nothing saw it"
+                else "UNEXPECTED - nothing was staged, so nothing should be stale"
+            )
+        )
     }
 
     // Reported and never gated. It is the honest answer rather than a defect: with as many drivers as
@@ -264,10 +338,14 @@ internal fun reportFanout(rows: List<FanoutRow>, propagate: Boolean): Boolean {
         println("    saturated, so there was no fan-out to miss and nothing is asserted about it")
     }
 
+    println()
     println(
-        "\n  fan-out: " + if (!ok) "FAILED" else if (propagate)
-            "OK - the context crosses the thread and the span sees the work"
-        else "OK - the defect reproduces against a measured truth"
+        "  fan-out: " + when {
+            !ok -> "FAILED"
+            escape -> "OK - the detector sees work outliving the span that forked it"
+            propagate -> "OK - the context crosses the thread and the span sees the work"
+            else -> "OK - the defect reproduces against a measured truth"
+        }
     )
     return ok
 }

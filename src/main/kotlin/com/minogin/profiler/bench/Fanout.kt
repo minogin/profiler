@@ -69,6 +69,13 @@ class Fanout(
          * the driver's context is not reachable from it and its own is empty.
          */
         @JvmField val ctx: CoarseContext?,
+        /**
+         * Whether the driver counts this chunk down and waits for it.
+         *
+         * False for a chunk deliberately left un-joined, so it outlives the span it was forked
+         * under. See [submitEscaping].
+         */
+        @JvmField val joined: Boolean,
     )
 
     private val queue = LinkedBlockingQueue<Chunk>()
@@ -108,7 +115,24 @@ class Fanout(
     /** Hands one window of the schedule to whichever helper takes it first. */
     fun submit(start: Int, calls: Int, req: Request) {
         pending.incrementAndGet()
-        queue.put(Chunk(start, calls, req, if (propagate) captureCoarse() else null))
+        queue.put(Chunk(start, calls, req, if (propagate) captureCoarse() else null, joined = true))
+    }
+
+    /**
+     * Dispatches a chunk under the caller's context that **nobody will wait for**.
+     *
+     * Staged on purpose, and it is the only way to see the stale-context detector work. Fire and
+     * forget is a perfectly ordinary thing for a program to do, and it is exactly what the detector
+     * exists to catch: the driver closes its request and moves on while this chunk is still running
+     * under a context that has ended.
+     *
+     * It is still counted and it still finishes — the helpers drain the pipeline before the run ends
+     * — so root calls are conserved and the escape does not quietly change the workload into a
+     * different one.
+     */
+    fun submitEscaping(start: Int, calls: Int, req: Request) {
+        pending.incrementAndGet()
+        queue.put(Chunk(start, calls, req, if (propagate) captureCoarse() else null, joined = false))
     }
 
     /** Blocks the driver until every chunk of [req] has been run. This is the join. */
@@ -181,7 +205,7 @@ class Fanout(
                 // the driver's request — which is what the driver's span has to be divided by.
                 c.req.occupancyNanos.addAndGet(System.nanoTime() - t0)
                 pending.decrementAndGet()
-                c.req.latch.countDown()
+                if (c.joined) c.req.latch.countDown()
             }
         }
 

@@ -81,6 +81,27 @@ fun coarseTooSmallMessage(name: String, count: Long, meanNanos: Double, required
 }
 
 /**
+ * What to tell someone whose work is being billed to executions that have already finished.
+ *
+ * Names the coarse type, because that is the one whose numbers were about to be wrong and the reader
+ * has no other way to know which. Says what to do, because unlike a leak there are two quite
+ * different causes and they want opposite fixes: a task that was never meant to be part of the
+ * request, and a request that closed before the work it was waiting for.
+ */
+fun staleContextMessage(worst: String, hits: Long, share: Double): String = String.format(
+    Locale.ROOT,
+    "%,d samples caught a thread working inside a coarse execution that had already been%n" +
+            "    closed by the thread that opened it - mostly %s. That is %.1f%% of all the%n" +
+            "    thread-time spent inside coarse executions.%n" +
+            "    The time belongs to an execution which no longer exists, so it is excluded from%n" +
+            "    every number %s reports rather than quietly inflating them.%n" +
+            "    Either work was handed to another thread and never waited for, so it outlived the%n" +
+            "    span carrying it - propagate only what the request actually joins - or a span is%n" +
+            "    closed too early, before the work it covers has finished.",
+    hits, worst, share * 100, worst
+)
+
+/**
  * What to tell someone whose label leaked. Names the operation that was open, because that is the
  * one whose share is now wrong and the reader has no other way to know which.
  */
@@ -233,6 +254,15 @@ class CoarseStat internal constructor(
     val activeTicks: Long,
     /** Inclusive samples broken down by the fine operation they caught. Last entry: no fine label. */
     internal val fine: LongArray,
+    /**
+     * Samples that caught a thread under an execution of this type that had already been closed.
+     *
+     * **Not included in any other number on this line.** They are work billed to an execution that
+     * no longer exists, and folding them in would let [busyPerExecutionNanos] exceed the mean span
+     * it is supposed to sit inside — impossible arithmetic that reads as a finding. See
+     * `Sampler.coarseStaleHits`.
+     */
+    val staleHits: Long = 0,
 ) {
     /** Mean measured duration of one execution. Exact, not sampled. */
     val meanSpanNanos: Double get() = if (count == 0L) Double.NaN else spanSumNanos.toDouble() / count
@@ -358,6 +388,10 @@ class Report internal constructor(
      * `Sampler.labelledOutsideCoarse` for what it is for.
      */
     val labelledOutsideCoarse: Long = 0,
+    /** Samples caught under a coarse execution that had already been closed. See [CoarseStat.staleHits]. */
+    val staleContextHits: Long = 0,
+    /** Samples caught inside a coarse execution at all — the population [staleContextHits] is part of. */
+    val coarseSampleHits: Long = 0,
 ) {
     /** False when a fatal finding stopped the session. See the severity ladder in plan.md. */
     val ok: Boolean get() = failure == null
@@ -767,6 +801,17 @@ class Report internal constructor(
     val labelledOutsideCoarseShare: Double
         get() = if (labelledHits == 0L) 0.0 else labelledOutsideCoarse.toDouble() / labelledHits
 
+    /**
+     * Of labelled thread-time, the share billed to coarse executions that had already finished.
+     *
+     * The sibling of [labelledOutsideCoarseShare] and the opposite fault. That one is attribution
+     * **lost** — work that reached no span — and it is recoverable by wrapping the hand-off. This is
+     * attribution **invented**, and it is the direction the whole design is built to avoid, which is
+     * why it is the one thing the sampler stops a strict session over on its own.
+     */
+    val staleContextShare: Double
+        get() = if (coarseSampleHits == 0L) 0.0 else staleContextHits.toDouble() / coarseSampleHits
+
     /** The fine operations most of that time was in — where to look if it should have been covered. */
     fun outsideCoarseSuspects(): List<OperationStat> {
         if (coarse.isEmpty()) return emptyList()
@@ -872,6 +917,28 @@ class Report internal constructor(
             appendLine("  and not the rest - fine - or work is ESCAPING its context onto threads it never reached,")
             appendLine("  and then those threads' time is missing from its busy/exec and shows up as its waiting.")
             appendLine("  Ask whether the operations above are ones you expected to be inside a span.")
+        }
+        // The opposite fault to the line above, and the more serious one. That one is attribution
+        // lost and says so; this is attribution invented, and it is stated with the remedy because
+        // there are two quite different causes with opposite fixes.
+        if (staleContextHits > 0) {
+            val worst = coarse.maxByOrNull { it.staleHits }
+            appendLine()
+            appendLine("!".repeat(WIDTH))
+            appendLine(
+                String.format(
+                    Locale.ROOT,
+                    "%.2f%% of the thread-time inside coarse executions (%s) was inside one that " +
+                            "had ALREADY BEEN CLOSED",
+                    staleContextShare * 100, threadTime(staleContextHits * stepNanos)
+                )
+            )
+            if (worst != null && worst.staleHits > 0) appendLine("  mostly under: ${worst.name}")
+            appendLine("  It is excluded from every number in the table above rather than inflating them.")
+            appendLine("  Either work was handed to another thread and never waited for, so it outlived the span")
+            appendLine("  carrying it - propagate only what the request actually joins - or a span is closed too")
+            appendLine("  early, before the work it covers has finished.")
+            appendLine("!".repeat(WIDTH))
         }
         if (openContextsAtEnd > 0) {
             appendLine(

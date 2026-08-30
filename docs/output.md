@@ -274,6 +274,33 @@ seven drivers against the same eight helpers leaves nothing to fan out to and `w
 to about 1. That is the truth about *that run*, not about the code — which is why the counterfactual
 sweep in `ideas.md` item 22 survives this and is not replaced by it.
 
+### `N% of the thread-time inside coarse executions was inside one that had ALREADY BEEN CLOSED`
+
+The sibling of the line below and the **opposite fault**, which is why they are stated separately.
+That one is attribution *lost* — work that reached no span at all — and wrapping the hand-off brings
+it back. This one is attribution *invented*: a thread still working under a request that has already
+finished, so the time is billed to an execution that no longer exists.
+
+It happens when work is handed to another thread and never waited for. The request closes, the work
+carries on, and everything about it looks plausible — the operation name is right, the numbers are
+the right shape, and nothing else in the report can tell. The balance check reads a thread's own slot
+and finds it clean; the floor check reads sizes; the line below reads work with no context.
+
+**That time is excluded from every number in the coarse table** rather than folded in. Crediting it
+would let `busy/exec` exceed the `mean` span it is supposed to sit inside, which cannot happen and
+would read as a finding rather than as a fault.
+
+Two causes, and they want opposite fixes:
+
+- **work was forked and not joined** — propagate only what the request actually waits for. A task
+  the request does not join is not part of it, however much it feels like it
+- **the span is closed too early** — `exitCoarse` is running before the work it covers has finished
+
+Under `strict` this stops the session, which is the same treatment a leaked label gets and for the
+same reason: both report a number that is not merely imprecise but false. It needs a share *and* a
+minimum count to fire, because a helper finishing a few microseconds late is a harmless race and
+stopping a correct run over three samples is the loudest wrong answer this tool can give.
+
 ### `N% of labelled thread-time was inside NO coarse span`
 
 The one line that can see **work escaping its context**. Nothing else in a single run can: the floor

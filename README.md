@@ -313,6 +313,7 @@ workload and checks itself against the truth.
 | `--stackcost` | what a cross-thread stack walk costs — the measurement that decides whether the tool may ever take one |
 | `--leakcheck` | stages a leaked label on purpose and asserts it stops the session, and *only* under strict |
 | `--fanout=N` | requests hand their chunks to a pool of N helpers, at one driver and at `--threads` of them. Checks the sampled threads-per-request against the bench's own stopwatch. Needs `--coarse`; add `--propagate=off` to run the same thing with the context left behind, which is what the defect looks like |
+| `--escape` | with `--fanout`, each request also dispatches a chunk nobody waits for, so it outlives the span carrying it. The stale-context detector must see it, and must stay silent without it |
 
 The rest shape the run:
 
@@ -433,9 +434,14 @@ than one, because they answer different questions: `inside` counts the threads a
 `working` counts the ones on a CPU — and on that run the difference is 0.99 of a thread, which is the
 caller parked on its own join.
 
-**Still to build:** propagation through coroutines and futures, a detector for a context that
-outlives its span, the whole-application parallelism coefficient, annotations plus a bytecode agent,
-and JFR as an output format.
+Work that outlives the request that forked it is caught too, which is the failure propagation makes
+easier rather than harder: a task handed off and never waited for keeps being billed to a request
+that has already finished. That time is excluded from the numbers and named, and under `strict` it
+stops the session — 18.3% of coarse thread-time when the bench stages it on purpose, and 0.00% when
+it does not.
+
+**Still to build:** propagation through coroutines and futures, the whole-application parallelism
+coefficient, annotations plus a bytecode agent, and JFR as an output format.
 
 **Untested, and therefore unclaimed:** coroutines and virtual threads. The design argues the fine
 tier is structurally safe with the first and the registry is now bounded for the second, but no
