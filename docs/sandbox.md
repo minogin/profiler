@@ -47,6 +47,60 @@ something to do, it graduates into [ideas.md](ideas.md) and is marked here as ha
 
 ---
 
+### `Duty cycle` is a term, not an explanation - and the first run only ever sees it fail
+*2026-08-31, Andrey. **Fixed the same day.***
+
+```
+Duty cycle    unavailable
+  Why         the run is shorter than the 1.000 s window
+```
+
+> "This is a bit vague for a user - what is Duty cycle?"
+
+The row says why the number is missing and never says what the number was. And this is the version
+of it that a first run always gets: the window is a second, the first thing anyone writes is a small
+loop, so the *unavailable* branch is where most readers meet the row for the first time - with no
+figure beside it to explain itself, and a name that needs the docs open.
+
+Two fixes, and the naming one is the better half again. The printed label is now **`Time on CPU`**,
+which carries its own meaning; the code, `Duty.kt` and the design docs keep saying *duty cycle*,
+because the term is standard, correct, and threaded through 339 mentions across 24 files including
+four trial write-ups. `output.md` ties the two together in one sentence so the searchable word is
+still findable. This is the `share` -> `occupancy%` move a second time.
+
+And both failure branches now say what is missing and what it costs:
+
+```
+Time on CPU   not measured
+  What        how much of the occupancy was really CPU - it is what bounds every share below
+  Why         the run is shorter than the 1.000 s window
+  Bound       none - read the shares below as occupancy, with nothing limiting how much was waiting
+```
+
+*Related but not the same thing:* [ideas.md](ideas.md) item 27 is about this arriving **after** the
+run when `start()` already knows it will happen. Still open. That is a question of timing; this was a
+question of the row being incomprehensible whenever it did arrive.
+
+### `Sampling` printed 0.969 ms for a 1 ms step
+*2026-08-31, Andrey. **Fixed the same day.***
+
+```
+Sampling      5 ticks at 0.969 ms x 1 thread - one sample per thread per tick
+```
+
+Which looks like the sampler missing its step by 3%. It is not: the interval is drawn within +/-25%
+of the step on purpose, so the sampler cannot lock onto a workload whose own period is near the same
+value and photograph the same phase every time. Over a long run the mean lands on the step; over five
+ticks it is the mean of four draws and visibly does not. Checked against the seed - the four draws
+spanning those ticks average 0.969 ms exactly, so it is reproducible rather than a fluctuation.
+
+Nothing was wrong with the number, only with the reading of it, and the line was printing a *measured*
+quantity while looking like it was echoing the *requested* one. It now says `0.969 ms mean (jittered)`
+- two words, next to the figure that raises the question rather than at the end of the sentence.
+
+The fraction is deliberately not in the message: it is a `Profiler.start` parameter, and printing
+`+/-25%` would be a lie for anyone who passes `jitter = 0.0`.
+
 ### "3 labelled, 1 unlabelled" does not say what is being counted
 *2026-08-31, Andrey. **Fixed the same day.***
 

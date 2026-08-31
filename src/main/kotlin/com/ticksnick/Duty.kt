@@ -439,26 +439,36 @@ class DutyReport internal constructor(
         max(0.0, (share - (1 - shareDuty)) / shareDuty) to min(1.0, share / shareDuty)
 
     fun lines(): List<String> {
+        // "Time on CPU" rather than "Duty cycle" in the report, while the code and the design docs
+        // keep the term: a reader meeting this row for the first time meets it on a short run, where
+        // it has no number to explain itself with, and a name that needs a glossary is then the whole
+        // of what they get. Same move as `share` -> `occupancy%` - carry the meaning in the label.
         if (reason != null) return listOf(
-            row("Duty cycle", "unavailable"),
+            row("Time on CPU", "not measured"),
+            subRow("What", MISSING_WHAT),
             subRow("Why", reason),
-            subRow("Bound", "none - nothing here bounds how much of the occupancy was not CPU"),
+            subRow("Bound", MISSING_BOUND),
         )
+        // The failure a first run hits, so it is the version most readers see first. It used to say
+        // why the number was missing without ever saying what the number was - the one case where
+        // the row has to introduce its own subject, because there is no figure beside it doing that.
         if (!available) return listOf(
-            row("Duty cycle", "unavailable"),
+            row("Time on CPU", "not measured"),
+            subRow("What", MISSING_WHAT),
             subRow(
                 "Why",
                 String.format(Locale.ROOT, "the run is shorter than the %.3f s window", windowNanos / 1e9)
             ),
+            subRow("Bound", MISSING_BOUND),
         )
         val out = ArrayList<String>()
         // The aggregate and the labelled figure on one line: the gap between them is how much of the
         // process was idle, which is worth seeing and used to be silently charged to the shares.
         // Starvation mode is the extreme - 18.83% aggregate against 96% inside the labels.
         out += row(
-            "Duty cycle",
+            "Time on CPU",
             String.format(
-                Locale.ROOT, "%.2f%% of wall time on CPU%s", duty * 100,
+                Locale.ROOT, "%.2f%% of wall time%s", duty * 100,
                 // Withheld when the bound is unusable: a labelled figure printed beside "none"
                 // reads as a measurement that was taken and then ignored, which is the opposite of
                 // what happened - the evidence ran out.
@@ -537,5 +547,17 @@ class DutyReport internal constructor(
          */
         const val RANKING_SAFE = 0.95
         const val OCCUPANCY_ONLY = 0.75
+
+        /**
+         * What the row is about, printed only when there is no number to say it instead.
+         *
+         * Both failure paths share it because a reader who hits either one is in the same position:
+         * they have been told a measurement is missing without being told what it would have meant.
+         */
+        private const val MISSING_WHAT =
+            "how much of the occupancy was really CPU - it is what bounds every share below"
+
+        private const val MISSING_BOUND =
+            "none - read the shares below as occupancy, with nothing limiting how much was waiting"
     }
 }

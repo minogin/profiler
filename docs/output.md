@@ -19,7 +19,7 @@ a mistake on purpose.
 
 ```
 Samples       95,412 taken over 12.1 s - 86,597 inside an operation, 8,815 outside every operation
-Sampling      11,933 ticks at 1.006 ms x 8 threads - one sample per thread per tick
+Sampling      11,933 ticks at 1.006 ms mean (jittered) x 8 threads - one sample per thread per tick
 Coverage      87.10 s of 95.97 s thread-time observed (90.8%)
   Outside     8.87 s - 10.1 ms parked (0.1%), 8.86 s runnable inside no operation
 clock: getThreadCpuTime, resolution 15.625 ms measured, window 1.000 s, dearest walk 621.8 us
@@ -56,8 +56,11 @@ On Lucene that turns an alarming 59.3% into 84.8%, because most of the shortfall
 parked between queries. Absent here because this workload never waits, so it would have said the
 same thing twice.
 
-**Lines 4–8 — the duty cycle, and the bound it puts on every share below.** This is the part that
-makes the report checkable rather than merely plausible.
+**Lines 4–8 — `Time on CPU`, and the bound it puts on every share below.** This is the part that
+makes the report checkable rather than merely plausible. It is the **duty cycle** — the term the
+design docs, the trials and the code all use, and the one to search for; the report spells it out
+because the first time most readers meet this row is on a run too short to measure it, where there is
+no number beside it to explain what it was for.
 
 The sampler counts a thread as inside an operation whether it is running, blocked, parked or
 descheduled — that is **occupancy**, not CPU. Occupancy counts waiting in full, which is the right
@@ -80,6 +83,19 @@ verdict:
 | *so the ranking is trustworthy* | ≥ 95% | the bound is under a point; real gaps between rows are wider than that |
 | *a share is still roughly time, but small gaps between operations are not resolved* | ≥ 75% | trust the top of the list, not adjacent rows |
 | *read a share as where threads SIT, not where cycles GO* | < 75% | and beware of adding two shares up, since one wait can be counted once per thread waiting on it |
+
+**On a short run it is missing entirely**, and then the row has to introduce its own subject, since
+there is no figure doing it:
+
+```
+Time on CPU   not measured
+  What        how much of the occupancy was really CPU - it is what bounds every share below
+  Why         the run is shorter than the 1.000 s window
+  Bound       none - read the shares below as occupancy, with nothing limiting how much was waiting
+```
+
+The window is one second, so **any run under about a second produces no bound on any share**. The
+shares themselves are still there and still occupancy; what is gone is the error bar on them.
 
 **And sometimes there is no bound at all:**
 
@@ -104,7 +120,7 @@ Sections, in order, each with a heading and a blank line before it:
 
 ```
 (banner)            the title
-(summary)           key-value rows: samples, sampling, coverage, duty cycle
+(summary)           key-value rows: samples, sampling, coverage, time on CPU
 FINE OPERATIONS     the fine table, or one line saying why it is empty
 COARSE OPERATIONS   the coarse table, present only if you placed a coarse label
 (warnings)          anything the run wants to tell you about itself
@@ -145,6 +161,12 @@ contributes fewer, which is why `Sampling` says *one sample per thread per tick*
 an equation. A short run makes the gap obvious: 7 ticks and 1 thread produced 4 samples, because the
 slot is created on the first labelled call and the earlier ticks saw nothing to photograph.
 
+**The step printed there is the one achieved, and it is jittered on purpose** — hence *mean
+(jittered)*. Each interval is drawn within ±25% of the step you asked for, so the sampler cannot lock
+onto a workload whose own rhythm is near the same period, catching the same phase every time. Over a
+long run the mean lands on the step; over a very short one it visibly does not, and that is arithmetic
+rather than a fault: 5 ticks means the mean of 4 draws, which printed 0.969 ms against a 1 ms request.
+
 **Unlabelled is not a fault by itself**, and the report splits it into the two cases that matter:
 
 - **parked** — threads sitting idle. Normal for a pool between requests, and nothing to fix. A run
@@ -164,10 +186,10 @@ they were all just text. The left column now says what kind of line it is:
 
 ```
 Samples       5,998 taken over 3.1 s - 5,526 inside an operation, 472 outside every operation
-Sampling      3,004 ticks at 0.999 ms x 2 threads - one sample per thread per tick
+Sampling      3,004 ticks at 0.999 ms mean (jittered) x 2 threads - one sample per thread per tick
 Coverage      5.52 s of 5.99 s thread-time observed (92.1%)
   Outside     471.6 ms - 5.0 ms parked (1.1%), 466.6 ms runnable inside no operation
-Duty cycle    99.98% of wall time on CPU; 100.00% inside operations
+Time on CPU   99.98% of wall time; 100.00% inside operations
   Bound       at most 0.00 pp of any share is a thread waiting rather than working
   Verdict     the ranking is trustworthy
 ```

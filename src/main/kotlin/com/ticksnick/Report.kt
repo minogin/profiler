@@ -1207,8 +1207,14 @@ class Report internal constructor(
                 // contributes fewer, so ticks x threads is a ceiling and not an identity - 7 ticks
                 // and 1 thread produced 4 samples on a short run, and that gap is the slot
                 // registering on the first labelled call.
+                //
+                // "mean (jittered)" because this is the achieved interval, not the requested step,
+                // and the two differ on purpose: the interval is drawn +/-25% around the step so
+                // the sampler cannot lock onto a workload with a rhythm of its own. Over a short
+                // run the mean of a handful of draws is visibly off the step - 5 ticks printed
+                // 0.969 ms against a 1 ms request - and without this word that reads as a defect.
                 "Sampling", String.format(
-                    Locale.ROOT, "%,d ticks at %.3f ms x %s - one sample per thread per tick",
+                    Locale.ROOT, "%,d ticks at %.3f ms mean (jittered) x %s - one sample per thread per tick",
                     ticks, achieved, plural(threads.toLong(), "thread")
                 )
             )
