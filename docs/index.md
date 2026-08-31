@@ -16,9 +16,10 @@ were both the integer 0.
 - **Any performance measurement needs the CPU clock traced beside it.** `CLAUDE.md` has the exact
   probe. This machine's clock swings 2x within a single run, and several hours have gone into
   chasing differences that were the machine changing speed.
-- **Every measurement in [findings.md](findings.md) predates the Kotlin 2.4.0 bump.** Nothing in the
-  source changed with it, so nothing is expected to have moved — but a close comparison against an
-  older figure should re-run `--hook` first. See [plan.md](plan.md), "The toolchain".
+- **Every measurement in [findings.md](findings.md) predates the Kotlin 2.4.0 bump, and every trial
+  number also predates the move to JDK 21.** Nothing in the source changed with either, so nothing is
+  expected to have moved — but a close comparison against an older figure should re-run `--hook`
+  first. See [plan.md](plan.md), "The toolchain".
 
 **Where we are right now.** The fine tier is built, verified and **released as v0.1.0** — Apache-2.0,
 no dependencies, Java 21+. Verified on our own bench and on **four** foreign codebases: Apache

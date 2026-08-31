@@ -15,5 +15,5 @@ repositories {
  * the separate trial modules exist to protect.
  */
 kotlin {
-    jvmToolchain(26)
+    jvmToolchain(21)
 }

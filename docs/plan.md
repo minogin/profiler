@@ -1568,7 +1568,7 @@ will otherwise have to reconstruct them from a diff:
 history follows, `rootProject.name`, `artifactId`, `group`, the jar's bench exclusion and the
 application main class all updated. Nothing about the code changed.
 
-## The toolchain · Gradle 9.7.1, Kotlin 2.4.0
+## The toolchain · Gradle 9.7.1, Kotlin 2.4.0, JDK 21 everywhere
 
 Bumped 2026-08-31 from Gradle 9.6.0 / Kotlin 2.3.21. Recorded because **every measurement in
 [findings.md](findings.md) predates the Kotlin bump**, and this library leans on value classes and
@@ -1576,6 +1576,22 @@ inline functions whose generated shapes are exactly what it measures. Nothing in
 so nothing is expected to move — but "the same binary" stopped being literally true across that
 boundary. If a close comparison against an older figure ever looks odd, the compiler version is a
 candidate that was not there before, and `--hook` is the cheap way to re-check.
+
+**And on 2026-08-31 the JDK toolchain went to 21 in every module.** The library had been moved to 21
+already, for the reason recorded in `build.gradle.kts` — a profiler nobody can put on the classpath is
+not released — but the sandbox and the five trials were left on 26, which was the original
+project-wide default and never had an argument behind it. Nothing in any module uses an API newer
+than 21, and every trial dependency has a floor below it.
+
+It surfaced from the sandbox: `:sandbox:run` died with a `LinkageError`, because 26 compiled it to
+class file version 70 while the JDK on PATH here is 21. The 26 toolchain resolved only to
+IntelliJ's `~/.jdks/openjdk-26.0.2`, so the module built under the IDE and could not be launched
+outside it — the exact opposite of what the sandbox is for, which is to sit where a stranger sits.
+
+**The same caveat as the Kotlin bump applies, one layer down:** every trial number in
+[findings.md](findings.md) was produced on a JDK 26 runtime, and the trials now run on 21. Nothing in
+the source changed. If a close comparison against an older trial figure ever looks odd, the JVM is
+now a second candidate alongside the compiler.
 
 ## The API rename · done, out of phase order
 
