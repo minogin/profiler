@@ -79,14 +79,14 @@ with the duty-cycle bound printed beside it.
 
 | | |
 |---|---|
-| **`com/minogin/profiler/`** | **the library — everything a user imports, and nothing else** |
+| **`com/ticksnick/`** | **the library — everything a user imports, and nothing else** |
 | `Profiler.kt` | the slot, the registry, `op { }` / `enter` / `exit`, and the constants that bound them |
 | `Sampler.kt` | the sampling thread: the tick loop, the slot walk, the wait strategy |
 | `Coarse.kt` | the coarse tier: the context and the span histogram. The label itself is `op { }`, the same verb the fine tier uses |
 | `Operations.kt` | `FineOp` and `CoarseOp` — why the tier is chosen once, at registration, and never mentioned again |
 | `Report.kt` | what a session collected and how it is rendered, including every verdict and threshold |
 | `Duty.kt` | how much of the occupancy was CPU, and the bound that puts on every share |
-| **`com/minogin/profiler/bench/`** | **the harness — never shipped, and now unable to leak into the above** |
+| **`com/ticksnick/bench/`** | **the harness — never shipped, and now unable to leak into the above** |
 | `Workload.kt`, `Burn.kt`, `Bench.kt` | a workload whose true answer is known |
 | `Main.kt` | the modes, the run, and the bench's own tolerance table |
 | `Verify.kt` | the sampler against the truth, and the observer effect |
@@ -123,20 +123,20 @@ binding — can reach the profiler, which depends on nothing but the Kotlin stdl
 # Netty — qualification, the labelled run, and the A/B
 ./gradlew :trial-netty:classpathFile
 CP=$(cat trial-netty/build/classpath.txt)
-java -cp "$CP" com.minogin.profiler.trial.netty.NettyTrialKt --qualify --seconds=45
-java -cp "$CP" com.minogin.profiler.trial.netty.NettyTrialKt --labels  --seconds=45
-java -cp "$CP" com.minogin.profiler.trial.netty.NettyTrialKt --ab --rounds=8 --seconds=5
+java -cp "$CP" com.ticksnick.trial.netty.NettyTrialKt --qualify --seconds=45
+java -cp "$CP" com.ticksnick.trial.netty.NettyTrialKt --labels  --seconds=45
+java -cp "$CP" com.ticksnick.trial.netty.NettyTrialKt --ab --rounds=8 --seconds=5
 
 # Calcite — the growth curve, then the labelled run
 ./gradlew :trial-calcite:classpathFile
 CP=$(cat trial-calcite/build/classpath.txt)
-java -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt --scale --from 3 --to 12 --associate true
-java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt \n     --tables 4 --associate true --warmups 1 --seconds 60 --labels true --sampler true
+java -cp "$CP" com.ticksnick.trial.calcite.CalciteTrialKt --scale --from 3 --to 12 --associate true
+java -Xmx6g -cp "$CP" com.ticksnick.trial.calcite.CalciteTrialKt \n     --tables 4 --associate true --warmups 1 --seconds 60 --labels true --sampler true
 
 # Lucene — the index is already built under trial-lucene/index
 ./gradlew :trial-lucene:classpathFile
 java -cp "$(cat trial-lucene/build/classpath.txt)" \
-     com.minogin.profiler.trial.lucene.LuceneTrialKt --placement LABEL --seconds 45
+     com.ticksnick.trial.lucene.LuceneTrialKt --placement LABEL --seconds 45
 ```
 
 **Runs on this laptop are not repeatable to better than about 60%.** Throughput falls 2.2× between

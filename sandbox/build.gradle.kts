@@ -19,5 +19,5 @@ kotlin {
 }
 
 application {
-    mainClass.set("com.minogin.profiler.sandbox.SandboxKt")
+    mainClass.set("com.ticksnick.sandbox.SandboxKt")
 }

@@ -406,35 +406,35 @@ and it was uneventful, which is the result one wants and not a result one can as
 CP=$(cat trial-lucene/build/classpath.txt)
 
 # build the corpus once (~17 s, 59 MB into trial-lucene/index)
-java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --build
+java -cp "$CP" com.ticksnick.trial.lucene.LuceneTrialKt --build
 
 # does the candidate qualify
-java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --qualify
+java -cp "$CP" com.ticksnick.trial.lucene.LuceneTrialKt --qualify
 
 # the conventional profile
 java -XX:FlightRecorderOptions=stackdepth=1024 -cp "$CP" \
-  com.minogin.profiler.trial.lucene.LuceneTrialKt \
+  com.ticksnick.trial.lucene.LuceneTrialKt \
   --placement NONE --sampler false --jfr lucene.jfr --seconds 20
-java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt \
+java -cp "$CP" com.ticksnick.trial.lucene.LuceneTrialKt \
   --analyze lucene.jfr --top 16 --collapsed lucene.collapsed
 
 # ours
-java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement LABEL --seconds 20
+java -cp "$CP" com.ticksnick.trial.lucene.LuceneTrialKt --placement LABEL --seconds 20
 
 # the mistake, kept so the good placement can be measured against it
-java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement PRODUCT --seconds 20
+java -cp "$CP" com.ticksnick.trial.lucene.LuceneTrialKt --placement PRODUCT --seconds 20
 
 # the Elasticsearch-style alternative, and the naive wrapper
-java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement TIME --sampler false --seconds 20
-java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement NAIVE --seconds 20
-java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement NAIVE --seconds 20
+java -cp "$CP" com.ticksnick.trial.lucene.LuceneTrialKt --placement TIME --sampler false --seconds 20
+java -cp "$CP" com.ticksnick.trial.lucene.LuceneTrialKt --placement NAIVE --seconds 20
+java -cp "$CP" com.ticksnick.trial.lucene.LuceneTrialKt --placement NAIVE --seconds 20
 
 # does a triggered stack name a missing label? PRODUCT against LABEL as the control
-java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement PRODUCT --seconds 30 --gaps 2
-java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt --placement LABEL --seconds 30 --gaps 2
+java -cp "$CP" com.ticksnick.trial.lucene.LuceneTrialKt --placement PRODUCT --seconds 30 --gaps 2
+java -cp "$CP" com.ticksnick.trial.lucene.LuceneTrialKt --placement LABEL --seconds 30 --gaps 2
 
 # what any of it costs
-java -cp "$CP" com.minogin.profiler.trial.lucene.LuceneTrialKt \
+java -cp "$CP" com.ticksnick.trial.lucene.LuceneTrialKt \
   --ab true --modes NONE,INERT,LABEL,TIME --rounds 24 --per 20
 ```
 

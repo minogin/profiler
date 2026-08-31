@@ -28,7 +28,7 @@ kotlin {
 }
 
 application {
-    mainClass.set("com.minogin.profiler.trial.jdbc.JdbcTrialKt")
+    mainClass.set("com.ticksnick.trial.jdbc.JdbcTrialKt")
 }
 
 /** As the other trials: the runtime classpath on disk, so a run can be launched by `java` directly

@@ -9,7 +9,7 @@ Netty.
 
 ```kotlin
 repositories { maven("https://jitpack.io") }
-dependencies { implementation("com.github.minogin:profiler:v0.1.0") }
+dependencies { implementation("com.github.minogin:ticksnick:v0.1.0") }
 ```
 
 ### What it does, and what it does not
@@ -362,12 +362,12 @@ jitter, and in the whole project it never produced a measurement.
 ## What is here
 
 ```
-src/main/kotlin/com/minogin/profiler/        the library — this, and nothing else, is the artifact
+src/main/kotlin/com/ticksnick/        the library — this, and nothing else, is the artifact
   Profiler.kt   the slot, the registry, op { } / enter / exit
   Sampler.kt    the sampling thread: the tick loop and the slot walk
   Report.kt     what a session collected, and how it is rendered
   Duty.kt       how much of the occupancy was CPU, and the bound that puts on every share
-src/main/kotlin/com/minogin/profiler/bench/  the harness — never shipped
+src/main/kotlin/com/ticksnick/bench/  the harness — never shipped
   Workload.kt   the twenty operations, the call graph, the schedule
   Burn.kt       the busy loop, calibration, iteration fitting
   Bench.kt      worker threads and the stages they are driven through

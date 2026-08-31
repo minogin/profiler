@@ -26,7 +26,7 @@ kotlin {
 }
 
 application {
-    mainClass.set("com.minogin.profiler.trial.netty.NettyTrialKt")
+    mainClass.set("com.ticksnick.trial.netty.NettyTrialKt")
 }
 
 /** Writes the runtime classpath to a file, so the trial can be launched by `java` directly with

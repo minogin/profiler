@@ -24,7 +24,7 @@ kotlin {
 }
 
 application {
-    mainClass.set("com.minogin.profiler.trial.lucene.LuceneTrialKt")
+    mainClass.set("com.ticksnick.trial.lucene.LuceneTrialKt")
 }
 
 /** Writes the runtime classpath to a file, so the trial can be launched by `java` directly with

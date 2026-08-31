@@ -440,7 +440,7 @@ could make a share; this says how wrong blocking could make it.
 second, or every *n* ticks — never per tick. The ratio of summed CPU delta to summed wall delta
 across live threads is the duty cycle.
 
-**Built.** [`Duty.kt`](../src/main/kotlin/com/minogin/profiler/Duty.kt): `ThreadCpuClock` checks
+**Built.** [`Duty.kt`](../src/main/kotlin/com/ticksnick/Duty.kt): `ThreadCpuClock` checks
 support, enables the clock, and *measures* its resolution; `DutyCycle` rides the sampler's tick loop
 at a one-second window; `DutyReport` renders the line and the bound. It is in both reports — the
 bench's and the library's `Report.render()`, which is where it matters, since it is the thing that

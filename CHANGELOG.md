@@ -233,7 +233,7 @@ Kotlin stdlib), Java 21+.
 
 ```kotlin
 repositories { maven("https://jitpack.io") }
-dependencies { implementation("com.github.minogin:profiler:v0.1.0") }
+dependencies { implementation("com.github.minogin:ticksnick:v0.1.0") }
 ```
 
 **What it answers.** Which of your labelled operations is eating the time — a ranked list of shares

@@ -25,7 +25,7 @@ kotlin {
 }
 
 application {
-    mainClass.set("com.minogin.profiler.trial.calcite.CalciteTrialKt")
+    mainClass.set("com.ticksnick.trial.calcite.CalciteTrialKt")
 }
 
 /** Writes the runtime classpath to a file, so the trial can be launched by `java` directly with

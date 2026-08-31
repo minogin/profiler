@@ -352,25 +352,25 @@ should be in the documentation, not discovered.
 CP=$(cat trial-calcite/build/classpath.txt)
 
 # the growth curve
-java -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt --scale --from 3 --to 12 --associate true
+java -cp "$CP" com.ticksnick.trial.calcite.CalciteTrialKt --scale --from 3 --to 12 --associate true
 
 # the conventional profile
-java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt \
+java -Xmx6g -cp "$CP" com.ticksnick.trial.calcite.CalciteTrialKt \
      --tables 4 --associate true --warmups 1 --seconds 60 --jfr calcite.jfr
-java -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt --analyze calcite.jfr --top 25
+java -cp "$CP" com.ticksnick.trial.calcite.CalciteTrialKt --analyze calcite.jfr --top 25
 
 # ours
-java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt \
+java -Xmx6g -cp "$CP" com.ticksnick.trial.calcite.CalciteTrialKt \
      --tables 4 --associate true --warmups 1 --seconds 60 --labels true --sampler true
 
 # the finding, and the plans it produces
-java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt --ab merge --tables 4 --associate true
-java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt --plan --tables 4 --associate true
+java -Xmx6g -cp "$CP" com.ticksnick.trial.calcite.CalciteTrialKt --ab merge --tables 4 --associate true
+java -Xmx6g -cp "$CP" com.ticksnick.trial.calcite.CalciteTrialKt --plan --tables 4 --associate true
 
 # what the instrumentation costs
-java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt \
+java -Xmx6g -cp "$CP" com.ticksnick.trial.calcite.CalciteTrialKt \
      --ab listener --tables 4 --associate true --mergejoin false --rounds 40
-java -Xmx6g -cp "$CP" com.minogin.profiler.trial.calcite.CalciteTrialKt \
+java -Xmx6g -cp "$CP" com.ticksnick.trial.calcite.CalciteTrialKt \
      --ab labels --tables 4 --associate true --mergejoin false --rounds 40
 ```
 
