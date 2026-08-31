@@ -45,8 +45,13 @@ Each doc has one job. Write to the right one as you go, not at the end.
   not. They graduate into `ideas.md` when they become something to do. Nothing measured in
   `sandbox/` is evidence and none of it belongs in `findings.md`: it is our code, so it inherits our
   assumptions, which is the same reason items 23 and 25 were not built.
+* `docs/plan.md` — work we committed to, and **whenever a decision is made that a later reader could
+  not reconstruct from the code**, record it and why: a rename, a dependency or toolchain bump, an API shape, something
+  deliberately not built. The test is simple — if the only trace is a commit message, it is not
+  written down. Commit messages are searched by people who already know what they are looking for;
+  the docs are read by people who do not. This rule exists because the project was renamed and the
+  reasoning behind it lived nowhere else for six commits.
 * `docs/findings.md` — only things we measured, with the measurement.
-* `docs/plan.md` — only work we committed to.
 
 ## Do not spend time on unnecessary builds
 * If you only changed the docs, do not run the build and test.
