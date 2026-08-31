@@ -125,7 +125,7 @@ reader looking for whether anything was wrong could not tell a fact from a cavea
 they were all just text. The left column now says what kind of line it is:
 
 ```
-Samples       5,526 labelled, 472 unlabelled, over 3.1 s
+Samples       5,998 taken over 3.1 s - 5,526 inside a label, 472 outside every label
 Sampling      3,004 ticks at 0.999 ms, 2 threads
 Coverage      5.52 s of 5.99 s thread-time observed (92.1%)
   Unlabelled  471.6 ms - 5.0 ms parked (1.1%), 466.6 ms runnable with no label

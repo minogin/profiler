@@ -47,6 +47,28 @@ something to do, it graduates into [ideas.md](ideas.md) and is marked here as ha
 
 ---
 
+### "3 labelled, 1 unlabelled" does not say what is being counted
+*2026-08-31, Andrey. **Fixed the same day.***
+
+```
+Samples       3 labelled, 1 unlabelled, over 0.1 s
+```
+
+Reads as a count of *labels*, which is the wrong noun. It is counting samples, and a sample is one
+photograph of one thread's slot taken once per tick — so on a one-thread run of four ticks there are
+four of them, three of which caught the thread inside an `op(...)` label.
+
+The old wording made the split the subject and left the total to be inferred by addition. Now the
+total leads and the split qualifies it:
+
+```
+Samples       4 taken over 0.1 s - 2 inside a label, 2 outside every label
+```
+
+*Worth noting about the report as a whole:* the same reader had already been told, three lines lower,
+that the run had `7 ticks` and `1 thread`. The relationship between those and the sample count was
+never stated anywhere, and it is the arithmetic the whole report rests on.
+
 ### The report prints characters a Windows console cannot show
 *2026-08-30, Andrey, with a screenshot. **Fixed the same day.***
 

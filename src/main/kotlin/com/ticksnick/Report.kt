@@ -1189,9 +1189,13 @@ class Report internal constructor(
         appendLine()
         appendLine(
             row(
+                // "3 labelled, 1 unlabelled" read as a count of labels rather than of samples of
+                // labelled work, which is the wrong noun and the one a first-time reader lands on.
+                // A sample is one photograph of one thread, so saying how many were taken and then
+                // where they landed makes the total the subject and the split a property of it.
                 "Samples", String.format(
-                    Locale.ROOT, "%,d labelled, %,d unlabelled, over %.1f s",
-                    labelledHits, idleHits, durationNanos / 1e9
+                    Locale.ROOT, "%,d taken over %.1f s - %,d inside a label, %,d outside every label",
+                    labelledHits + idleHits, durationNanos / 1e9, labelledHits, idleHits
                 )
             )
         )
