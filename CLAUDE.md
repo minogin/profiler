@@ -20,8 +20,10 @@
   * Then you propose the implementation
   * Only when I confirm I like it, you code.
 * If I ask a question, first answer briefly. If you have any concerns or think the question itself is
-  wrong tell me after the brief answer. Do not write novels where it's not needed. 
-  Do not add "worth mentioning" every time, when it is not really worth mentioning.
+  wrong tell me after the brief answer.
+* Do not write novels where it's not needed. 
+* Do not add "worth mentioning", "One thing I'd flag rather than assume" and similar shit
+  every time, when it is not really important. Do not distract me with minor things. 
 * **Ask decisions through the question UI, not as prose.** When a choice is mine to make — scope,
   ordering, an API's shape, whether something is its own commit — use `AskUserQuestion` so the
   options are pickable, rather than burying them in a paragraph. Having a recommendation is not a
