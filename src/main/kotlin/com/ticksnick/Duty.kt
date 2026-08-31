@@ -555,9 +555,9 @@ class DutyReport internal constructor(
          * they have been told a measurement is missing without being told what it would have meant.
          */
         private const val MISSING_WHAT =
-            "how much of the occupancy was really CPU - it is what bounds every share below"
+            "how much of the thread-time below was really CPU - it is what bounds every share"
 
         private const val MISSING_BOUND =
-            "none - read the shares below as occupancy, with nothing limiting how much was waiting"
+            "none - read the shares below as thread-time, with nothing limiting how much was waiting"
     }
 }

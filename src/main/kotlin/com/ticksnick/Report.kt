@@ -489,6 +489,21 @@ class Report internal constructor(
      *
      * A misplaced label is invisible in the share column and obvious in this one.
      */
+    /**
+     * The two halves of an operation's thread-time, as `7.2% / 92.8%`, summing to 100.
+     *
+     * Printed as a pair because a reader could not tell whether `waiting` was a part of the
+     * thread-time beside it or an addition to it, and no unit settles that - seconds against
+     * seconds is as ambiguous as a percentage. Two shares that add to the whole are not readable
+     * as an addition to it.
+     *
+     * The left half is **runnable**, which is not *working*: it counts a preempted thread and a
+     * thread stopped inside a native call, both of which the JVM reports as `RUNNABLE`. It is an
+     * upper bound on the work, and the time-on-CPU block is the only thing that bounds it in turn.
+     */
+    fun runnableSplit(waiting: Double): String =
+        String.format(Locale.ROOT, "%.1f%% / %.1f%%", (1 - waiting) * 100, waiting * 100)
+
     fun occupancyNanosOf(op: OperationStat): Double = op.hits * stepNanos
 
     /**
@@ -739,7 +754,7 @@ class Report internal constructor(
                 waiting >= WAITING_MOSTLY -> String.format(
                     Locale.ROOT,
                     "and %.1f%% of those long samples caught the thread parked or blocked - it is *waiting*, " +
-                            "not working. Read this share as occupancy: it does not add up across threads the " +
+                            "not working. Read this share as thread-time: it does not add up across threads the " +
                             "way CPU does, and %s of wall clock had anyone inside it at all",
                     waiting * 100, threadTime(elapsedNanosOf(op))
                 )
@@ -772,8 +787,8 @@ class Report internal constructor(
             // nothing here can be mostly waiting, at 35% something is.
             else -> String.format(
                 Locale.ROOT,
-                "cannot say which - state sampling is off. The run's whole off-CPU time is %.1f%% of occupancy, " +
-                        "and that is enough to account for all of it. Read this share as occupancy rather than " +
+                "cannot say which - state sampling is off. The run's whole off-CPU time is %.1f%% of the thread-time, " +
+                        "and that is enough to account for all of it. Read this share as thread-time rather than " +
                         "as time on a core",
                 (1 - duty.duty) * 100
             )
@@ -959,12 +974,12 @@ class Report internal constructor(
         // Four lines, always. Not a summary of the rest — the four things that will make a reader
         // draw the wrong conclusion, and nothing else. Everything below them is reference, and
         // reference belongs in output.md where it can be read once rather than skipped thirty times.
-        appendLine("  occupancy% is sampled thread-time, NOT CPU")
-        appendLine("  waiting is waiting another thread caused; preemption reads runnable")
-        appendLine("  in flight tracks your load, not your code")
+        appendLine("  thread-time is sampled and summed across threads, NOT CPU")
+        appendLine("  runnable/wait splits the thread-time beside it; runnable is NOT the same as working")
+        appendLine("  wall-time is not summed: thread-time / wall-time is the threads inside at once")
         appendLine("  a share is where time went, NOT what removing the operation would save")
         if (coarse.any { it.count > 0 || it.inclusiveHits > 0 }) {
-            appendLine("  working is an upper bound on the speedup, not the speedup")
+            appendLine("  'on a CPU' is an upper bound on the speedup, not the speedup")
         }
         if (!full) {
             appendLine("  full notes: docs/output.md, or render(legend = true)")
@@ -975,21 +990,23 @@ class Report internal constructor(
         appendLine("  trial run against real code, an operation holding 46% of the time was worth 275x when")
         appendLine("  removed, because it was creating work for everything else as well as doing its own. The")
         appendLine("  two numbers are different questions and the gap can be orders of magnitude")
-        appendLine("occupancy% and occupancy are the same quantity, relative and absolute: sampled thread-time,")
-        appendLine("  with waiting counted in full. NOT CPU - the duty cycle above bounds how much of it was")
-        appendLine("  waiting. occupancy is absolute, so unlike the percentage it does not move when a label is")
-        appendLine("  added or removed, which makes it the column to compare between two runs")
-        appendLine("waiting is the share of samples whose thread was parked, blocked or waiting; a thread the")
-        appendLine("  scheduler merely preempted still reads runnable, so this is waiting another thread caused")
-        appendLine("elapsed is wall clock with at least one thread inside, and in flight is occupancy / elapsed -")
-        appendLine("  occupancy sums across threads and elapsed does not, so 100 s of waiting is a convoy to be")
-        appendLine("  broken up at 15 in flight and steady contention to be designed out at 1.7. Not latency: it")
-        appendLine("  is every execution's interval unioned, so it says nothing about any single one of them")
-        appendLine("in flight counts EXECUTIONS at once, over the threads there were - never threads spent on one")
-        appendLine("  execution. It tracks your arrival rate until it saturates at your pool, so it is a property")
-        appendLine("  of this run and not of your code; read it against the denominator")
+        appendLine("thread-time% and thread-time are the same quantity, relative and absolute: sampled and")
+        appendLine("  summed across threads, with waiting counted in full. NOT CPU - the time-on-CPU block above")
+        appendLine("  bounds how much of it was waiting. The absolute one does not move when a label is added or")
+        appendLine("  removed, which makes it the column to compare between two runs")
+        appendLine("runnable / wait are the two halves of the thread-time beside them and add to 100%: the")
+        appendLine("  share of its samples whose thread was parked, blocked or waiting, and the rest. Runnable is")
+        appendLine("  NOT working - a thread the scheduler merely preempted reads runnable, and so does one")
+        appendLine("  stopped inside a native call, which the JVM cannot see into. So the left half is an UPPER")
+        appendLine("  BOUND on the work and the time-on-CPU block above is the only thing that bounds it in turn;")
+        appendLine("  the right half is waiting that some other thread caused")
+        appendLine("wall-time is the clock with at least one thread inside, and it is NOT summed across threads,")
+        appendLine("  which thread-time is. Dividing gives the threads inside at once, and that is the number")
+        appendLine("  that turns a big thread-time back into real cost: 100 s of waiting is a convoy to break up")
+        appendLine("  at 15 threads and steady contention to design out at 1.7. Not latency either: it is every")
+        appendLine("  execution's interval unioned, so it says nothing about any single one of them")
         appendLine("noise is 1/sqrt(hits), the error chance alone gives")
-        appendLine("implied/call is hits x step / calls; 'over 1 tick' is occupancy inside executions that")
+        appendLine("implied/call is hits x step / calls; 'over 1 tick' is thread-time inside executions that")
         appendLine("  outlived a tick")
         if (coarse.any { it.count > 0 || it.inclusiveHits > 0 }) {
             appendLine()
@@ -997,13 +1014,15 @@ class Report internal constructor(
             appendLine("  executions, mean and the percentiles are MEASURED, two timestamps per execution - the")
             appendLine("    only numbers here that are not sampled. Percentiles round UP to their bucket, at most")
             appendLine("    12.5% high and never low, and never above max, which is exact")
-            appendLine("  inside is THREADS in one execution at once, a parked one counted: what a request ties up.")
-            appendLine("    working is the ones on a CPU - what splitting the work bought you, the T1/T8 of the")
-            appendLine("    work-span model. working = inside x (1 - waiting), and a caller parked on its own join")
-            appendLine("    is the gap between them. A saturated pool reads working low, and it is an upper bound")
-            appendLine("    on the speedup rather than the speedup itself")
-            appendLine("  working printed as a/b means the measured CPU duty cycle only supports b of it - the")
-            appendLine("    threads are stopped in NATIVE calls, which Java thread state reports as RUNNABLE")
+            appendLine("  the 'parallelism:' line is two questions, and the semicolon separates them. Threads per")
+            appendLine("    execution is your CODE - whether one execution is split at all, 1.00 unless a context")
+            appendLine("    crossed a thread. Executions at once is your LOAD - how many were in the system.")
+            appendLine("  'of it on a CPU' is the share of those threads a sample caught running: what splitting")
+            appendLine("    the work bought you, the T1/T8 of the work-span model. It is inside x (1 - waiting),")
+            appendLine("    so a caller parked on its own join is the gap. A saturated pool reads it low, and it")
+            appendLine("    is an upper bound on the speedup rather than the speedup itself")
+            appendLine("  'at most b' beside it means the measured time on CPU only supports b - the threads are")
+            appendLine("    stopped in NATIVE calls, which Java thread state reports as RUNNABLE")
             appendLine("  the 'was:' lines are the cross-tabulation: which fine operations ran under this one")
         }
     }
@@ -1035,9 +1054,9 @@ class Report internal constructor(
                 // columns answer - does one execution use several threads, and how many executions
                 // run at once - were adjacent columns with nothing saying they were different
                 // questions. A prose line can say both, and a column head cannot.
-                Locale.ROOT, "%-25s %11s %10s %10s %10s %10s %10s %10s %8s",
+                Locale.ROOT, "%-25s %11s %10s %10s %10s %10s %10s %10s %15s",
                 "Coarse operation", "Executions", "Total v", "Mean", "p50", "p90", "p99", "Max",
-                "Waiting"
+                "Runnable / Wait"
             )
         )
         appendLine("-".repeat(COARSE_WIDTH))
@@ -1047,13 +1066,13 @@ class Report internal constructor(
                 else (c.inclusiveHits - c.runningInclusiveHits).toDouble() / c.inclusiveHits
             appendLine(
                 String.format(
-                    Locale.ROOT, "%-25s %,11d %10s %10s %10s %10s %10s %10s %7.1f%%",
+                    Locale.ROOT, "%-25s %,11d %10s %10s %10s %10s %10s %10s %15s",
                     c.name, c.count,
                     duration(c.spanSumNanos.toDouble()),
                     duration(c.meanSpanNanos), duration(c.percentileNanos(0.50)),
                     duration(c.percentileNanos(0.90)), duration(c.percentileNanos(0.99)),
                     duration(c.spanMaxNanos.toDouble()),
-                    waitShare * 100
+                    runnableSplit(waitShare)
                 )
             )
         }
@@ -1075,7 +1094,7 @@ class Report internal constructor(
             if (c.inclusiveHits == 0L) continue
             appendLine(
                 String.format(
-                    Locale.ROOT, "  %s: %.3f%% of thread-time inside operations, %s occupancy",
+                    Locale.ROOT, "  %s: %.3f%% of the thread-time inside operations, %s of it",
                     c.name, shareOf(c) * 100, threadTime(c.inclusiveHits * stepNanos)
                 )
             )
@@ -1293,7 +1312,15 @@ class Report internal constructor(
                 )
             )
             val runnable = observedNanos - parked
-            if (runnable > 0) appendLine(
+            // Only when it differs from `Coverage` above. It exists to answer a second question -
+            // of the thread-time that was doing anything at all, how much do the labels cover -
+            // and when almost nothing was parked it is the same figure to a decimal place, which
+            // is a line that teaches the reader the block repeats itself.
+            val sameAsCoverage =
+                observedNanos > 0 && runnable > 0 &&
+                        Math.round(labelledNanos * 1000.0 / runnable) ==
+                        Math.round(labelledNanos * 1000.0 / observedNanos)
+            if (runnable > 0 && !sameAsCoverage) appendLine(
                 subRow(
                     "Runnable", String.format(
                         Locale.ROOT, "operations cover %s of %s (%.1f%%)",
@@ -1325,17 +1352,46 @@ class Report internal constructor(
                 // 22 and 12 rather than 26 and 8 so the wider label still ends where the values
                 // end. The header was already two columns out of step with its rows before the
                 // marker was added, because `Occupancy%` never fitted the 8 it was given.
-                Locale.ROOT, "%-22s %12s %10s %8s %9s %11s %13s %8s %6s %10s %7s",
+                Locale.ROOT, "%-20s %14s %11s %15s %9s %13s %8s %6s %10s %7s",
                 // `occupancy%` and not `share`, because it is the same quantity as the column beside
                 // it — one relative, one absolute. Calling one of them `share` invented a
                 // distinction that does not exist and hid the one that does: neither is CPU. A
                 // reader does not misread `occupancy%` as processor time, which is what a paragraph
                 // of legend used to be for.
-                "Operation", "Occupancy% v", "Occupancy", "Waiting", "Elapsed", "In flight",
+                // `Thread-time` and `Wall-time`, not `occupancy` and `elapsed`. The pair is the
+                // point of having both columns - eight threads computing five seconds is forty
+                // thread-seconds and the sum is real, a hundred threads parked one second on a lock
+                // is also a hundred and there the sum is fiction - and neither old name said which
+                // was which. `occupancy` was the worse of the two: the rest of the report already
+                // called that quantity thread-time, in `Coverage` and on the coarse lines, so one
+                // quantity had two names.
+                //
+                // The concurrency column is gone. It was `threads`, renamed to `in flight` to stop
+                // it being read as one execution spread over several threads, and neither name
+                // landed: a reader who wanted exactly this number could not find it under the
+                // first name and could not read it under the second.
+                //
+                // It was `Thread-time / Wall-time` with both operands printed beside it, which is
+                // the argument that deleted `busy/exec`. A quantity needing a paragraph before it
+                // can be read, and derivable from its neighbours, does not earn a column - and now
+                // that those neighbours are named for what they are, the division says it plainly.
+                // Both halves of the split, summing to 100%, rather than the waiting half alone.
+                // Asked whether waiting was part of thread-time or on top of it, neither the unit
+                // nor a header phrasing settles it - but two shares that add to the whole cannot be
+                // read as an addition to it. Andrey's suggestion, and better than the "of which
+                // waiting" header it replaced.
+                //
+                // `Runnable`, not `Run` or `CPU`. The `-able` is the whole distinction: it means
+                // *not blocked*, not *executing*. A preempted thread reads runnable - 14-18% of
+                // wall time on this machine on a bench that never blocks - and so does a thread
+                // stopped in a native call, which is how the JDBC trial got a number 55x above what
+                // the machine had spent. The left half is an upper bound on work; only the
+                // time-on-CPU block above can say how much of it was real.
+                "Operation", "Thread-time% v", "Thread-time", "Runnable / Wait", "Wall-time",
                 "Calls", "Hits", "Noise", "Impl/call", "Over 1t"
             )
         )
-        if (operations.any { it.hits > 0 }) appendLine("-".repeat(WIDTH))
+        if (operations.any { it.hits > 0 }) appendLine("-".repeat(FINE_WIDTH))
         // Operations the sampler never caught are folded away rather than printed as a screen of
         // zeroes — Calcite's report carried twenty-five rules at 0.000%. Folded, not dropped: the
         // count says how many there were, and a *called* operation with no samples is a real
@@ -1356,15 +1412,15 @@ class Report internal constructor(
         for (op in seen.sortedByDescending { it.hits }) {
             appendLine(
                 String.format(
-                    Locale.ROOT, "%-26s %7.3f%% %10s %7.1f%% %9s %11s %,13d %8d %5.2f%% %10s %6.2f%%",
+                    Locale.ROOT, "%-26s %7.3f%% %11s %15s %9s %,13d %8d %5.2f%% %10s %6.2f%%",
                     op.name, shareOf(op) * 100, threadTime(occupancyNanosOf(op)),
-                    op.waitingShare * 100, threadTime(elapsedNanosOf(op)), inFlightOf(op),
+                    runnableSplit(op.waitingShare), threadTime(elapsedNanosOf(op)),
                     op.calls, op.hits, noiseFloorOf(op) * 100,
                     duration(impliedNanosOf(op)), op.stuckShare * 100
                 )
             )
         }
-        if (operations.any { it.hits > 0 }) appendLine("-".repeat(WIDTH))
+        if (operations.any { it.hits > 0 }) appendLine("-".repeat(FINE_WIDTH))
         if (unseen.isNotEmpty()) {
             val called = unseen.filter { it.calls > 0 }
             // "called anyway" rather than "N of them did run", which reads as nonsense at N = 1 —
@@ -1390,7 +1446,7 @@ class Report internal constructor(
             appendLine(
                 String.format(
                     Locale.ROOT,
-                    "  ! %s: %,d executions lasted over a tick (%.1f%% of its occupancy against a %.1f%% machine floor, %s per call)",
+                    "  ! %s: %,d executions lasted over a tick (%.1f%% of its thread-time against a %.1f%% machine floor, %s per call)",
                     op.name, op.stuckInstances, op.stuckShare * 100, machineFloor * 100,
                     duration(impliedNanosOf(op))
                 )
@@ -1418,7 +1474,7 @@ class Report internal constructor(
         }
         if (untrackedSlots > 0) {
             appendLine("    ! $untrackedSlots threads arrived past the $MAX_SLOTS-slot ceiling and were NOT SAMPLED -")
-            appendLine("      their occupancy is missing from every number above, including the denominators")
+            appendLine("      their thread-time is missing from every number above, including the denominators")
         }
         // A leaked label does not look like an error. It looks like a finding: one operation
         // quietly accumulating everybody else's samples, with a plausible number beside it.
@@ -1519,7 +1575,10 @@ class Report internal constructor(
         /** Below this many ticks, an empty table is the run being short rather than a finding. */
         const val MIN_TICKS_FOR_A_TABLE = 50
 
-        const val WIDTH = 130
+        // The report-level rules and the warning banners. 115 rather than the old 130 so that
+        // nothing on the page is wider than the widest table on it - a run printed rules of three
+        // different lengths before the tables and the constants were brought back together.
+        const val WIDTH = 122
 
         /**
          * The coarse table alone, which is narrower than [WIDTH] since the three parallelism
@@ -1530,7 +1589,16 @@ class Report internal constructor(
          * which is true and is in the friction log. Then the parallelism columns left and took
          * more than `Total` had added.
          */
-        const val COARSE_WIDTH = 112
+        const val COARSE_WIDTH = 119
+
+        /**
+         * The fine table, likewise drawn to itself.
+         *
+         * A run printed rules of three different lengths on one page - 130 around the fine table,
+         * 112 around the coarse one, 130 again to close - because the tables had been renamed and
+         * resized while the rules stayed pinned to a constant that no longer described either.
+         */
+        const val FINE_WIDTH = 122
 
         /**
          * `1 thread` rather than `1 threads`.

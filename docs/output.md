@@ -128,11 +128,12 @@ HOW TO READ THIS    five lines: the things that will make you draw the wrong con
 ```
 
 **The legend is five lines, not thirty-seven.** `render()` prints only what will actively mislead
-you — that `occupancy%` is not CPU, that `waiting` is waiting another thread caused, that
-`in flight` is your load and not your code, that a share is not a counterfactual, and that `working`
-bounds the speedup from above rather than being it. Everything else — how `noise` is computed, the
-convoy arithmetic behind `elapsed`, what the `was:` lines are — is reference, and reference belongs
-here, where it is read once instead of skipped thirty times.
+you — that `thread-time` is summed across threads and is not CPU, that `waiting` is waiting another
+thread caused, that `wall-time` is *not* summed and dividing the two gives the threads inside at
+once, that a share is not a counterfactual, and that *on a CPU* bounds the speedup from above rather
+than being it. Everything else — how `noise` is computed, the convoy arithmetic, what the `was:`
+lines are — is reference, and reference belongs here, where it is read once instead of skipped thirty
+times.
 
 `render(legend = true)` prints the full text, and this document is the same content at length.
 
@@ -216,31 +217,38 @@ to read one: *"a wall of text, good for AI, very bad for a human."* Explaining a
 interleaving that explanation with the data are two different decisions, and only the first had been
 made.
 
-**Two columns were renamed or removed rather than explained.** `share` became `occupancy%`, because
-it is the same quantity as the `occupancy` beside it and calling one of them a *share* invented a
-distinction that does not exist while hiding the one that does — neither is CPU. `busy/exec` was
-dropped: it is `working × mean`, both of which are printed, and its name did not say it summed over
-the threads in an execution, which is why it could exceed the span next to it and look like a defect.
+**Columns get renamed or removed rather than explained.** `share` became `occupancy%` and then
+`thread-time%`, `elapsed` became `wall-time`, and the concurrency ratio was deleted outright. The
+`share` was the same quantity as the absolute column beside it, and calling one of them a *share*
+invented a distinction that does not exist while hiding the one that does — neither is CPU. Both then
+became `thread-time%` and `thread-time`, because that is what the rest of the report had been calling
+the quantity all along, and one thing with two names is worse than either.
+
+`busy/exec` was dropped: it is `working × mean`, both of which are printed, and its name did not say
+it summed over the threads in an execution, which is why it could exceed the span next to it and look
+like a defect. The concurrency ratio went the same way and for the same reason — `thread-time ÷
+wall-time`, with both operands in the table.
+
 A name that carries its own caveat needs no paragraph, and unlike a paragraph it still works on the
-tenth run.
+tenth run. A column that needs a paragraph *and* divides two of its neighbours does not need to
+exist.
 
 ## The table
 
 ```
-Operation              Occupancy% v  Occupancy  Waiting   Elapsed   In flight         Calls     Hits  Noise  Impl/call Over 1t
-flushBatch                  44.250%    38.54 s     0.0%   11.75 s      3.28/8   288,514,362    38319  0.51%   133.6 ns   0.01%
-validateRecord              41.222%    35.91 s     0.0%   11.68 s      3.07/8   288,514,362    35697  0.53%   124.5 ns   0.00%
-parseRecord                  9.478%     8.26 s     0.3%    6.14 s      1.34/8   288,514,362     8208  1.10%    28.6 ns   0.27%
-indexRecord                  5.050%     4.40 s     0.0%    3.73 s      1.18/8   288,514,362     4373  1.51%    15.2 ns   0.05%
+Operation            Thread-time% v Thread-time Runnable / Wait Wall-time         Calls     Hits  Noise  Impl/call Over 1t
+flushBatch                  44.250%     38.54 s   100.0% / 0.0%   11.75 s   288,514,362    38319  0.51%   133.6 ns   0.01%
+validateRecord              41.222%     35.91 s   100.0% / 0.0%   11.68 s   288,514,362    35697  0.53%   124.5 ns   0.00%
+parseRecord                  9.478%      8.26 s    99.7% / 0.3%    6.14 s   288,514,362     8208  1.10%    28.6 ns   0.27%
+indexRecord                  5.050%      4.40 s   100.0% / 0.0%    3.73 s   288,514,362     4373  1.51%    15.2 ns   0.05%
 ```
 
 | column | what it is | what to watch for |
 |---|---|---|
-| **occupancy%** | this operation's slice of all **labelled** samples, and what the table is sorted by | the denominator is labelled samples, not every sample — so adding a label somewhere else does not move this one |
-| **occupancy** | `hits × step`, as summed thread-time | **absolute**, so unlike `occupancy%` it does not move when a label is added, moved or removed. This is the column to compare between two runs |
-| **waiting** | the share of those samples whose thread was parked, blocked or waiting | a thread the scheduler merely preempted still reads runnable, so this is waiting that *another thread* caused. Blind to native waits |
-| **elapsed** | wall clock with at least one thread inside | not latency: it is every execution's interval unioned, so it says the operation had *somebody* in it for this long and nothing about any single execution |
-| **in flight** | `occupancy ÷ elapsed`, over the threads there were — **executions of this operation running at once**, averaged over the ticks where any were | **a property of your load, not of your code** — see below. It is the number that turns occupancy back into real cost: 100 s of waiting at 15 in flight is a convoy to break up; at 1.7 it is steady contention to design out |
+| **thread-time%** | this operation's slice of all **labelled** samples, and what the table is sorted by | the denominator is labelled samples, not every sample — so adding a label somewhere else does not move this one |
+| **thread-time** | `hits × step`, summed across threads | **absolute**, so unlike `thread-time%` it does not move when a label is added, moved or removed. This is the column to compare between two runs |
+| **runnable / wait** | the two halves of the `thread-time` beside it, summing to 100% | printed as a pair because a share on its own does not say whether it is *part of* thread-time or *on top of* it, and no unit settles that. **`runnable` is not `working`** — see below |
+| **wall-time** | wall clock with at least one thread inside | not latency: it is every execution's interval unioned, so it says the operation had *somebody* in it for this long and nothing about any single execution |
 | **calls** | exact, counted by the hook | a share cannot tell *200M calls at 8 ns* from *1000 calls at 1.6 ms*, and those want opposite fixes |
 | **hits** | samples that caught this operation | the evidence behind the share |
 | **noise** | `1/√hits` — the error chance alone gives | **if two rows differ by less than their noise, they are not ranked, they are tied** |
@@ -251,73 +259,48 @@ Operations that were never sampled are folded into one line rather than printed 
 zeroes — but a *called* operation with no samples is itself a finding, so the count and the names
 are kept.
 
-### `in flight` counts executions, not the threads spent on one of them
+### `runnable` is not `working`, and the gap has cost this project a defect
 
-This column used to be called `threads`, and for a fine operation the two are the same number — but
-they are not the same question, and the name was the wrong one of the two.
+`thread-time − wait` is time the JVM called `RUNNABLE`. That is **not** time on a processor, and two
+things sit in the gap:
 
-A fine operation is atomic and never leaves the thread that entered it: a body that suspends or
-hands work off is, by construction, not fine. So one thread inside the label *is* one execution of
-it. `3.28/8` above means **3.28 executions of `flushBatch` were running at once, out of 8 threads** —
-3.28 unrelated pieces of work, on 3.28 different threads.
+- **A preempted thread** — ready to run, no core free. Measured at **14–18% of wall time** on this
+  machine, on a bench that never blocks.
+- **A thread stopped inside a native call** — a blocking socket read, an `epoll_wait`. The JVM
+  cannot see into these and reports `RUNNABLE`. This is not hypothetical: it is the PostgreSQL
+  trial's defect, where a number read as CPU was **55× more than the machine had spent**
+  ([trial-jdbc.md](trial-jdbc.md)).
 
-What it emphatically does not mean is *"this operation used 3.28 threads"* in the sense of one piece
-of work spread over three. That quantity is **parallelism** in its textbook sense — `work ÷ span` for
-one execution — and it cannot exist in this tier at all, because it needs an execution to have an
-identity that a second thread can be handed, and a fine operation is an integer in a thread's slot.
-The two are factors of one product:
+So the left half is an **upper bound on the work**, never the work. The `Time on CPU` block in the
+header is measured with a different instrument — `getThreadCpuTime`, not thread state — and it is
+the only thing that can bound this in turn. When it says *not measured*, nothing does.
 
-```
-threads inside an operation = executions in flight  ×  parallelism per execution
-```
+That is also why the column says `runnable` and not `run`: the `-able` is the distinction. Runnable
+means *not blocked*, not *executing*.
 
-Here the second factor is 1 by construction, so the product collapses and either reading gives the
-same number. It stops collapsing the moment a coarse span can cross a thread, and then eight threads
-in a label means either *eight requests, each serial* or *two requests on four threads each* — the
-same 8, opposite fixes. The fine tier measures the first factor. Only a coarse context can measure
-the second.
+### There is no concurrency column, and the two columns beside each other are it
 
-### And the first factor is about your load, which is why it is printed as a ratio
+`thread-time ÷ wall-time` is how many threads were inside an operation at the same time — `38.54 s`
+over `11.75 s` is about three. That ratio was a column twice: as `threads`, renamed to `in flight`
+because `threads` invited *"this operation used 3.28 threads"* — one piece of work spread over
+three — and then dropped on **2026-08-31**, because a reader who wanted exactly that number could not
+find it under the first name and could not read it under the second.
 
-Here is the objection this column has to survive: **it is not a property of your code.** Sales bring
-twice as many clients tomorrow and it doubles, with not a line changed. That is Little's law,
-`L = λ·W` — the mean number in a system is the arrival rate times the time each one spends there.
+**The division is worth doing when a number looks too big.** `flushBatch` at `38.54 s` of thread-time
+is not 38 seconds of your life: the clock advanced `11.75 s` while it ran. Delete it entirely and you
+save the wall-time, not the thread-time. That is the whole reason both columns are printed.
 
-Two corrections to that, because the loose version of it is wrong in both directions:
+**What it is not** is a property of your code. It tracks arrival rate below saturation — twice the
+clients, twice the number, not a line changed — and at the ceiling it stops tracking load and just
+reports the pool size. If `thread-time ÷ wall-time` comes out at very nearly the thread count in the
+`Sampling` line, that is a finding about your pool being pinned inside that label, not about the
+operation.
 
-**It is not `L`.** Little's law is the mean over *all* time; this column divides by the ticks where
-the operation was occupied, not by every tick. Writing `p_active` for the fraction of ticks it was
-occupied at all:
-
-```
-column = λ · W · parallelism / p_active
-```
-
-For a label that is nearly always busy the two coincide. For a rare one the column is several times
-`L`, which is the right behaviour — it answers *"when this ran, how many ran at once"* and not *"how
-much of the run was this"*, which is what `share` is for.
-
-**And it cannot grow forever.** There are only so many threads, so past saturation the extra arrivals
-do not go inside the label — they queue outside it, or `W` grows:
-
-```
-threads inside = min( λ · W · parallelism ,  P )
-```
-
-So below the ceiling the column tracks your arrival rate, and at the ceiling it stops tracking the
-load altogether and reports your pool size. Both regimes are about the deployment. **Neither is
-about the operation.**
-
-The ratio is what tells you which one you are looking at, and it is the only part of the column that
-survives the objection:
-
-| reading | regime | what it means |
-|---|---|---|
-| `3.28/8` | below saturation | tracking your load. Not a finding about this operation |
-| `7.9/8` | pinned at the ceiling | the pool is inside this label — a finding, but about the pool |
-
-It is in the table at all because `elapsed` cannot be computed without it: `elapsed = occupancy ÷ in
-flight` is the one thing that turns summed thread-time back into wall time.
+**And it is not parallelism**, in the sense of one execution split across threads. A fine operation
+is an integer in a thread's slot and never leaves the thread that entered it, so one thread inside
+the label is one call of it — three threads there means three separate calls, not one call going
+three times faster. Only a coarse context can be split across threads, which is why the parallelism
+line lives under the coarse table.
 
 ---
 
@@ -327,10 +310,10 @@ Present only if you placed a coarse label. It answers the question the table abo
 cannot: **how long did one execution take.**
 
 ```
-Coarse operation           Executions    Total v       Mean        p50        p90        p99        Max  Waiting
-----------------------------------------------------------------------------------------------------------------
-request                     3,203,348    95.78 s    29.9 us    20.5 us    45.1 us   180.2 us   17.01 ms     0.0%
-----------------------------------------------------------------------------------------------------------------
+Coarse operation           Executions    Total v       Mean        p50        p90        p99        Max Runnable / Wait
+-----------------------------------------------------------------------------------------------------------------------
+request                     3,203,348    95.78 s    29.9 us    20.5 us    45.1 us   180.2 us   17.01 ms   100.0% / 0.0%
+-----------------------------------------------------------------------------------------------------------------------
   request: 90.834% of thread-time inside operations, 95.78 s occupancy
   request parallelism: 1.00 thread per execution, 1.00 of it on a CPU; 7.96 executions at once over 8 threads
   request was: flushBatch 38.7%, validateRecord 37.9%, parseRecord 10.3%, unlabelled 7.2%, indexRecord 5.9%
@@ -341,7 +324,7 @@ request                     3,203,348    95.78 s    29.9 us    20.5 us    45.1 u
 | **executions** | completed executions, counted exactly | not sampled. If this disagrees with what you think ran, a label is leaking |
 | **total** | the measured spans summed, and what the table is sorted by | the ranking for *what do I fix first*: exact, not sampled. **Inclusive** — a parent contains its children, so the outermost span always leads. Self time would be the honest key once spans nest ([ideas.md](ideas.md) item 28) |
 | **mean, p50, p90, p99, max** | **measured**, two timestamps per execution | the only numbers in the whole report that are not sampled. Percentiles come from a log-bucket histogram: **at most 12.5% high, never low** |
-| **waiting** | that gap as a share | 0.0% here because the demo never blocks. On anything with I/O or a lock it is the finding |
+| **runnable / wait** | the same split as the fine table, over the samples caught anywhere inside the span | `0.0%` waiting here because the demo never blocks. On anything with I/O or a lock the right half is the finding. `runnable` is an upper bound on work, not work |
 | **`… parallelism:` line** | the two parallelism questions, in words | see below — they are different questions and used to be adjacent columns |
 | **`… was:` line** | the cross-tabulation | which fine operations ran under this one. Neither tier produces this alone |
 
