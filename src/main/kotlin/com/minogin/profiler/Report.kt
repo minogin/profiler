@@ -1021,8 +1021,8 @@ class Report internal constructor(
                 // old headline "mean - busy/exec is the waiting", and that stopped being true the
                 // moment work could cross a thread. `waiting` is the reading that survives.
                 Locale.ROOT, "%-25s %11s %10s %10s %10s %10s %10s %8s %6s %9s %11s",
-                "coarse operation", "executions", "mean", "p50", "p90", "p99", "max",
-                "waiting", "inside", "working", "in flight"
+                "Coarse operation", "Executions", "Mean", "p50", "p90", "p99", "Max",
+                "Waiting", "Inside", "Working", "In flight"
             )
         )
         appendLine("-".repeat(WIDTH))
@@ -1189,7 +1189,7 @@ class Report internal constructor(
         appendLine()
         appendLine(
             row(
-                "samples", String.format(
+                "Samples", String.format(
                     Locale.ROOT, "%,d labelled, %,d unlabelled, over %.1f s",
                     labelledHits, idleHits, durationNanos / 1e9
                 )
@@ -1197,7 +1197,7 @@ class Report internal constructor(
         )
         appendLine(
             row(
-                "sampling", String.format(
+                "Sampling", String.format(
                     Locale.ROOT, "%,d ticks at %.3f ms, %s", ticks, achieved,
                     plural(threads.toLong(), "thread")
                 )
@@ -1205,7 +1205,7 @@ class Report internal constructor(
         )
         appendLine(
             row(
-                "coverage", String.format(
+                "Coverage", String.format(
                     Locale.ROOT, "%s of %s thread-time observed (%.1f%%)",
                     threadTime(labelledNanos), threadTime(observedNanos),
                     labelledHits * 100.0 / (labelledHits + idleHits).coerceAtLeast(1)
@@ -1220,7 +1220,7 @@ class Report internal constructor(
             val parked = idleWaitingHits * (observedNanos - labelledNanos) / idleHits.toDouble()
             appendLine(
                 subRow(
-                    "unlabelled", String.format(
+                    "Unlabelled", String.format(
                         Locale.ROOT, "%s - %s parked (%.1f%%), %s runnable with no label",
                         threadTime(observedNanos - labelledNanos), threadTime(parked),
                         idleWaitingHits * 100.0 / idleHits,
@@ -1231,7 +1231,7 @@ class Report internal constructor(
             val runnable = observedNanos - parked
             if (runnable > 0) appendLine(
                 subRow(
-                    "runnable", String.format(
+                    "Runnable", String.format(
                         Locale.ROOT, "labels cover %s of %s (%.1f%%)",
                         threadTime(labelledNanos), threadTime(runnable), labelledNanos * 100.0 / runnable
                     )
@@ -1240,7 +1240,7 @@ class Report internal constructor(
         } else if (idleHits > 0) {
             appendLine(
                 subRow(
-                    "unlabelled",
+                    "Unlabelled",
                     "${threadTime(observedNanos - labelledNanos)} - thread state was not sampled"
                 )
             )
@@ -1260,8 +1260,8 @@ class Report internal constructor(
                 // distinction that does not exist and hid the one that does: neither is CPU. A
                 // reader does not misread `occupancy%` as processor time, which is what a paragraph
                 // of legend used to be for.
-                "operation", "occupancy%", "occupancy", "waiting", "elapsed", "in flight",
-                "calls", "hits", "noise", "impl/call", "over 1t"
+                "Operation", "Occupancy%", "Occupancy", "Waiting", "Elapsed", "In flight",
+                "Calls", "Hits", "Noise", "Impl/call", "Over 1t"
             )
         )
         if (operations.any { it.hits > 0 }) appendLine("-".repeat(WIDTH))

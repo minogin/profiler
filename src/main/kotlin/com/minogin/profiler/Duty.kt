@@ -440,14 +440,14 @@ class DutyReport internal constructor(
 
     fun lines(): List<String> {
         if (reason != null) return listOf(
-            row("duty cycle", "unavailable"),
-            subRow("why", reason),
-            subRow("bound", "none - nothing here bounds how much of the occupancy was not CPU"),
+            row("Duty cycle", "unavailable"),
+            subRow("Why", reason),
+            subRow("Bound", "none - nothing here bounds how much of the occupancy was not CPU"),
         )
         if (!available) return listOf(
-            row("duty cycle", "unavailable"),
+            row("Duty cycle", "unavailable"),
             subRow(
-                "why",
+                "Why",
                 String.format(Locale.ROOT, "the run is shorter than the %.3f s window", windowNanos / 1e9)
             ),
         )
@@ -456,7 +456,7 @@ class DutyReport internal constructor(
         // process was idle, which is worth seeing and used to be silently charged to the shares.
         // Starvation mode is the extreme - 18.83% aggregate against 96% inside the labels.
         out += row(
-            "duty cycle",
+            "Duty cycle",
             String.format(
                 Locale.ROOT, "%.2f%% of wall time on CPU%s", duty * 100,
                 // Withheld when the bound is unusable: a labelled figure printed beside "none"
@@ -467,7 +467,7 @@ class DutyReport internal constructor(
             )
         )
         out += subRow(
-            "windows",
+            "Windows",
             String.format(
                 Locale.ROOT, "%d over %d threads, each %.2f%%..%.2f%%",
                 windows, threads, minWindowDuty * 100, maxWindowDuty * 100
@@ -479,14 +479,14 @@ class DutyReport internal constructor(
             // has run out of evidence, and that is a different sentence. It also names the fix, which
             // is a label around the waiting rather than only around the work.
             out += subRow(
-                "bound",
+                "Bound",
                 String.format(
                     Locale.ROOT,
                     "none - %.1f%% of thread-time was off the CPU while still reading runnable",
                     invisibleOffCpu * 100
                 )
             )
-            out += subRow("why", "a native call, an event loop in a poll, or the scheduler")
+            out += subRow("Why", "a native call, an event loop in a poll, or the scheduler")
             out += subRow(
                 "worst case",
                 String.format(
@@ -501,13 +501,13 @@ class DutyReport internal constructor(
         // reason the duty cycle exists is not that CPU was the goal, it is that a *sum* over threads
         // is only additive when it is CPU.
         out += subRow(
-            "bound",
+            "Bound",
             String.format(
                 Locale.ROOT, "at most %.2f pp of any share is a thread waiting rather than working", boundPp
             )
         )
         out += subRow(
-            "verdict", when {
+            "Verdict", when {
                 shareDuty >= RANKING_SAFE -> "the ranking is trustworthy"
                 shareDuty >= OCCUPANCY_ONLY ->
                     "a share is still roughly time, but small gaps between operations are not resolved"
@@ -518,13 +518,13 @@ class DutyReport internal constructor(
             }
         )
         out += subRow(
-            "clock",
+            "Clock",
             String.format(
                 Locale.ROOT, "getThreadCpuTime, %.3f ms resolution, %.3f s window, dearest walk %.1f us",
                 resolutionNanos / 1e6, windowNanos / 1e9, maxSampleNanos / 1e3
             )
         )
-        if (anomalies > 0) out += subRow("dropped", "$anomalies thread readings went backwards")
+        if (anomalies > 0) out += subRow("Dropped", "$anomalies thread readings went backwards")
         return out
     }
 

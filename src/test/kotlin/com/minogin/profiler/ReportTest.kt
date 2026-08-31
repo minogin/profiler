@@ -245,7 +245,7 @@ class ReportTest {
         val d = duty(labelled = 0.0, aggregate = 0.6563, invisible = 0.344, labelledFraction = 0.139)
         assertTrue(d.unbounded, "the Netty regime is no longer recognised as unbounded")
         val lines = d.lines().joinToString("\n")
-        assertTrue(lines.contains("bound") && lines.contains("none -"), "no diagnosis for an unbounded run")
+        assertTrue(lines.contains("Bound") && lines.contains("none -"), "no diagnosis for an unbounded run")
         assertFalse(lines.contains("inside labels"), "printed a labelled duty it does not have")
         assertFalse(lines.contains("at most"), "printed a bound it does not have")
     }

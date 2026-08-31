@@ -125,16 +125,16 @@ reader looking for whether anything was wrong could not tell a fact from a cavea
 they were all just text. The left column now says what kind of line it is:
 
 ```
-samples       5,526 labelled, 472 unlabelled, over 3.1 s
-sampling      3,004 ticks at 0.999 ms, 2 threads
-coverage      5.52 s of 5.99 s thread-time observed (92.1%)
-  unlabelled  471.6 ms - 5.0 ms parked (1.1%), 466.6 ms runnable with no label
-duty cycle    99.98% of wall time on CPU; 100.00% inside labels
-  bound       at most 0.00 pp of any share is a thread waiting rather than working
-  verdict     the ranking is trustworthy
+Samples       5,526 labelled, 472 unlabelled, over 3.1 s
+Sampling      3,004 ticks at 0.999 ms, 2 threads
+Coverage      5.52 s of 5.99 s thread-time observed (92.1%)
+  Unlabelled  471.6 ms - 5.0 ms parked (1.1%), 466.6 ms runnable with no label
+Duty cycle    99.98% of wall time on CPU; 100.00% inside labels
+  Bound       at most 0.00 pp of any share is a thread waiting rather than working
+  Verdict     the ranking is trustworthy
 ```
 
-`why`, `bound`, `verdict` and `worst case` are the keys that carry a judgement rather than a
+`Why`, `Bound`, `Verdict` and `Worst case` are the keys that carry a judgement rather than a
 measurement — so *is this a problem?* is answerable by looking at the left column instead of reading
 the right one.
 
@@ -255,7 +255,7 @@ Present only if you placed a coarse label. It answers the question the table abo
 cannot: **how long did one execution take.**
 
 ```
-coarse operation           executions       mean        p50        p90        p99        max  waiting inside   working   in flight
+Coarse operation           Executions       Mean        p50        p90        p99        Max  Waiting Inside   Working   In flight
 ----------------------------------------------------------------------------------------------------------------------------------
 request                     3,203,348    29.9 us    20.5 us    45.1 us   180.2 us   17.01 ms     0.0%   1.00      1.00      7.96/8
 ----------------------------------------------------------------------------------------------------------------------------------
