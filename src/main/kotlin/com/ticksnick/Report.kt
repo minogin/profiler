@@ -490,6 +490,36 @@ class Report internal constructor(
      * A misplaced label is invisible in the share column and obvious in this one.
      */
     /**
+     * The band of group labels printed over a table's column heads.
+     *
+     * Ruled rather than centred text alone: the point of the band is to say where a group starts
+     * and stops, and unruled words leave a reader to guess the boundaries from spacing.
+     *
+     * Groups are given as column ranges into [widths], which are the widths of the **data** row -
+     * the band has to sit over the numbers, and the header row borrows two characters from the
+     * first column to fit `Thread-time% v`. A range with an empty label is not a group; a span left
+     * out entirely simply has no band over it.
+     */
+    private fun band(widths: IntArray, vararg groups: Pair<IntRange, String>): String {
+        val starts = IntArray(widths.size)
+        var pos = 0
+        for (i in widths.indices) {
+            starts[i] = pos
+            pos += widths[i] + 1
+        }
+        val line = CharArray(pos - 1) { ' ' }
+        for ((range, name) in groups) {
+            val from = starts[range.first]
+            val span = starts[range.last] + widths[range.last] - from
+            if (name.isEmpty() || span < name.length + 4) continue
+            val pad = (span - name.length - 2) / 2
+            val text = "-".repeat(pad) + " " + name + " " + "-".repeat(span - name.length - 2 - pad)
+            for (i in text.indices) line[from + i] = text[i]
+        }
+        return String(line).trimEnd()
+    }
+
+    /**
      * The two halves of an operation's thread-time, as `7.2% / 92.8%`, summing to 100.
      *
      * Printed as a pair because a reader could not tell whether `waiting` was a part of the
@@ -542,7 +572,7 @@ class Report internal constructor(
      */
     fun inFlightOf(op: OperationStat): String {
         val n = op.inFlight
-        return if (n.isNaN()) "-" else String.format(Locale.ROOT, "%.2f/%d", n, threads)
+        return if (n.isNaN()) "-" else String.format(Locale.ROOT, "%.2f / %d", n, threads)
     }
 
     /** Thread-time spent inside any label. */
@@ -976,7 +1006,7 @@ class Report internal constructor(
         // reference belongs in output.md where it can be read once rather than skipped thirty times.
         appendLine("  thread-time is sampled and summed across threads, NOT CPU")
         appendLine("  runnable/wait splits the thread-time beside it; runnable is NOT the same as working")
-        appendLine("  wall-time is not summed: thread-time / wall-time is the threads inside at once")
+        appendLine("  concurrency is threads INSIDE at once, running or parked - not a speedup")
         appendLine("  a share is where time went, NOT what removing the operation would save")
         if (coarse.any { it.count > 0 || it.inclusiveHits > 0 }) {
             appendLine("  'on a CPU' is an upper bound on the speedup, not the speedup")
@@ -1001,10 +1031,16 @@ class Report internal constructor(
         appendLine("  BOUND on the work and the time-on-CPU block above is the only thing that bounds it in turn;")
         appendLine("  the right half is waiting that some other thread caused")
         appendLine("wall-time is the clock with at least one thread inside, and it is NOT summed across threads,")
-        appendLine("  which thread-time is. Dividing gives the threads inside at once, and that is the number")
-        appendLine("  that turns a big thread-time back into real cost: 100 s of waiting is a convoy to break up")
-        appendLine("  at 15 threads and steady contention to design out at 1.7. Not latency either: it is every")
-        appendLine("  execution's interval unioned, so it says nothing about any single one of them")
+        appendLine("  which thread-time is. Not latency either: it is every execution's interval unioned, so it")
+        appendLine("  says nothing about any single one of them")
+        appendLine("concurrency is thread-time / wall-time, printed over the threads there were: how many were")
+        appendLine("  INSIDE this operation at once, running or parked. It is what turns a big thread-time back")
+        appendLine("  into real cost - 100 s of waiting is a convoy to break up at 15 and steady contention to")
+        appendLine("  design out at 1.7. NOT parallelism: threads inside are not threads executing, and two")
+        appendLine("  threads asleep in the same label is a concurrency of 2 with nothing running at all.")
+        appendLine("  Multiply by the runnable half for that. And it is a property of your LOAD, not your code:")
+        appendLine("  it tracks the arrival rate until it saturates, so read it against the denominator - 3.28/8")
+        appendLine("  is tracking your load, 7.9/8 is the pool pinned inside this label")
         appendLine("noise is 1/sqrt(hits), the error chance alone gives")
         appendLine("implied/call is hits x step / calls; 'over 1 tick' is thread-time inside executions that")
         appendLine("  outlived a tick")
@@ -1343,6 +1379,20 @@ class Report internal constructor(
         // default and the other the exception, which is the asymmetry `registerFine`/`registerCoarse`
         // was introduced to remove — reproduced in the output an hour after it was fixed in the API.
         appendLine("FINE OPERATIONS")
+        // The band over the column heads. Eleven columns is more than anyone reads as a list, and
+        // the groups are the reading order: how much time went here, how it was spread over
+        // threads, and how far the row can be trusted.
+        //
+        // The third group - `Calls` and `Impl/call` - is deliberately unlabelled. Andrey could not
+        // say what question it answers, and a band named on my guess would teach a grouping nobody
+        // had agreed to. An unlabelled span says "these two belong together and we have not settled
+        // why", which is true.
+        if (operations.any { it.hits > 0 }) appendLine(
+            band(
+                FINE_COLUMNS,
+                1..3 to "Load", 4..5 to "Spread", 8..10 to "Trust"
+            )
+        )
         if (operations.any { it.hits > 0 }) appendLine(
             String.format(
                 // `v` marks the column the table is sorted by, which nothing said before - and at
@@ -1352,7 +1402,7 @@ class Report internal constructor(
                 // 22 and 12 rather than 26 and 8 so the wider label still ends where the values
                 // end. The header was already two columns out of step with its rows before the
                 // marker was added, because `Occupancy%` never fitted the 8 it was given.
-                Locale.ROOT, "%-20s %14s %11s %15s %9s %13s %8s %6s %10s %7s",
+                Locale.ROOT, "%-20s %14s %11s %15s %9s %21s %13s %10s %8s %6s %7s",
                 // `occupancy%` and not `share`, because it is the same quantity as the column beside
                 // it — one relative, one absolute. Calling one of them `share` invented a
                 // distinction that does not exist and hid the one that does: neither is CPU. A
@@ -1387,8 +1437,22 @@ class Report internal constructor(
                 // stopped in a native call, which is how the JDBC trial got a number 55x above what
                 // the machine had spent. The left half is an upper bound on work; only the
                 // time-on-CPU block above can say how much of it was real.
+                // `Concurrency / Threads` rather than leaving it to be divided out of the two
+                // columns before it. It came back after being dropped, on the grounds that a report
+                // about a threaded program should not make a person do the arithmetic that tells
+                // them whether it was threaded - which is right, and is the same standard the
+                // `Runnable / Wait` split is held to.
+                //
+                // `Concurrency` and not `Parallelism`: the number counts threads INSIDE the label
+                // whether they are running or parked, which is what concurrency means; parallelism
+                // needs them executing. The run that asked for this column is the argument - two
+                // threads inside `work1` at 7.2% runnable, so concurrency 2.00 and a parallelism of
+                // about 0.14, and calling the 2.00 parallelism would have been flatly false.
                 "Operation", "Thread-time% v", "Thread-time", "Runnable / Wait", "Wall-time",
-                "Calls", "Hits", "Noise", "Impl/call", "Over 1t"
+                "Concurrency / Threads",
+                // `Impl/call` sits beside `Calls` because it is hits x step / calls, and it had
+                // been stranded among the statistics.
+                "Calls", "Impl/call", "Hits", "Noise", "Over 1t"
             )
         )
         if (operations.any { it.hits > 0 }) appendLine("-".repeat(FINE_WIDTH))
@@ -1412,11 +1476,12 @@ class Report internal constructor(
         for (op in seen.sortedByDescending { it.hits }) {
             appendLine(
                 String.format(
-                    Locale.ROOT, "%-26s %7.3f%% %11s %15s %9s %,13d %8d %5.2f%% %10s %6.2f%%",
+                    Locale.ROOT, "%-26s %7.3f%% %11s %15s %9s %21s %,13d %10s %8d %5.2f%% %6.2f%%",
                     op.name, shareOf(op) * 100, threadTime(occupancyNanosOf(op)),
                     runnableSplit(op.waitingShare), threadTime(elapsedNanosOf(op)),
-                    op.calls, op.hits, noiseFloorOf(op) * 100,
-                    duration(impliedNanosOf(op)), op.stuckShare * 100
+                    inFlightOf(op),
+                    op.calls, duration(impliedNanosOf(op)),
+                    op.hits, noiseFloorOf(op) * 100, op.stuckShare * 100
                 )
             )
         }
@@ -1578,7 +1643,7 @@ class Report internal constructor(
         // The report-level rules and the warning banners. 115 rather than the old 130 so that
         // nothing on the page is wider than the widest table on it - a run printed rules of three
         // different lengths before the tables and the constants were brought back together.
-        const val WIDTH = 122
+        const val WIDTH = 144
 
         /**
          * The coarse table alone, which is narrower than [WIDTH] since the three parallelism
@@ -1598,7 +1663,15 @@ class Report internal constructor(
          * 112 around the coarse one, 130 again to close - because the tables had been renamed and
          * resized while the rules stayed pinned to a constant that no longer described either.
          */
-        const val FINE_WIDTH = 122
+        const val FINE_WIDTH = 144
+
+        /**
+         * The fine table's data-row widths, in order, so the group band can be laid over them.
+         *
+         * Operation, thread-time% and thread-time, runnable/wait, wall-time,
+         * concurrency/threads, calls, implied per call, hits, noise, over one tick.
+         */
+        val FINE_COLUMNS = intArrayOf(26, 8, 11, 15, 9, 21, 13, 10, 8, 6, 7)
 
         /**
          * `1 thread` rather than `1 threads`.

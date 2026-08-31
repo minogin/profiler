@@ -236,12 +236,22 @@ exist.
 ## The table
 
 ```
-Operation            Thread-time% v Thread-time Runnable / Wait Wall-time         Calls     Hits  Noise  Impl/call Over 1t
-flushBatch                  44.250%     38.54 s   100.0% / 0.0%   11.75 s   288,514,362    38319  0.51%   133.6 ns   0.01%
-validateRecord              41.222%     35.91 s   100.0% / 0.0%   11.68 s   288,514,362    35697  0.53%   124.5 ns   0.00%
-parseRecord                  9.478%      8.26 s    99.7% / 0.3%    6.14 s   288,514,362     8208  1.10%    28.6 ns   0.27%
-indexRecord                  5.050%      4.40 s   100.0% / 0.0%    3.73 s   288,514,362     4373  1.51%    15.2 ns   0.05%
+                           --------------- Load --------------- ----------- Spread ------------                          -------- Trust --------
+Operation            Thread-time% v Thread-time Runnable / Wait Wall-time Concurrency / Threads         Calls  Impl/call     Hits  Noise Over 1t
+flushBatch                  44.250%     38.54 s   100.0% / 0.0%   11.75 s              3.28 / 8   288,514,362   133.6 ns    38319  0.51%   0.01%
+validateRecord              41.222%     35.91 s   100.0% / 0.0%   11.68 s              3.07 / 8   288,514,362   124.5 ns    35697  0.53%   0.00%
+parseRecord                  9.478%      8.26 s    99.7% / 0.3%    6.14 s              1.34 / 8   288,514,362    28.6 ns     8208  1.10%   0.27%
+indexRecord                  5.050%      4.40 s   100.0% / 0.0%    3.73 s              1.18 / 8   288,514,362    15.2 ns     4373  1.51%   0.05%
 ```
+
+**The column heads carry a band naming the groups** — `Load` (thread-time% through runnable/wait),
+`Spread` (wall-time and concurrency), `Trust` (hits, noise, over 1t). Eleven columns is more than
+anyone reads as a flat list, and the groups are the reading order: how much time went here, how it
+was spread over threads, how far the row can be trusted.
+
+`Calls` and `Impl/call` sit together and **deliberately have no band**. They belong beside each other
+— the second is `hits × step ÷ calls` — but what question the pair answers has not been settled, and
+a label invented to fill the gap would teach a grouping nobody agreed to.
 
 | column | what it is | what to watch for |
 |---|---|---|
@@ -249,6 +259,7 @@ indexRecord                  5.050%      4.40 s   100.0% / 0.0%    3.73 s   288,
 | **thread-time** | `hits × step`, summed across threads | **absolute**, so unlike `thread-time%` it does not move when a label is added, moved or removed. This is the column to compare between two runs |
 | **runnable / wait** | the two halves of the `thread-time` beside it, summing to 100% | printed as a pair because a share on its own does not say whether it is *part of* thread-time or *on top of* it, and no unit settles that. **`runnable` is not `working`** — see below |
 | **wall-time** | wall clock with at least one thread inside | not latency: it is every execution's interval unioned, so it says the operation had *somebody* in it for this long and nothing about any single execution |
+| **concurrency / threads** | `thread-time ÷ wall-time`, over the threads there were — **how many threads were inside this operation at once**, running or parked | **not parallelism, and not a property of your code** — see below. It is what turns a big thread-time back into real cost: 100 s of waiting at a concurrency of 15 is a convoy to break up; at 1.7 it is steady contention to design out |
 | **calls** | exact, counted by the hook | a share cannot tell *200M calls at 8 ns* from *1000 calls at 1.6 ms*, and those want opposite fixes |
 | **hits** | samples that caught this operation | the evidence behind the share |
 | **noise** | `1/√hits` — the error chance alone gives | **if two rows differ by less than their noise, they are not ranked, they are tied** |
@@ -278,29 +289,33 @@ the only thing that can bound this in turn. When it says *not measured*, nothing
 That is also why the column says `runnable` and not `run`: the `-able` is the distinction. Runnable
 means *not blocked*, not *executing*.
 
-### There is no concurrency column, and the two columns beside each other are it
+### `concurrency` is not parallelism, and not a property of your code
 
 `thread-time ÷ wall-time` is how many threads were inside an operation at the same time — `38.54 s`
-over `11.75 s` is about three. That ratio was a column twice: as `threads`, renamed to `in flight`
-because `threads` invited *"this operation used 3.28 threads"* — one piece of work spread over
-three — and then dropped on **2026-08-31**, because a reader who wanted exactly that number could not
-find it under the first name and could not read it under the second.
+over `11.75 s` is 3.28. **Do the division for the reader**: a report about a threaded program should
+not make a person compute whether it was threaded. That is why the column exists, after two failed
+names (`threads`, then `in flight`) and a spell with no column at all.
 
-**The division is worth doing when a number looks too big.** `flushBatch` at `38.54 s` of thread-time
-is not 38 seconds of your life: the clock advanced `11.75 s` while it ran. Delete it entirely and you
-save the wall-time, not the thread-time. That is the whole reason both columns are printed.
+**Why it matters:** `flushBatch` at `38.54 s` of thread-time is not 38 seconds of your life — the
+clock advanced `11.75 s` while it ran. Delete it entirely and you save the wall-time, not the
+thread-time.
 
-**What it is not** is a property of your code. It tracks arrival rate below saturation — twice the
-clients, twice the number, not a line changed — and at the ceiling it stops tracking load and just
-reports the pool size. If `thread-time ÷ wall-time` comes out at very nearly the thread count in the
-`Sampling` line, that is a finding about your pool being pinned inside that label, not about the
-operation.
+**It is `concurrency`, not `parallelism`**, and the difference is not pedantry. The number counts
+threads *inside* the label whether they are running or parked. Two threads asleep in the same label
+is a concurrency of **2** with nothing executing at all — which is exactly what a sandbox run
+produced: `work1` at `2.00 / 2` concurrency and `7.2%` runnable, so a real parallelism near `0.14`.
+Multiply the two columns if you want that number; the report does not print it, because `runnable` is
+itself only an upper bound on executing.
 
-**And it is not parallelism**, in the sense of one execution split across threads. A fine operation
-is an integer in a thread's slot and never leaves the thread that entered it, so one thread inside
-the label is one call of it — three threads there means three separate calls, not one call going
-three times faster. Only a coarse context can be split across threads, which is why the parallelism
-line lives under the coarse table.
+**And it is a property of your load.** It tracks arrival rate below saturation — twice the clients,
+twice the number, not a line changed — and at the ceiling it stops tracking load and reports the pool
+size. That is what the denominator is for: `3.28 / 8` is *tracking your load*; `7.9 / 8` is *the pool
+is pinned inside this label*, which is a finding about the pool, not the operation.
+
+**One more thing it is not:** one execution split across threads. A fine operation is an integer in a
+thread's slot and never leaves the thread that entered it, so three threads inside the label means
+three separate calls, not one call going three times faster. Only a coarse context can be split, and
+that is what the `parallelism:` line under the coarse table reports.
 
 ---
 
