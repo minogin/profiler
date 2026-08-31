@@ -1173,9 +1173,10 @@ class Report internal constructor(
         appendLine("|  __/|  _ <| |_| |  _|  | || |___| |___|  _ <")
         appendLine("|_|   |_| \\_\\\\___/|_|   |___|_____|_____|_| \\_\\")
         appendLine()
+        appendLine("THE RUN")
         appendLine(
             String.format(
-                Locale.ROOT, "%s over %.1f s, %,d ticks at %.3f ms, %s",
+                Locale.ROOT, "  %s over %.1f s, %,d ticks at %.3f ms, %s",
                 plural(labelledHits, "labelled sample"), durationNanos / 1e9, ticks, achieved,
                 plural(threads.toLong(), "thread")
             )
@@ -1186,7 +1187,7 @@ class Report internal constructor(
         appendLine(
             String.format(
                 Locale.ROOT,
-                "labels cover %s of the %s of thread-time observed (%.1f%%); %s was outside every label, in %s",
+                "  labels cover %s of the %s of thread-time observed (%.1f%%); %s was outside every label, in %s",
                 threadTime(labelledNanos), threadTime(observedNanos),
                 labelledHits * 100.0 / (labelledHits + idleHits).coerceAtLeast(1),
                 threadTime(observedNanos - labelledNanos), plural(idleHits, "sample")
@@ -1198,7 +1199,7 @@ class Report internal constructor(
         if (stateSampled && idleHits > 0) appendLine(
             String.format(
                 Locale.ROOT,
-                "  of that unlabelled time, %s was a thread not runnable (%.1f%%) and %s was a thread " +
+                "    of that unlabelled time, %s was a thread not runnable (%.1f%%) and %s was a thread " +
                         "runnable with no label on it",
                 threadTime(idleWaitingHits * stepNanos), idleWaitingHits * 100.0 / idleHits,
                 threadTime((idleHits - idleWaitingHits) * stepNanos)
@@ -1215,7 +1216,7 @@ class Report internal constructor(
         if (!runnableCoverage.isNaN() && abs(runnableCoverage - plainCoverage) >= COVERAGE_GAP) appendLine(
             String.format(
                 Locale.ROOT,
-                "  of the thread-time that was runnable at all, labels cover %s of %s (%.1f%%)",
+                "    of the thread-time that was runnable at all, labels cover %s of %s (%.1f%%)",
                 threadTime((labelledHits - labelledWaitingHits) * stepNanos),
                 threadTime((labelledHits - labelledWaitingHits + idleHits - idleWaitingHits) * stepNanos),
                 runnableCoverage * 100
@@ -1223,7 +1224,7 @@ class Report internal constructor(
         )
         // The bound belongs beside the sampling rate, not in a footnote: both say how much the
         // numbers below are worth, one against chance and one against stalling.
-        for (l in duty.lines()) appendLine(l)
+        for (l in duty.lines()) appendLine("  $l")
         appendLine()
         // FINE, not bare OPERATIONS. `OPERATIONS` beside `COARSE OPERATIONS` makes one tier the
         // default and the other the exception, which is the asymmetry `registerFine`/`registerCoarse`

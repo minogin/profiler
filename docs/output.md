@@ -102,8 +102,8 @@ labelled occupancy and the bound becomes tight again.
 Sections, in order, each with a heading and a blank line before it:
 
 ```
-(banner)            the title, then how many samples, what they cover, and the duty cycle
-                    that bounds them
+(banner)            the title
+THE RUN             how many samples, what they cover, and the duty cycle that bounds them
 FINE OPERATIONS     the fine table, or one line saying why it is empty
 COARSE OPERATIONS   the coarse table, present only if you placed a coarse label
 (warnings)          anything the run wants to tell you about itself
