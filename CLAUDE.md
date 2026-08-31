@@ -24,11 +24,15 @@
 * Do not write novels where it's not needed. 
 * Do not add "worth mentioning", "One thing I'd flag rather than assume" and similar shit
   every time, when it is not really important. Do not distract me with minor things. 
-* **Ask decisions through the question UI, not as prose.** When a choice is mine to make — scope,
-  ordering, an API's shape, whether something is its own commit — use `AskUserQuestion` so the
-  options are pickable, rather than burying them in a paragraph. Having a recommendation is not a
-  reason to skip it: put the recommendation first and still ask. Prose is for explaining what I
-  chose, not for collecting the choice.
+* **First decide whether there is a choice at all.** A question whose answer the evidence settles is
+  not a decision, it is a finding — state it and act on it. Only what the evidence cannot settle is
+  mine: scope, ordering, priorities, taste, an API's shape, whether something is its own commit.
+  Manufacturing options around a settled answer, or padding one with a consequence that changes
+  nothing about what to do, costs me more energy than getting it wrong would.
+* **Ask real decisions through the question UI, not as prose.** When the choice is genuinely mine,
+  use `AskUserQuestion` so the options are pickable, rather than burying them in a paragraph. Having
+  a recommendation is not a reason to skip it: put the recommendation first and still ask. Prose is
+  for explaining what I chose, not for collecting the choice.
 
 ## Keeping the docs
 Each doc has one job. Write to the right one as you go, not at the end.
