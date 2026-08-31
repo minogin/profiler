@@ -18,9 +18,10 @@ a mistake on purpose.
 ## The header: is this run worth reading at all
 
 ```
-86,597 labelled samples over 12.1 s, 11,933 ticks at 1.006 ms, 8 threads
-labels cover 87.10 s of the 95.97 s of thread-time observed (90.8%); 8.87 s was outside every label, in 8,815 samples
-  of that unlabelled time, 10.1 ms was a thread not runnable (0.1%) and 8.86 s was a thread runnable with no label on it
+Samples       95,412 taken over 12.1 s - 86,597 inside an operation, 8,815 outside every operation
+Sampling      11,933 ticks at 1.006 ms x 8 threads - one sample per thread per tick
+Coverage      87.10 s of 95.97 s thread-time observed (90.8%)
+  Outside     8.87 s - 10.1 ms parked (0.1%), 8.86 s runnable inside no operation
 clock: getThreadCpuTime, resolution 15.625 ms measured, window 1.000 s, dearest walk 621.8 us
 threads were on CPU 98.68% of sampled wall time  (10 windows, 8 threads, per window 97.18%..99.35%)
   inside labelled work it was 98.55%, and that is what bounds the shares
@@ -37,18 +38,18 @@ less than it looks.
 **Line 2 — coverage.** *Labels cover 87.10 s of the 95.97 s observed.* The gap is time no label was
 open. A low figure is not automatically bad — it means your labels do not cover everything, which
 may be exactly what you intended — but it is the first place a misplaced label shows up. Reported in
-seconds and not only as a percentage, because *"labels cover 87 s of 96"* is something you can act
+seconds and not only as a percentage, because *"87.10 s of 95.97 s"* is something you can act
 on and *"90.8%"* is not.
 
 **Line 3 — what the uncovered time was.** Two entirely different findings look identical in line 2:
 work nobody labelled, and threads doing nothing at all. This separates them. A pool that spends its
-life parked between tasks reads as a huge unlabelled share and means nothing is wrong.
+life parked between tasks reads as a huge Outside share and means nothing is wrong.
 
 When the two differ by more than half a point, a fourth line appears giving coverage over *runnable*
 occupancy alone, with both sides restricted:
 
 ```
-  of the thread-time that was runnable at all, labels cover 240.94 s of 284.01 s (84.8%)
+  Runnable    operations cover 240.94 s of 284.01 s (84.8%)
 ```
 
 On Lucene that turns an alarming 59.3% into 84.8%, because most of the shortfall was pool threads
@@ -85,7 +86,7 @@ verdict:
 ```
   nothing here bounds the shares: 34.4% of thread-time was off the CPU while the thread
   still read runnable — a native call, an event loop in a poll, or the scheduler — and
-  labels cover 13.9% of these threads, so the worst case is that all of it was inside them
+  Worst case  operations cover 13.9% of these threads, so all of it could be inside them
 ```
 
 This is honest rather than broken. The JVM reports a thread in a native call — an event loop inside
@@ -147,7 +148,7 @@ slot is created on the first labelled call and the earlier ticks saw nothing to 
 **Unlabelled is not a fault by itself**, and the report splits it into the two cases that matter:
 
 - **parked** — threads sitting idle. Normal for a pool between requests, and nothing to fix. A run
-  can be 95% unlabelled and perfectly healthy if that is where it is.
+  can be 95% outside every operation and perfectly healthy if that is where it is.
 - **runnable with no label** — the machine was doing real work you have not labelled. This is the
   number worth reading. Either you instrumented part of the program deliberately, or a label is in
   the wrong place, or work escaped the context that should have carried it.

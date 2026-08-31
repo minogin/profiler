@@ -1548,6 +1548,35 @@ from "sawtooth spiking to 16, barrier costs", which both average to 3. That need
 varies over time, and the ground truth for it has to be *recorded* (per-phase timestamps) rather
 than computed, because occupancy is emergent rather than configured.
 
+## The project is called TickSnick · 2026-08-31
+
+Renamed from `profiler`, domain **ticksnick.com**. Four decisions, recorded because a later session
+will otherwise have to reconstruct them from a diff:
+
+- **Package and coordinates are `com.ticksnick`**, the reverse of the domain, which is the
+  convention and is collision-proof because the domain is owned. `com.ticksnick:ticksnick:0.1.0`.
+  The previous `com.minogin` namespace was dropped rather than nested under, since the project is
+  the thing being published and not one of several under a personal namespace.
+- **The `Profiler` object keeps its name.** `Profiler.registerFine(...)` says what it does;
+  `TickSnick.registerFine(...)` would say who made it. Library entry points are named for the job.
+  The brand lives in the package, the artifact and the banner, where a caller meets it once instead
+  of at every call site.
+- **Repository is `minogin/ticksnick`**, and the POM url and scm point there.
+- **The banner says TICKSNICK**, in the same block font it used for PROFILER.
+
+*Mechanically:* 47 files moved from `com.minogin.profiler` to `com.ticksnick` with `git mv` so the
+history follows, `rootProject.name`, `artifactId`, `group`, the jar's bench exclusion and the
+application main class all updated. Nothing about the code changed.
+
+## The toolchain · Gradle 9.7.1, Kotlin 2.4.0
+
+Bumped 2026-08-31 from Gradle 9.6.0 / Kotlin 2.3.21. Recorded because **every measurement in
+[findings.md](findings.md) predates the Kotlin bump**, and this library leans on value classes and
+inline functions whose generated shapes are exactly what it measures. Nothing in the source changed,
+so nothing is expected to move — but "the same binary" stopped being literally true across that
+boundary. If a close comparison against an older figure ever looks odd, the compiler version is a
+candidate that was not there before, and `--hook` is the cheap way to re-check.
+
 ## The API rename · done, out of phase order
 
 Not a phase, and it jumped the queue because the sandbox found it: `Profiler.register` and

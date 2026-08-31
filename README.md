@@ -1,6 +1,6 @@
-# profiler
+# TickSnick
 
-A profiler for operations too short to profile — finding out which of twenty nanosecond-scale
+**ticksnick.com** · a profiler for operations too short to profile — finding out which of twenty nanosecond-scale
 operations eats your time, by sampling labels instead of measuring durations.
 
 **v0.1.0** — Apache-2.0, one dependency (the Kotlin stdlib), verified on a synthetic workload whose

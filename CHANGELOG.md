@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### The project is called TickSnick
+
+Renamed from `profiler`; the domain is **ticksnick.com** and the repository is
+`github.com/minogin/ticksnick`. Package and coordinates are now `com.ticksnick`:
+
+```kotlin
+implementation("com.ticksnick:ticksnick:0.1.0")
+```
+
+The `Profiler` object keeps its name — `Profiler.registerFine(...)` says what it does, where
+`TickSnick.registerFine(...)` would say who made it. The name lives in the package, the artifact and
+the banner instead, which is where a caller meets it once rather than at every call.
+
+Builds on Gradle 9.7.1 and Kotlin 2.4.0.
+
 ### Crossing threads
 
 Work handed to a pool no longer leaves its logical operation behind. `captureCoarse()` on the thread
