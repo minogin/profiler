@@ -24,7 +24,7 @@ fun tooSmallMessage(name: String, calls: Long, upperNanos: Double): String = Str
             "5-9%%,%n" +
             "    and C2 can move work across the boundaries of adjacent short labels without leaving a " +
             "trace in the numbers.%n" +
-            "    Label the enclosing loop instead and divide by the iteration count.",
+            "    Put an operation label on the enclosing loop instead and divide by the iteration count.",
     name, calls, duration(upperNanos), Report.FLOOR_NANOS
 )
 
@@ -131,7 +131,7 @@ fun leakMessage(open: String, thread: String = Thread.currentThread().name): Str
             "%s,%n" +
             "    which does not look like an error - it looks like a finding, with a plausible " +
             "number beside it.%n" +
-            "    A label placed with enter/exit has no finally: a body that throws leaves it set.",
+            "    An operation label placed with enter/exit has no finally: a body that throws leaves it set.",
     open, thread, open
 )
 
@@ -540,7 +540,7 @@ class Report internal constructor(
      * Coverage with both sides restricted to occupancy where the thread was actually runnable.
      *
      * The plain coverage figure divides labelled samples by *every* sample, and on a workload with
-     * idle threads that reads as "the labels miss most of the run" when what it means is "most of
+     * idle threads that reads as "the operations miss most of the run" when what it means is "most of
      * the run was nobody doing anything". On Lucene 79.2% of the unlabelled samples caught a thread
      * that was not runnable, which turns 49.8% coverage into something quite different.
      *
@@ -561,8 +561,8 @@ class Report internal constructor(
     /**
      * Thread-time the sampler observed at all — every slot read on every tick, labelled or not.
      *
-     * The honest denominator for "how much of this run do my labels account for", and the number
-     * that makes a coverage figure actionable: *"labels cover 94 s of 181"* is a sentence you can do
+     * The honest denominator for "how much of this run do my operations account for", and the number
+     * that makes a coverage figure actionable: *"operations cover 94 s of 181"* is a sentence you can do
      * something about in a way that *"52%"* is not.
      */
     val observedNanos: Double get() = (labelledHits + idleHits) * stepNanos
@@ -1065,7 +1065,7 @@ class Report internal constructor(
             if (c.inclusiveHits == 0L) continue
             appendLine(
                 String.format(
-                    Locale.ROOT, "  %s: %.3f%% of labelled thread-time, %s occupancy",
+                    Locale.ROOT, "  %s: %.3f%% of thread-time inside operations, %s occupancy",
                     c.name, shareOf(c) * 100, threadTime(c.inclusiveHits * stepNanos)
                 )
             )
@@ -1090,7 +1090,7 @@ class Report internal constructor(
             appendLine(
                 String.format(
                     Locale.ROOT,
-                    "%n%.1f%% of labelled thread-time (%s) was inside NO coarse span.",
+                    "%n%.1f%% of thread-time inside fine operations (%s) was inside NO coarse span.",
                     labelledOutsideCoarseShare * 100, threadTime(labelledOutsideCoarse * stepNanos)
                 )
             )
@@ -1194,7 +1194,7 @@ class Report internal constructor(
                 // A sample is one photograph of one thread, so saying how many were taken and then
                 // where they landed makes the total the subject and the split a property of it.
                 "Samples", String.format(
-                    Locale.ROOT, "%,d taken over %.1f s - %,d inside a label, %,d outside every label",
+                    Locale.ROOT, "%,d taken over %.1f s - %,d inside an operation, %,d outside every operation",
                     labelledHits + idleHits, durationNanos / 1e9, labelledHits, idleHits
                 )
             )
@@ -1230,8 +1230,8 @@ class Report internal constructor(
             val parked = idleWaitingHits * (observedNanos - labelledNanos) / idleHits.toDouble()
             appendLine(
                 subRow(
-                    "Unlabelled", String.format(
-                        Locale.ROOT, "%s - %s parked (%.1f%%), %s runnable with no label",
+                    "Outside", String.format(
+                        Locale.ROOT, "%s - %s parked (%.1f%%), %s runnable inside no operation",
                         threadTime(observedNanos - labelledNanos), threadTime(parked),
                         idleWaitingHits * 100.0 / idleHits,
                         threadTime(observedNanos - labelledNanos - parked)
@@ -1242,7 +1242,7 @@ class Report internal constructor(
             if (runnable > 0) appendLine(
                 subRow(
                     "Runnable", String.format(
-                        Locale.ROOT, "labels cover %s of %s (%.1f%%)",
+                        Locale.ROOT, "operations cover %s of %s (%.1f%%)",
                         threadTime(labelledNanos), threadTime(runnable), labelledNanos * 100.0 / runnable
                     )
                 )
@@ -1250,7 +1250,7 @@ class Report internal constructor(
         } else if (idleHits > 0) {
             appendLine(
                 subRow(
-                    "Unlabelled",
+                    "Outside",
                     "${threadTime(observedNanos - labelledNanos)} - thread state was not sampled"
                 )
             )
@@ -1364,14 +1364,14 @@ class Report internal constructor(
         if (imbalances > 0 || openAtEnd > 0) {
             appendLine("-".repeat(WIDTH))
             if (imbalances > 0) appendLine(
-                "! $imbalances labels were still open at a point the caller said should be quiescent - " +
+                "! $imbalances operation labels were still open at a point the caller said should be quiescent - " +
                         "everything after each leak was billed to the leaked operation"
             )
             if (openAtEnd > 0) appendLine(
-                "! $openAtEnd threads were still inside a hand-placed label when sampling stopped, which " +
+                "! $openAtEnd threads were still inside a hand-placed operation label when sampling stopped, " +
                         "nothing can close now"
             )
-            appendLine("  a label placed with enter/exit has no finally: a body that throws leaves it set")
+            appendLine("  an operation label placed with enter/exit has no finally: a body that throws leaves it set")
         }
         appendLine("-".repeat(WIDTH))
         // Said in the output rather than in a document, because the one time it mattered it was

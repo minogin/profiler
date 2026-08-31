@@ -119,7 +119,24 @@ here, where it is read once instead of skipped thirty times.
 
 `render(legend = true)` prints the full text, and this document is the same content at length.
 
-### What a sample is, and whether unlabelled time is bad
+### One word for the thing, another for putting it there
+
+An **operation** is the named thing you registered. An **operation label** is the act of putting it
+in the code. The report keeps them apart:
+
+- anything that **counts or measures** says *operation* — `3 inside an operation`, `Outside`,
+  `operations cover 5.58 s of 5.99 s`, `98.32% inside operations`
+- anything about **placement** says *operation label* — a leaked one, one below the floor, one placed
+  with `enter`/`exit` and never closed
+
+Bare "label" survives only where the operation is already the subject and no ambiguity is possible —
+*"the operation wants a coarse label for its per-execution statistics"*.
+
+The report used to say "label" in both senses, and taught `Operation` as a column header before using
+the other word three lines later. "Label" also already means something else in this field: in
+async-profiler and pyroscope it is a thread-local tag, which is not this.
+
+### What a sample is, and whether time outside every operation is bad
 
 **A sample is one photograph of one thread's label slot**, taken once per tick. So the count comes
 from `ticks x threads` — with the caveat that a thread which registers partway through the run
@@ -145,11 +162,11 @@ reader looking for whether anything was wrong could not tell a fact from a cavea
 they were all just text. The left column now says what kind of line it is:
 
 ```
-Samples       5,998 taken over 3.1 s - 5,526 inside a label, 472 outside every label
+Samples       5,998 taken over 3.1 s - 5,526 inside an operation, 472 outside every operation
 Sampling      3,004 ticks at 0.999 ms x 2 threads - one sample per thread per tick
 Coverage      5.52 s of 5.99 s thread-time observed (92.1%)
-  Unlabelled  471.6 ms - 5.0 ms parked (1.1%), 466.6 ms runnable with no label
-Duty cycle    99.98% of wall time on CPU; 100.00% inside labels
+  Outside     471.6 ms - 5.0 ms parked (1.1%), 466.6 ms runnable inside no operation
+Duty cycle    99.98% of wall time on CPU; 100.00% inside operations
   Bound       at most 0.00 pp of any share is a thread waiting rather than working
   Verdict     the ranking is trustworthy
 ```

@@ -246,7 +246,7 @@ class ReportTest {
         assertTrue(d.unbounded, "the Netty regime is no longer recognised as unbounded")
         val lines = d.lines().joinToString("\n")
         assertTrue(lines.contains("Bound") && lines.contains("none -"), "no diagnosis for an unbounded run")
-        assertFalse(lines.contains("inside labels"), "printed a labelled duty it does not have")
+        assertFalse(lines.contains("inside operations"), "printed a labelled duty it does not have")
         assertFalse(lines.contains("at most"), "printed a bound it does not have")
     }
 
@@ -256,7 +256,7 @@ class ReportTest {
         val d = duty(labelled = 0.9846, aggregate = 0.6927, invisible = 0.014, labelledFraction = 0.595)
         assertFalse(d.unbounded)
         val lines = d.lines().joinToString("\n")
-        assertTrue(lines.contains("inside labels"), "the labelled duty was not printed")
+        assertTrue(lines.contains("inside operations"), "the labelled duty was not printed")
         assertTrue(lines.contains("at most"), "the bound was not printed")
         assertFalse(lines.contains("none -"), "printed the diagnosis over a real bound")
         assertEquals(1.56, d.boundPp, 0.05, "Lucene's recorded 1.57 pp moved")
@@ -301,7 +301,7 @@ class ReportTest {
             imbalances = 3, stateSampled = true,
         )
         assertTrue(r.ok, "a counted leak invalidated a non-strict report")
-        assertTrue(r.render().contains("3 labels were still open"), "the leak count was not printed")
+        assertTrue(r.render().contains("3 operation labels were still open"), "the leak count was not printed")
     }
 
     // ---------------------------------------------------------------- formatting

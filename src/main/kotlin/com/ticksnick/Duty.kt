@@ -463,7 +463,7 @@ class DutyReport internal constructor(
                 // reads as a measurement that was taken and then ignored, which is the opposite of
                 // what happened - the evidence ran out.
                 if (unbounded || labelledDuty.isNaN()) ""
-                else String.format(Locale.ROOT, "; %.2f%% inside labels", labelledDuty * 100)
+                else String.format(Locale.ROOT, "; %.2f%% inside operations", labelledDuty * 100)
             )
         )
         out += subRow(
@@ -490,7 +490,7 @@ class DutyReport internal constructor(
             out += subRow(
                 "worst case",
                 String.format(
-                    Locale.ROOT, "labels cover %.1f%% of these threads, so all of it could be inside them",
+                    Locale.ROOT, "operations cover %.1f%% of these threads, so all of it could be inside them",
                     labelledFraction * 100
                 )
             )
