@@ -1,11 +1,19 @@
 # The documents
 
-Each one has a job, and nothing is written in two places. Start with [tldr.md](tldr.md) if you have
-five minutes, or with [profiler.md](profiler.md) if you want the design.
+**The project is TickSnick** — `com.ticksnick:ticksnick`, ticksnick.com. Each document has a job and
+nothing is written in two places. Start with [tldr.md](tldr.md) if you have five minutes, or with
+[profiler.md](profiler.md) if you want the design.
+
+**If you are picking this up to keep using the tool rather than to build it**, go to
+[sandbox.md](sandbox.md): `gradlew :sandbox:run` is a forty-line program you edit, and the friction
+log there is where what you find goes. That is the loop that produced most of what changed on
+2026-08-30 and 31 — a percentile larger than the maximum, a report nobody could read, characters a
+Windows console cannot print, and an API where the first fine operation and the first coarse one
+were both the integer 0.
 
 **Where we are right now.** The fine tier is built, verified and **released as v0.1.0** — Apache-2.0,
-one dependency, Java 21+. Verified on our own bench and on **three** foreign codebases: Apache
-Calcite, Apache Lucene, and Netty. Phases 1, 2, 3, 3.5 and 3.75 are done; phase 6 is half done —
+no dependencies, Java 21+. Verified on our own bench and on **four** foreign codebases: Apache
+Calcite, Apache Lucene, Netty, and PostgreSQL over a socket. Phases 1, 2, 3, 3.5 and 3.75 are done; phase 6 is half done —
 thread state and per-operation concurrency exist, the whole-application coefficient does not; phase 7
 is far enough for a 0.x but has no annotations and no agent.
 
