@@ -440,70 +440,91 @@ class DutyReport internal constructor(
 
     fun lines(): List<String> {
         if (reason != null) return listOf(
-            "CPU duty cycle: unavailable - $reason",
-            "  nothing here bounds how much of the occupancy was not CPU",
+            row("duty cycle", "unavailable"),
+            subRow("why", reason),
+            subRow("bound", "none - nothing here bounds how much of the occupancy was not CPU"),
         )
         if (!available) return listOf(
-            String.format(
-                Locale.ROOT,
-                "CPU duty cycle: unavailable - no window completed (the run is shorter than %.3f s)",
-                windowNanos / 1e9
-            )
+            row("duty cycle", "unavailable"),
+            subRow(
+                "why",
+                String.format(Locale.ROOT, "the run is shorter than the %.3f s window", windowNanos / 1e9)
+            ),
         )
         val out = ArrayList<String>()
-        out += String.format(
-            Locale.ROOT,
-            "clock: getThreadCpuTime, resolution %.3f ms measured, window %.3f s, dearest walk %.1f us",
-            resolutionNanos / 1e6, windowNanos / 1e9, maxSampleNanos / 1e3
-        )
-        out += String.format(
-            Locale.ROOT,
-            "threads were on CPU %.2f%% of sampled wall time  (%d windows, %d threads, per window %.2f%%..%.2f%%)",
-            duty * 100, windows, threads, minWindowDuty * 100, maxWindowDuty * 100
-        )
-        // The bound is over labelled occupancy alone, which is what the shares are over. Printed
-        // beside the aggregate rather than instead of it: the gap between the two lines is how much
-        // of the process was idle, which is worth seeing and used to be silently charged to the
-        // shares. Starvation mode is the extreme — 18.83% aggregate against 96% inside the labels.
-        if (unbounded) {
-            // Printing 0.00% and 100 pp here would read as a measurement, and a reader would
-            // rightly distrust a report whose shares are probably fine. The bound has not found
-            // anything; it has run out of evidence, and that is a different sentence. It also
-            // names the fix, which is a label around the waiting rather than only around the work.
-            out += String.format(
-                Locale.ROOT,
-                "  nothing here bounds the shares: %.1f%% of thread-time was off the CPU while the thread",
-                invisibleOffCpu * 100
+        // The aggregate and the labelled figure on one line: the gap between them is how much of the
+        // process was idle, which is worth seeing and used to be silently charged to the shares.
+        // Starvation mode is the extreme - 18.83% aggregate against 96% inside the labels.
+        out += row(
+            "duty cycle",
+            String.format(
+                Locale.ROOT, "%.2f%% of wall time on CPU%s", duty * 100,
+                // Withheld when the bound is unusable: a labelled figure printed beside "none"
+                // reads as a measurement that was taken and then ignored, which is the opposite of
+                // what happened - the evidence ran out.
+                if (unbounded || labelledDuty.isNaN()) ""
+                else String.format(Locale.ROOT, "; %.2f%% inside labels", labelledDuty * 100)
             )
-            out += "  still read runnable - a native call, an event loop in a poll, or the scheduler - and"
-            out += String.format(
-                Locale.ROOT,
-                "  labels cover %.1f%% of these threads, so the worst case is that all of it was inside them",
-                labelledFraction * 100
+        )
+        out += subRow(
+            "windows",
+            String.format(
+                Locale.ROOT, "%d over %d threads, each %.2f%%..%.2f%%",
+                windows, threads, minWindowDuty * 100, maxWindowDuty * 100
+            )
+        )
+        if (unbounded) {
+            // Printing 0.00% and 100 pp here would read as a measurement, and a reader would rightly
+            // distrust a report whose shares are probably fine. The bound has not found anything; it
+            // has run out of evidence, and that is a different sentence. It also names the fix, which
+            // is a label around the waiting rather than only around the work.
+            out += subRow(
+                "bound",
+                String.format(
+                    Locale.ROOT,
+                    "none - %.1f%% of thread-time was off the CPU while still reading runnable",
+                    invisibleOffCpu * 100
+                )
+            )
+            out += subRow("why", "a native call, an event loop in a poll, or the scheduler")
+            out += subRow(
+                "worst case",
+                String.format(
+                    Locale.ROOT, "labels cover %.1f%% of these threads, so all of it could be inside them",
+                    labelledFraction * 100
+                )
             )
             return out
         }
-        if (!labelledDuty.isNaN()) out += String.format(
-            Locale.ROOT,
-            "  inside labelled work it was %.2f%%, and that is what bounds the shares", labelledDuty * 100
-        )
         // Not "is not CPU", which reads as an apology for having failed to measure CPU. Occupancy
-        // counts a wait in full and that is the right behaviour for the latency question — the
-        // reason the duty cycle exists is not that CPU was the goal, it is that a *sum* over
-        // threads is only additive when it is CPU.
-        out += String.format(
-            Locale.ROOT, "at most %.2f pp of any share is a thread waiting rather than working", boundPp
+        // counts a wait in full and that is the right behaviour for the latency question - the
+        // reason the duty cycle exists is not that CPU was the goal, it is that a *sum* over threads
+        // is only additive when it is CPU.
+        out += subRow(
+            "bound",
+            String.format(
+                Locale.ROOT, "at most %.2f pp of any share is a thread waiting rather than working", boundPp
+            )
         )
-        out += when {
-            shareDuty >= RANKING_SAFE -> "so the ranking is trustworthy"
-            shareDuty >= OCCUPANCY_ONLY ->
-                "so a share is still roughly time, but small gaps between operations are not resolved"
+        out += subRow(
+            "verdict", when {
+                shareDuty >= RANKING_SAFE -> "the ranking is trustworthy"
+                shareDuty >= OCCUPANCY_ONLY ->
+                    "a share is still roughly time, but small gaps between operations are not resolved"
 
-            else ->
-                "so read a share as where threads SIT, not where cycles GO - and beware of adding two " +
-                        "of them up, since one wait can be counted once per thread waiting on it"
-        }
-        if (anomalies > 0) out += "$anomalies thread readings went backwards and were dropped"
+                else ->
+                    "read a share as where threads SIT, not where cycles GO - and beware of adding " +
+                            "two up, since one wait counts once per thread waiting on it"
+            }
+        )
+        out += subRow(
+            "clock",
+            String.format(
+                Locale.ROOT, "getThreadCpuTime, %.3f ms resolution, %.3f s window, dearest walk %.1f us",
+                resolutionNanos / 1e6, windowNanos / 1e9, maxSampleNanos / 1e3
+            )
+        )
+        if (anomalies > 0) out += subRow("dropped", "$anomalies thread readings went backwards")
         return out
     }
 

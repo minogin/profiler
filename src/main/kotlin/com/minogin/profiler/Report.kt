@@ -177,6 +177,20 @@ fun threadTime(nanos: Double): String = when {
     else -> String.format(Locale.ROOT, "%.2f s", nanos / 1e9)
 }
 
+/**
+ * `key            value`, with every value starting at the same column.
+ *
+ * The summary used to be four sentences of prose that began the moment the banner ended. A reader
+ * looking for "how many threads" had to read a clause to find it, and a reader looking for whether
+ * anything was wrong had no way to tell a fact from a caveat from a verdict — they were all just
+ * text. Keys fix both: you scan the left column, and the key says what kind of thing the line is.
+ */
+internal fun row(key: String, value: String): String = String.format(Locale.ROOT, "%-13s %s", key, value)
+
+/** A row that qualifies the one above it — a reason, a bound, a verdict. Values still align. */
+internal fun subRow(key: String, value: String): String =
+    String.format(Locale.ROOT, "  %-11s %s", key, value)
+
 /** One operation's line in a [Report]. */
 class OperationStat internal constructor(
     val id: Int,
@@ -1173,58 +1187,66 @@ class Report internal constructor(
         appendLine("|  __/|  _ <| |_| |  _|  | || |___| |___|  _ <")
         appendLine("|_|   |_| \\_\\\\___/|_|   |___|_____|_____|_| \\_\\")
         appendLine()
-        appendLine("THE RUN")
         appendLine(
-            String.format(
-                Locale.ROOT, "  %s over %.1f s, %,d ticks at %.3f ms, %s",
-                plural(labelledHits, "labelled sample"), durationNanos / 1e9, ticks, achieved,
-                plural(threads.toLong(), "thread")
+            row(
+                "samples", String.format(
+                    Locale.ROOT, "%,d labelled, %,d unlabelled, over %.1f s",
+                    labelledHits, idleHits, durationNanos / 1e9
+                )
             )
         )
-        // Coverage in units, not only as a ratio. A percentage is a comparison against a total the
-        // reader has to take on trust; the total itself is the thing that makes the gap actionable,
-        // and it is the first place a label in the wrong place shows up as a number.
         appendLine(
-            String.format(
-                Locale.ROOT,
-                "  labels cover %s of the %s of thread-time observed (%.1f%%); %s was outside every label, in %s",
-                threadTime(labelledNanos), threadTime(observedNanos),
-                labelledHits * 100.0 / (labelledHits + idleHits).coerceAtLeast(1),
-                threadTime(observedNanos - labelledNanos), plural(idleHits, "sample")
+            row(
+                "sampling", String.format(
+                    Locale.ROOT, "%,d ticks at %.3f ms, %s", ticks, achieved,
+                    plural(threads.toLong(), "thread")
+                )
+            )
+        )
+        appendLine(
+            row(
+                "coverage", String.format(
+                    Locale.ROOT, "%s of %s thread-time observed (%.1f%%)",
+                    threadTime(labelledNanos), threadTime(observedNanos),
+                    labelledHits * 100.0 / (labelledHits + idleHits).coerceAtLeast(1)
+                )
             )
         )
         // What the unlabelled time *was* is the reader's first question and the one they have no
-        // other instrument for. "Most of the run is outside every label" means two opposite things —
-        // work nobody labelled, or threads doing nothing — and only this line separates them.
-        if (stateSampled && idleHits > 0) appendLine(
-            String.format(
-                Locale.ROOT,
-                "    of that unlabelled time, %s was a thread not runnable (%.1f%%) and %s was a thread " +
-                        "runnable with no label on it",
-                threadTime(idleWaitingHits * stepNanos), idleWaitingHits * 100.0 / idleHits,
-                threadTime((idleHits - idleWaitingHits) * stepNanos)
+        // other instrument for. "Most of the run is outside every label" means two opposite things,
+        // and which one it is decides whether the labels are in the wrong place or the program is
+        // simply idle.
+        if (stateSampled && idleHits > 0) {
+            val parked = idleWaitingHits * (observedNanos - labelledNanos) / idleHits.toDouble()
+            appendLine(
+                subRow(
+                    "unlabelled", String.format(
+                        Locale.ROOT, "%s - %s parked (%.1f%%), %s runnable with no label",
+                        threadTime(observedNanos - labelledNanos), threadTime(parked),
+                        idleWaitingHits * 100.0 / idleHits,
+                        threadTime(observedNanos - labelledNanos - parked)
+                    )
+                )
             )
-        )
-        // The coverage figure a reader should act on. The one above divides by every sample taken,
-        // so a pool of idle threads reads as missing labels; this one asks the question only of
-        // time when a thread was running, on both sides of the division.
-        //
-        // Printed only when it differs. On a workload where nothing waits the two are the same
-        // number twice, and a line that restates the line above it is worse than no line: it costs
-        // the reader a second of "what is different about this one" for nothing.
-        val plainCoverage = labelledHits.toDouble() / (labelledHits + idleHits).coerceAtLeast(1)
-        if (!runnableCoverage.isNaN() && abs(runnableCoverage - plainCoverage) >= COVERAGE_GAP) appendLine(
-            String.format(
-                Locale.ROOT,
-                "    of the thread-time that was runnable at all, labels cover %s of %s (%.1f%%)",
-                threadTime((labelledHits - labelledWaitingHits) * stepNanos),
-                threadTime((labelledHits - labelledWaitingHits + idleHits - idleWaitingHits) * stepNanos),
-                runnableCoverage * 100
+            val runnable = observedNanos - parked
+            if (runnable > 0) appendLine(
+                subRow(
+                    "runnable", String.format(
+                        Locale.ROOT, "labels cover %s of %s (%.1f%%)",
+                        threadTime(labelledNanos), threadTime(runnable), labelledNanos * 100.0 / runnable
+                    )
+                )
             )
-        )
-        // The bound belongs beside the sampling rate, not in a footnote: both say how much the
-        // numbers below are worth, one against chance and one against stalling.
-        for (l in duty.lines()) appendLine("  $l")
+        } else if (idleHits > 0) {
+            appendLine(
+                subRow(
+                    "unlabelled",
+                    "${threadTime(observedNanos - labelledNanos)} - thread state was not sampled"
+                )
+            )
+        }
+
+        for (l in duty.lines()) appendLine(l)
         appendLine()
         // FINE, not bare OPERATIONS. `OPERATIONS` beside `COARSE OPERATIONS` makes one tier the
         // default and the other the exception, which is the asymmetry `registerFine`/`registerCoarse`
