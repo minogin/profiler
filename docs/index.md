@@ -11,6 +11,15 @@ log there is where what you find goes. That is the loop that produced most of wh
 Windows console cannot print, and an API where the first fine operation and the first coarse one
 were both the integer 0.
 
+**Two things to know before running anything**, because neither is discoverable from the code:
+
+- **Any performance measurement needs the CPU clock traced beside it.** `CLAUDE.md` has the exact
+  probe. This machine's clock swings 2x within a single run, and several hours have gone into
+  chasing differences that were the machine changing speed.
+- **Every measurement in [findings.md](findings.md) predates the Kotlin 2.4.0 bump.** Nothing in the
+  source changed with it, so nothing is expected to have moved — but a close comparison against an
+  older figure should re-run `--hook` first. See [plan.md](plan.md), "The toolchain".
+
 **Where we are right now.** The fine tier is built, verified and **released as v0.1.0** — Apache-2.0,
 no dependencies, Java 21+. Verified on our own bench and on **four** foreign codebases: Apache
 Calcite, Apache Lucene, Netty, and PostgreSQL over a socket. Phases 1, 2, 3, 3.5 and 3.75 are done; phase 6 is half done —
