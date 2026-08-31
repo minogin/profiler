@@ -47,6 +47,61 @@ something to do, it graduates into [ideas.md](ideas.md) and is marked here as ha
 
 ---
 
+### The word "parallelism" is not in the report, and it has three columns about it
+*2026-08-31, Andrey. **Fixed the same day.***
+
+> "tell me why I don't see any information about `request` parallelism"
+
+The run in question - two threads, each running its own `request`, `work1` sleeping most of its
+1.45 s:
+
+```
+Coarse operation           Executions    Total v       Mean  Waiting Inside   Working   In flight
+request                             2 2906.49 ms 1453.25 ms    91.6%   1.00      0.08      2.00/2
+```
+
+Every part of the answer is on that line. `In flight 2.00/2` is the parallelism - two executions at
+once over the two threads there were, the most this program can do. `Inside 1.00` says each request
+was carried by exactly one thread. `Working 0.08` says that thread was on a CPU 8% of the time.
+
+**The reader could not find it because the report never uses the word**, and because the two things
+called parallelism are different questions printed as adjacent columns with no sign that they are
+related:
+
+- **within one execution** - `inside` and `working`: does *this request* use more than one thread
+- **across executions** - `in flight`: how many requests are in the system at once
+
+The first is a property of the code, the second of the load - a distinction `output.md` makes for `in
+flight` and nowhere states as the axis separating it from the two columns beside it. A reader with a
+parallelism question has no way to know which of the three answers it, and `inside 1.00` reads as
+"no parallelism" when the truthful answer for the program as a whole is "as much as there is."
+
+**Fixed by moving them out of the table and into words.** The first instinct was a separate
+`PARALLELISM` table, and it was the wrong one: the problem was never *where* the columns were, it was
+that nothing named what they answered, and unlabelled columns are just as unfindable in a new table.
+What a prose line can do that a column head cannot is say the word, and say which of the two
+questions each number answers:
+
+```
+  request: 99.863% of thread-time inside operations, 2.91 s occupancy
+  request parallelism: 1.00 thread per execution, 0.08 of it on a CPU; 2.00 executions at once over 2 threads
+  request was: work1 98.7%, work2 1.2%, unlabelled 0.0%
+```
+
+Precedent for the placement: occupancy and share already live on those lines, put there because the
+table was full.
+
+*And it is suppressed on a single-threaded run*, which is the shape of most first runs and where the
+three numbers can only restate each other and the `waiting` column. Andrey's question on seeing the
+fix - "each coarse op will take a lot of lines?" - which the counts answer: every real trial
+registers one or two coarse operations, Calcite two and the other three one each, because a coarse
+label is a context and the tier boundary keeps anything under ~1 us out of the tier. Only the
+synthetic bench has eight.
+
+*And it paid for itself in width.* The coarse table is **112 columns**, from 141 an hour earlier -
+`Total` had pushed it past the old 130 limit and this took back more than `Total` added. The rules
+under it are drawn to the table now rather than to a shared constant.
+
 ### Nothing says the tables are sorted, and the coarse one was sorted by the wrong thing
 *2026-08-31, Andrey. **Fixed the same day.***
 

@@ -1029,9 +1029,15 @@ class Report internal constructor(
                 // Inclusive, so a parent contains its children and always sorts above them. Self
                 // time is the honest answer once spans nest and the coarse tier cannot measure it
                 // yet - ideas.md item 28.
-                Locale.ROOT, "%-25s %11s %10s %10s %10s %10s %10s %10s %8s %6s %9s %11s",
+                // `inside`, `working` and `in flight` left this table for the per-operation lines
+                // below it. Asked where the parallelism was, a reader could not find it in a report
+                // carrying three columns of it: the word never appeared, and the two questions the
+                // columns answer - does one execution use several threads, and how many executions
+                // run at once - were adjacent columns with nothing saying they were different
+                // questions. A prose line can say both, and a column head cannot.
+                Locale.ROOT, "%-25s %11s %10s %10s %10s %10s %10s %10s %8s",
                 "Coarse operation", "Executions", "Total v", "Mean", "p50", "p90", "p99", "Max",
-                "Waiting", "Inside", "Working", "In flight"
+                "Waiting"
             )
         )
         appendLine("-".repeat(COARSE_WIDTH))
@@ -1041,21 +1047,13 @@ class Report internal constructor(
                 else (c.inclusiveHits - c.runningInclusiveHits).toDouble() / c.inclusiveHits
             appendLine(
                 String.format(
-                    Locale.ROOT, "%-25s %,11d %10s %10s %10s %10s %10s %10s %7.1f%% %6s %9s %11s",
+                    Locale.ROOT, "%-25s %,11d %10s %10s %10s %10s %10s %10s %7.1f%%",
                     c.name, c.count,
                     duration(c.spanSumNanos.toDouble()),
                     duration(c.meanSpanNanos), duration(c.percentileNanos(0.50)),
                     duration(c.percentileNanos(0.90)), duration(c.percentileNanos(0.99)),
                     duration(c.spanMaxNanos.toDouble()),
-                    waitShare * 100,
-                    if (c.inside.isNaN()) "-" else String.format(Locale.ROOT, "%.2f", c.inside),
-                    // Value over its ceiling when the duty cycle contradicts it, the same idiom
-                    // `in flight` already uses for a number read against the limit it must respect.
-                    if (c.working.isNaN()) "-"
-                    else if (workingIsContradicted(c))
-                        String.format(Locale.ROOT, "%.2f/%.2f", c.working, workingCeilingOf(c))
-                    else String.format(Locale.ROOT, "%.2f", c.working),
-                    if (c.inFlight.isNaN()) "-" else String.format(Locale.ROOT, "%.2f/%d", c.inFlight, threads)
+                    waitShare * 100
                 )
             )
         }
@@ -1081,6 +1079,44 @@ class Report internal constructor(
                     c.name, shareOf(c) * 100, threadTime(c.inclusiveHits * stepNanos)
                 )
             )
+            // The word the report never said, and the reason a reader with a parallelism question
+            // could not answer it from three columns about parallelism. Two questions, not one, and
+            // in prose they can be told apart:
+            //
+            //   - threads per execution - a property of the code. Is *this request* split at all?
+            //   - executions at once     - a property of the load. How many are in the system?
+            //
+            // `inside 1.00` reads as "no parallelism" and is compatible with a program running as
+            // parallel as its thread count allows, which is exactly what the sandbox was doing.
+            // Not on a single-threaded run, where every number on it is fixed by construction:
+            // one thread per execution, one execution at once, over the one thread there was. The
+            // only figure that would vary is `on a CPU`, and with one thread inside it is exactly
+            // `1 - waiting`, which is a column in the table above. A line that can only restate its
+            // neighbours is how a report earns the wall-of-text complaint - three of them per
+            // operation, in the report a first run produces.
+            if (threads > 1 && (!c.inside.isNaN() || !c.inFlight.isNaN())) {
+                val perExecution =
+                    if (c.inside.isNaN()) "thread count per execution unknown"
+                    else String.format(
+                        Locale.ROOT, "%.2f thread per execution%s", c.inside,
+                        // The ceiling idiom the column used, kept: a `working` the duty cycle
+                        // contradicts is printed over the most the machine can support.
+                        if (c.working.isNaN()) ""
+                        else if (workingIsContradicted(c))
+                            String.format(
+                                Locale.ROOT, ", %.2f of it on a CPU (at most %.2f)",
+                                c.working, workingCeilingOf(c)
+                            )
+                        else String.format(Locale.ROOT, ", %.2f of it on a CPU", c.working)
+                    )
+                val atOnce =
+                    if (c.inFlight.isNaN()) ""
+                    else String.format(
+                        Locale.ROOT, "; %.2f executions at once over %s",
+                        c.inFlight, plural(threads.toLong(), "thread")
+                    )
+                appendLine("  ${c.name} parallelism: $perExecution$atOnce")
+            }
             val parts = operations
                 .map { it.name to c.fine[it.id] }
                 .plus("unlabelled" to c.fine[NO_OP_INDEX])
@@ -1486,14 +1522,15 @@ class Report internal constructor(
         const val WIDTH = 130
 
         /**
-         * The coarse table alone, which is wider since `Total` was added.
+         * The coarse table alone, which is narrower than [WIDTH] since the three parallelism
+         * columns moved to the lines under it.
          *
-         * 130 was never measured against anything. It was defended in the friction log as "wider
-         * than most terminals", that claim was asked for evidence, and there was none - the pasted
-         * output had not wrapped. So a column that earns its place is worth more than the round
-         * number, and the rules under this table are drawn to the table rather than to the number.
+         * Drawn to the table rather than to a round number. It briefly went the other way - 141,
+         * to fit `Total` - on the grounds that the 130 had never been measured against anything,
+         * which is true and is in the friction log. Then the parallelism columns left and took
+         * more than `Total` had added.
          */
-        const val COARSE_WIDTH = 141
+        const val COARSE_WIDTH = 112
 
         /**
          * `1 thread` rather than `1 threads`.

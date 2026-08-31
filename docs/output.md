@@ -327,10 +327,12 @@ Present only if you placed a coarse label. It answers the question the table abo
 cannot: **how long did one execution take.**
 
 ```
-Coarse operation           Executions    Total v       Mean        p50        p90        p99        Max  Waiting Inside   Working   In flight
----------------------------------------------------------------------------------------------------------------------------------------------
-request                     3,203,348    95.78 s    29.9 us    20.5 us    45.1 us   180.2 us   17.01 ms     0.0%   1.00      1.00      7.96/8
----------------------------------------------------------------------------------------------------------------------------------------------
+Coarse operation           Executions    Total v       Mean        p50        p90        p99        Max  Waiting
+----------------------------------------------------------------------------------------------------------------
+request                     3,203,348    95.78 s    29.9 us    20.5 us    45.1 us   180.2 us   17.01 ms     0.0%
+----------------------------------------------------------------------------------------------------------------
+  request: 90.834% of thread-time inside operations, 95.78 s occupancy
+  request parallelism: 1.00 thread per execution, 1.00 of it on a CPU; 7.96 executions at once over 8 threads
   request was: flushBatch 38.7%, validateRecord 37.9%, parseRecord 10.3%, unlabelled 7.2%, indexRecord 5.9%
 ```
 
@@ -340,10 +342,37 @@ request                     3,203,348    95.78 s    29.9 us    20.5 us    45.1 u
 | **total** | the measured spans summed, and what the table is sorted by | the ranking for *what do I fix first*: exact, not sampled. **Inclusive** — a parent contains its children, so the outermost span always leads. Self time would be the honest key once spans nest ([ideas.md](ideas.md) item 28) |
 | **mean, p50, p90, p99, max** | **measured**, two timestamps per execution | the only numbers in the whole report that are not sampled. Percentiles come from a log-bucket histogram: **at most 12.5% high, never low** |
 | **waiting** | that gap as a share | 0.0% here because the demo never blocks. On anything with I/O or a lock it is the finding |
-| **inside** | threads in one execution at once, a parked one counted in full | what a request *ties up*. 1.00 here because this demo hands nothing between threads |
-| **working** | of those, the ones a sample caught on a CPU | what splitting the work *bought*. `working = inside × (1 − waiting)` |
-| **in flight** | executions at once, over the threads there were | the same load-not-code caveat as the fine table's column |
+| **`… parallelism:` line** | the two parallelism questions, in words | see below — they are different questions and used to be adjacent columns |
 | **`… was:` line** | the cross-tabulation | which fine operations ran under this one. Neither tier produces this alone |
+
+### The two parallelisms, which are not the same question
+
+The `parallelism:` line carries three numbers, and the split matters more than any of them:
+
+```
+  request parallelism: 1.00 thread per execution, 0.08 of it on a CPU; 2.00 executions at once over 2 threads
+```
+
+- **`n thread per execution`** — **a property of your code.** Does one execution of this operation
+  use more than one thread? `1.00` means no: it runs on the thread that opened it. This only moves
+  above 1 when work is handed to a pool wrapped with `.propagating()`.
+- **`n of it on a CPU`** — of those threads, the ones a sample caught running. `working = inside ×
+  (1 − waiting)`, so it is what splitting the work actually *bought*: a caller parked on a join
+  contributes nothing here, correctly. Printed as `0.08 (at most 0.31)` when the measured
+  time-on-CPU says the machine cannot have supported the figure.
+- **`n executions at once over k threads`** — **a property of your load,** not your code. How many
+  of these were in the system simultaneously. Add threads or clients and it moves; change the code
+  and it may not.
+
+They were three columns named `inside`, `working` and `in flight` until 2026-08-31, when a reader
+looked for parallelism, could not find it, and turned out to have been staring at all three. The word
+was nowhere in the report and nothing said the first two answer a different question from the third —
+so `inside 1.00` reads as *"no parallelism"* in a program running as parallel as its threads allow.
+
+**The line is not printed on a single-threaded run**, where all three numbers are fixed by
+construction — one thread per execution, one execution at once, over the one thread there was — and
+the only one that could vary, `on a CPU`, is exactly `1 − waiting`, which is a column in the table.
+The same reason zero-hit fine operations are folded away.
 
 **Why percentiles exist here and nowhere else.** A share is a fraction of time and has no
 distribution — that is why the v0.1.0 notes say *no percentiles, ever*, and for the fine tier it
