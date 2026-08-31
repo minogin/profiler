@@ -1201,9 +1201,15 @@ class Report internal constructor(
         )
         appendLine(
             row(
+                // Where the sample count comes from, which the report never said and which is the
+                // arithmetic everything below rests on. Deliberately "one per thread per tick"
+                // rather than an equation: a thread that registers partway through the run
+                // contributes fewer, so ticks x threads is a ceiling and not an identity - 7 ticks
+                // and 1 thread produced 4 samples on a short run, and that gap is the slot
+                // registering on the first labelled call.
                 "Sampling", String.format(
-                    Locale.ROOT, "%,d ticks at %.3f ms, %s", ticks, achieved,
-                    plural(threads.toLong(), "thread")
+                    Locale.ROOT, "%,d ticks at %.3f ms x %s - one sample per thread per tick",
+                    ticks, achieved, plural(threads.toLong(), "thread")
                 )
             )
         )

@@ -65,9 +65,15 @@ total leads and the split qualifies it:
 Samples       4 taken over 0.1 s - 2 inside a label, 2 outside every label
 ```
 
-*Worth noting about the report as a whole:* the same reader had already been told, three lines lower,
-that the run had `7 ticks` and `1 thread`. The relationship between those and the sample count was
-never stated anywhere, and it is the arithmetic the whole report rests on.
+**A second thing the same question exposed, now also fixed:** the reader had been told three lines
+lower that the run had `7 ticks` and `1 thread`, and nothing anywhere related those to the sample
+count — the arithmetic the whole report rests on. `Sampling` now says *one sample per thread per
+tick*. Deliberately not an equation, because a thread that registers partway through contributes
+fewer, which is exactly why 7 ticks and 1 thread gave 4 samples.
+
+**And a third:** asked whether unlabelled time is *bad*, the report had no answer. It splits parked
+from runnable, which is the distinction that decides it, but never said that parked-and-idle is
+normal while runnable-with-no-label is the one to look at. That is in [output.md](output.md) now.
 
 ### The report prints characters a Windows console cannot show
 *2026-08-30, Andrey, with a screenshot. **Fixed the same day.***

@@ -119,6 +119,26 @@ here, where it is read once instead of skipped thirty times.
 
 `render(legend = true)` prints the full text, and this document is the same content at length.
 
+### What a sample is, and whether unlabelled time is bad
+
+**A sample is one photograph of one thread's label slot**, taken once per tick. So the count comes
+from `ticks x threads` — with the caveat that a thread which registers partway through the run
+contributes fewer, which is why `Sampling` says *one sample per thread per tick* rather than printing
+an equation. A short run makes the gap obvious: 7 ticks and 1 thread produced 4 samples, because the
+slot is created on the first labelled call and the earlier ticks saw nothing to photograph.
+
+**Unlabelled is not a fault by itself**, and the report splits it into the two cases that matter:
+
+- **parked** — threads sitting idle. Normal for a pool between requests, and nothing to fix. A run
+  can be 95% unlabelled and perfectly healthy if that is where it is.
+- **runnable with no label** — the machine was doing real work you have not labelled. This is the
+  number worth reading. Either you instrumented part of the program deliberately, or a label is in
+  the wrong place, or work escaped the context that should have carried it.
+
+The `Runnable` row exists for exactly that second question: *of the thread-time that was doing
+anything at all, how much do the labels cover?* That is the coverage figure to judge instrumentation
+by, and it is usually a good deal lower than the headline one.
+
 **The summary is key-value rows, not prose.** It used to be four sentences that began the moment the
 banner ended, so a reader looking for *how many threads* had to read a clause to find it, and a
 reader looking for whether anything was wrong could not tell a fact from a caveat from a verdict —
@@ -126,7 +146,7 @@ they were all just text. The left column now says what kind of line it is:
 
 ```
 Samples       5,998 taken over 3.1 s - 5,526 inside a label, 472 outside every label
-Sampling      3,004 ticks at 0.999 ms, 2 threads
+Sampling      3,004 ticks at 0.999 ms x 2 threads - one sample per thread per tick
 Coverage      5.52 s of 5.99 s thread-time observed (92.1%)
   Unlabelled  471.6 ms - 5.0 ms parked (1.1%), 466.6 ms runnable with no label
 Duty cycle    99.98% of wall time on CPU; 100.00% inside labels
