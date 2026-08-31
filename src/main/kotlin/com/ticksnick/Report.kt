@@ -1020,20 +1020,30 @@ class Report internal constructor(
                 // why it could exceed the span next to it and look like a defect. It existed for the
                 // old headline "mean - busy/exec is the waiting", and that stopped being true the
                 // moment work could cross a thread. `waiting` is the reading that survives.
-                Locale.ROOT, "%-25s %11s %10s %10s %10s %10s %10s %8s %6s %9s %11s",
-                "Coarse operation", "Executions", "Mean", "p50", "p90", "p99", "Max",
+                // `Total` is the sum of the measured spans - exact, since every one of them was
+                // timed - and it is what the table is sorted by. It is the ranking that answers
+                // "what do I fix first": mean alone puts a rare slow operation above a frequent one
+                // costing ten times more, and a percentile ranks by tail, which is a latency
+                // question rather than a cost one.
+                //
+                // Inclusive, so a parent contains its children and always sorts above them. Self
+                // time is the honest answer once spans nest and the coarse tier cannot measure it
+                // yet - ideas.md item 28.
+                Locale.ROOT, "%-25s %11s %10s %10s %10s %10s %10s %10s %8s %6s %9s %11s",
+                "Coarse operation", "Executions", "Total v", "Mean", "p50", "p90", "p99", "Max",
                 "Waiting", "Inside", "Working", "In flight"
             )
         )
-        appendLine("-".repeat(WIDTH))
-        for (c in seen.sortedByDescending { it.inclusiveHits }) {
+        appendLine("-".repeat(COARSE_WIDTH))
+        for (c in seen.sortedByDescending { it.spanSumNanos }) {
             val waitShare =
                 if (c.inclusiveHits == 0L) 0.0
                 else (c.inclusiveHits - c.runningInclusiveHits).toDouble() / c.inclusiveHits
             appendLine(
                 String.format(
-                    Locale.ROOT, "%-25s %,11d %10s %10s %10s %10s %10s %7.1f%% %6s %9s %11s",
+                    Locale.ROOT, "%-25s %,11d %10s %10s %10s %10s %10s %10s %7.1f%% %6s %9s %11s",
                     c.name, c.count,
+                    duration(c.spanSumNanos.toDouble()),
                     duration(c.meanSpanNanos), duration(c.percentileNanos(0.50)),
                     duration(c.percentileNanos(0.90)), duration(c.percentileNanos(0.99)),
                     duration(c.spanMaxNanos.toDouble()),
@@ -1049,7 +1059,7 @@ class Report internal constructor(
                 )
             )
         }
-        appendLine("-".repeat(WIDTH))
+        appendLine("-".repeat(COARSE_WIDTH))
         // Share and occupancy, which the fine table has had all along and this one did not.
         //
         // **A coarse label gives you everything a fine one does and more** — the same hits, the same
@@ -1058,10 +1068,12 @@ class Report internal constructor(
         // silently lost two columns when an operation was promoted. Nothing was missing; nobody had
         // printed it.
         //
-        // On its own line rather than in the table because the table is already exactly [WIDTH]
-        // columns and these two need nineteen more. Grouped with the `was:` line, since "how much of
-        // the run" and "what it was made of" are the same question at two levels of detail.
-        for (c in seen.sortedByDescending { it.inclusiveHits }) {
+        // On its own line rather than in the table because these two need nineteen more columns,
+        // and the table had already grown once to take `Total`. Grouped with the `was:` line, since
+        // "how much of the run" and "what it was made of" are the same question at two levels of
+        // detail. This occupancy is also no longer the sort key: the table is ordered by the exact
+        // span total above, and these lines follow that order.
+        for (c in seen.sortedByDescending { it.spanSumNanos }) {
             if (c.inclusiveHits == 0L) continue
             appendLine(
                 String.format(
@@ -1081,7 +1093,7 @@ class Report internal constructor(
             val rest = parts.size - 6
             appendLine("  ${c.name} was: $shown" + if (rest > 0) ", and $rest more" else "")
         }
-        if (seen.any { it.inclusiveHits > 0 }) appendLine("-".repeat(WIDTH))
+        if (seen.any { it.inclusiveHits > 0 }) appendLine("-".repeat(COARSE_WIDTH))
         // The one signal for work escaping its context, which neither the floor check nor the
         // balance check can see. Stated as a measurement with both readings, because it cannot tell
         // "I bracketed part of the program" from "work escaped to another thread" and guessing would
@@ -1270,13 +1282,20 @@ class Report internal constructor(
         appendLine("FINE OPERATIONS")
         if (operations.any { it.hits > 0 }) appendLine(
             String.format(
-                Locale.ROOT, "%-26s %8s %10s %8s %9s %11s %13s %8s %6s %10s %7s",
+                // `v` marks the column the table is sorted by, which nothing said before - and at
+                // two rows a reader cannot tell a sorted table from an unsorted one by looking.
+                // ASCII, not an arrow glyph: a Windows console is not UTF-8 by default.
+                //
+                // 22 and 12 rather than 26 and 8 so the wider label still ends where the values
+                // end. The header was already two columns out of step with its rows before the
+                // marker was added, because `Occupancy%` never fitted the 8 it was given.
+                Locale.ROOT, "%-22s %12s %10s %8s %9s %11s %13s %8s %6s %10s %7s",
                 // `occupancy%` and not `share`, because it is the same quantity as the column beside
                 // it — one relative, one absolute. Calling one of them `share` invented a
                 // distinction that does not exist and hid the one that does: neither is CPU. A
                 // reader does not misread `occupancy%` as processor time, which is what a paragraph
                 // of legend used to be for.
-                "Operation", "Occupancy%", "Occupancy", "Waiting", "Elapsed", "In flight",
+                "Operation", "Occupancy% v", "Occupancy", "Waiting", "Elapsed", "In flight",
                 "Calls", "Hits", "Noise", "Impl/call", "Over 1t"
             )
         )
@@ -1465,6 +1484,16 @@ class Report internal constructor(
         const val MIN_TICKS_FOR_A_TABLE = 50
 
         const val WIDTH = 130
+
+        /**
+         * The coarse table alone, which is wider since `Total` was added.
+         *
+         * 130 was never measured against anything. It was defended in the friction log as "wider
+         * than most terminals", that claim was asked for evidence, and there was none - the pasted
+         * output had not wrapped. So a column that earns its place is worth more than the round
+         * number, and the rules under this table are drawn to the table rather than to the number.
+         */
+        const val COARSE_WIDTH = 141
 
         /**
          * `1 thread` rather than `1 threads`.

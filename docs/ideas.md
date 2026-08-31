@@ -951,6 +951,37 @@ check against, which puts a parameter on the hot path of the API for a diagnosti
 
 **Worth deciding with phase 7**, which is where the surface gets hardened, rather than patched now.
 
+## 28. Self time for coarse operations · open
+
+From the sandbox, 2026-08-31, asking the question that decides how the coarse table should be
+sorted: *which one is the worst - the one to improve?*
+
+The answer is total time, executions x mean, and the table now sorts by it and prints it. But that
+total is **inclusive**: the sampler credits occupancy by walking the parent chain, and a measured
+span contains every span opened inside it. So a parent always sorts above its own children, and its
+total is by definition the sum of what is inside it plus its own work. Ranked that way, the
+outermost context wins every time and tells you nothing - which is the classic inclusive-vs-self
+problem, arriving here for the first time because the coarse tier only recently got a ranking at all.
+
+**What self time would be:** the span total minus the totals of the coarse spans opened inside it.
+Time the operation spent on its own work rather than in something else that is also labelled.
+
+**Why it is not a small change.** Nothing today keeps per-context nested accounting. `CoarseContext`
+knows its `parent`, so a child could subtract itself from its parent's running total when it closes,
+which is the cheap version and costs one add on the close path. The complications are the ones this
+project has met before:
+
+- **Work that crosses threads.** A span propagated to a pool closes on another thread, and its
+  parent chain is the forked one. Subtracting it from a parent still running elsewhere is a race,
+  and the existing stale-execution handling shows that case is real rather than theoretical.
+- **A type nested inside itself.** Inclusive occupancy already deduplicates by type when walking the
+  chain; a self-time subtraction has to make the same choice, and it is not obviously the same one.
+- **It is only meaningful when spans actually nest.** With one coarse label - which is most first
+  uses - self and inclusive are identical, and the column would be a duplicate.
+
+**Not committed.** The inclusive total is the right key while there is no self time to sort by, and
+it is honest as long as the table says which it is.
+
 ## Promoted to plan.md
 
 **Phase 3.5** is item 9 above, reframed from detecting bad operations to bounding the error on every

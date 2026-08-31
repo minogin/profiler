@@ -198,6 +198,18 @@ Time on CPU   99.98% of wall time; 100.00% inside operations
 measurement — so *is this a problem?* is answerable by looking at the left column instead of reading
 the right one.
 
+**Both tables are sorted, and a `v` on the column head says which one by** — `Occupancy% v` in the
+fine table, `Total v` in the coarse one. On the column rather than in a heading sentence, because a
+sorted table and an unsorted one look identical when there are two rows, and because the answer is
+not the obvious one: a fine operation called a million times but always brief sits *below* one called
+twice that occupied real time.
+
+**`Total` is the ranking that answers *what do I fix first*** — the summed measured spans, exact
+rather than sampled, since the coarse tier times every one of them. It is **inclusive**: a parent
+span contains everything opened inside it, so the outermost context sorts first and its total is the
+sum of its children plus its own work. Once your spans nest, the number you actually want is self
+time, which this does not yet measure — [ideas.md](ideas.md) item 28.
+
 **The explanations are last on purpose.** They used to sit *between* the two tables, so the report
 read numbers, prose, numbers, prose — reported the first time somebody who had not written it tried
 to read one: *"a wall of text, good for AI, very bad for a human."* Explaining a column and
@@ -215,7 +227,7 @@ tenth run.
 ## The table
 
 ```
-operation                     share  occupancy  waiting   elapsed   in flight         calls     hits  noise  impl/call over 1t
+Operation              Occupancy% v  Occupancy  Waiting   Elapsed   In flight         Calls     Hits  Noise  Impl/call Over 1t
 flushBatch                  44.250%    38.54 s     0.0%   11.75 s      3.28/8   288,514,362    38319  0.51%   133.6 ns   0.01%
 validateRecord              41.222%    35.91 s     0.0%   11.68 s      3.07/8   288,514,362    35697  0.53%   124.5 ns   0.00%
 parseRecord                  9.478%     8.26 s     0.3%    6.14 s      1.34/8   288,514,362     8208  1.10%    28.6 ns   0.27%
@@ -224,8 +236,8 @@ indexRecord                  5.050%     4.40 s     0.0%    3.73 s      1.18/8   
 
 | column | what it is | what to watch for |
 |---|---|---|
-| **share** | this operation's slice of all **labelled** samples | the denominator is labelled samples, not every sample — so adding a label somewhere else does not move this one |
-| **occupancy** | `hits × step`, as summed thread-time | **absolute**, so unlike share it does not move when a label is added, moved or removed. This is the column to compare between two runs |
+| **occupancy%** | this operation's slice of all **labelled** samples, and what the table is sorted by | the denominator is labelled samples, not every sample — so adding a label somewhere else does not move this one |
+| **occupancy** | `hits × step`, as summed thread-time | **absolute**, so unlike `occupancy%` it does not move when a label is added, moved or removed. This is the column to compare between two runs |
 | **waiting** | the share of those samples whose thread was parked, blocked or waiting | a thread the scheduler merely preempted still reads runnable, so this is waiting that *another thread* caused. Blind to native waits |
 | **elapsed** | wall clock with at least one thread inside | not latency: it is every execution's interval unioned, so it says the operation had *somebody* in it for this long and nothing about any single execution |
 | **in flight** | `occupancy ÷ elapsed`, over the threads there were — **executions of this operation running at once**, averaged over the ticks where any were | **a property of your load, not of your code** — see below. It is the number that turns occupancy back into real cost: 100 s of waiting at 15 in flight is a convoy to break up; at 1.7 it is steady contention to design out |
@@ -315,16 +327,17 @@ Present only if you placed a coarse label. It answers the question the table abo
 cannot: **how long did one execution take.**
 
 ```
-Coarse operation           Executions       Mean        p50        p90        p99        Max  Waiting Inside   Working   In flight
-----------------------------------------------------------------------------------------------------------------------------------
-request                     3,203,348    29.9 us    20.5 us    45.1 us   180.2 us   17.01 ms     0.0%   1.00      1.00      7.96/8
-----------------------------------------------------------------------------------------------------------------------------------
+Coarse operation           Executions    Total v       Mean        p50        p90        p99        Max  Waiting Inside   Working   In flight
+---------------------------------------------------------------------------------------------------------------------------------------------
+request                     3,203,348    95.78 s    29.9 us    20.5 us    45.1 us   180.2 us   17.01 ms     0.0%   1.00      1.00      7.96/8
+---------------------------------------------------------------------------------------------------------------------------------------------
   request was: flushBatch 38.7%, validateRecord 37.9%, parseRecord 10.3%, unlabelled 7.2%, indexRecord 5.9%
 ```
 
 | column | what it is | what to watch for |
 |---|---|---|
 | **executions** | completed executions, counted exactly | not sampled. If this disagrees with what you think ran, a label is leaking |
+| **total** | the measured spans summed, and what the table is sorted by | the ranking for *what do I fix first*: exact, not sampled. **Inclusive** — a parent contains its children, so the outermost span always leads. Self time would be the honest key once spans nest ([ideas.md](ideas.md) item 28) |
 | **mean, p50, p90, p99, max** | **measured**, two timestamps per execution | the only numbers in the whole report that are not sampled. Percentiles come from a log-bucket histogram: **at most 12.5% high, never low** |
 | **waiting** | that gap as a share | 0.0% here because the demo never blocks. On anything with I/O or a lock it is the finding |
 | **inside** | threads in one execution at once, a parked one counted in full | what a request *ties up*. 1.00 here because this demo hands nothing between threads |

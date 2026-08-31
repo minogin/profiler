@@ -47,6 +47,55 @@ something to do, it graduates into [ideas.md](ideas.md) and is marked here as ha
 
 ---
 
+### Nothing says the tables are sorted, and the coarse one was sorted by the wrong thing
+*2026-08-31, Andrey. **Fixed the same day.***
+
+> "now to the FINE OPS: is this table sorted?"
+
+It was - by hits descending, the same order as the `occupancy%` column beside it - and the report
+never said so. Neither table did.
+
+**Why a reader cannot just look and see:** at sandbox size there are two rows, and two rows are
+consistent with any ordering at all. Registration order and descending order are the same picture. So
+the question does not arise on a big report where the shape gives it away; it arises on a small one,
+where looking cannot answer it.
+
+The first fix was a heading that said `FINE OPERATIONS - ordered by occupancy%, largest first`, which
+Andrey cut immediately as too long. **A marker on the column is the better answer** and it is the same
+lesson as `occupancy%` and `mean (jittered)`: put the caveat on the thing it qualifies, not in a
+sentence above it. So the sorted column is now headed `Occupancy% v`, in ASCII rather than an arrow
+glyph because a Windows console is not UTF-8.
+
+*Found on the way:* the fine header had been two columns out of step with its own rows all along,
+because `Occupancy%` never fitted the eight characters it was given. Rebalancing the header to 22/12
+to fit the marker fixed that too.
+
+**Then the real question, which was not about display at all:**
+
+> "How should we actually sort coarse tier? Obviously by the WORST operation - the one to improve.
+> What is that?"
+
+The coarse table could not take a marker, because **it was sorted by something it did not print** -
+`inclusiveHits`, the sampled occupancy. Following the question properly says that was the wrong key
+twice over:
+
+- **The right ranking is total time, executions x mean.** Mean alone puts a rare slow operation above
+  a frequent one costing ten times more; a percentile ranks by tail, which is a latency question and
+  not a cost one.
+- **The coarse tier measures that exactly**, since it times every span - so sorting by sampled
+  occupancy was adding sampling error to a number already known precisely.
+
+`Total` is now a column, the table is sorted by it, and the marker sits on it. The table grew to 141
+columns to fit. That is the 130-column limit going, and the log is where it should go from: it was
+defended here as "wider than most terminals", asked for evidence, and had none.
+
+**And the question exposed something the tool cannot yet answer.** That total is *inclusive* - a
+parent span contains its children - so in a nest the outermost context always sorts first, and its
+total is the sum of what is inside it. "The one to improve" really means self time, and the coarse
+tier has no per-context nested accounting to compute it. [ideas.md](ideas.md) item 28, with why it is
+not a small change: propagated spans close on another thread, and a type nested inside itself has to
+make the same deduplication choice the inclusive walk already makes.
+
 ### `Duty cycle` is a term, not an explanation - and the first run only ever sees it fail
 *2026-08-31, Andrey. **Fixed the same day.***
 
