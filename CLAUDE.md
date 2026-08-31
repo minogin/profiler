@@ -29,10 +29,16 @@
   mine: scope, ordering, priorities, taste, an API's shape, whether something is its own commit.
   Manufacturing options around a settled answer, or padding one with a consequence that changes
   nothing about what to do, costs me more energy than getting it wrong would.
-* **Ask real decisions through the question UI, not as prose.** When the choice is genuinely mine,
-  use `AskUserQuestion` so the options are pickable, rather than burying them in a paragraph. Having
-  a recommendation is not a reason to skip it: put the recommendation first and still ask. Prose is
-  for explaining what I chose, not for collecting the choice.
+* **Default to one concrete proposal, not a menu.** Show me the actual thing - rendered, specific -
+  with the one real trade-off named, and let me push on it. Two turns of that beats three options
+  every time, because your three options are usually three variations on your own first idea: if the
+  framing is wrong, none of them helps, and picking one locks the wrong framing in before I have seen
+  anything. Almost everything good in the report came from me rejecting the menu and describing the
+  shape I wanted.
+* **Use the question UI only for genuinely divergent directions** - a scope call, an ordering, what
+  ships and what does not, work that is wasted if you build the wrong one. Not for design details,
+  wording or naming. When you do ask, the options must be actually different, not shades of the same
+  idea. Never bury a real choice in a paragraph, which is what this rule originally existed to stop.
 
 ## Keeping the docs
 Each doc has one job. Write to the right one as you go, not at the end.
