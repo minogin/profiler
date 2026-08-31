@@ -5,10 +5,10 @@ build/
 !**/src/test/**/build/
 
 ### IntelliJ IDEA ###
-.idea/modules.xml
-.idea/jarRepositories.xml
-.idea/compiler.xml
-.idea/libraries/
+# The whole directory. It was partly tracked before, which is the worst of both: the IDE
+# rewrites gradle.xml and misc.xml whenever a module is added or the project is renamed, so
+# those files turned up in unrelated commits as noise nobody had asked for.
+.idea/
 *.iws
 *.iml
 *.ipr
