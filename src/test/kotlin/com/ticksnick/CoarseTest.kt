@@ -235,16 +235,22 @@ class CoarseTest {
 
     @Test
     fun `the slack is a factor, and it decides on both sides of itself`() {
-        fun contradictedAt(working: Long): Boolean {
+        // Expressed against the constant rather than against its value. The value has moved once
+        // already - 1.5 to 4.0, when it fired on a sandbox run at 2.2x and blamed a socket read in
+        // a program that has no native call in it - and a test pinning the arithmetic of the day
+        // fails on every such change while telling you nothing about the behaviour.
+        val duty = 0.1
+        fun contradictedAt(working: Double): Boolean {
             val c = stat(
-                count = 100, sumNanos = 100_000_000, hits = 1_000, running = working,
+                count = 100, sumNanos = 100_000_000, hits = 1_000, running = (working * 1_000).toLong(),
                 instanceTicks = 1_000, activeTicks = 1_000,
             )
-            // inside = 1.0, duty 0.5, so the ceiling is 0.5 and the threshold 0.5 x 1.5 = 0.75.
-            return report(listOf(c), labelledDuty = 0.5).workingIsContradicted(c)
+            return report(listOf(c), labelledDuty = duty).workingIsContradicted(c)
         }
-        assertTrue(!contradictedAt(700), "0.70 is inside the slack and was accused")
-        assertTrue(contradictedAt(800), "0.80 is outside the slack and was believed")
+        // inside is 1.0 here, so the ceiling is the duty and the threshold is duty x slack.
+        val threshold = duty * Report.WORKING_CEILING_SLACK
+        assertTrue(!contradictedAt(threshold * 0.9), "just inside the slack and was accused")
+        assertTrue(contradictedAt(threshold * 1.1), "just outside the slack and was believed")
     }
 
     @Test

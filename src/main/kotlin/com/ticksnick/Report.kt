@@ -1268,7 +1268,6 @@ class Report internal constructor(
             appendLine("  system's own clock. `on a CPU` is built on thread state, and a thread stopped inside a")
             appendLine("  NATIVE call - a socket read, a file read, an epoll wait - reads RUNNABLE to Java. So it")
             appendLine("  is counted as working, and `waiting` is short by the same amount.")
-            appendLine("  `inside` is unaffected: it counts threads in the execution whatever they were doing.")
             appendLine("!".repeat(WIDTH))
         }
         if (staleContextHits > 0) {
@@ -1642,8 +1641,19 @@ class Report internal constructor(
          * CPU-bound than the run around it. Generous on purpose: the failure this exists to catch was
          * measured at **55x** on PostgreSQL over a socket, so strictness buys nothing and a false
          * accusation costs the reader their trust in the column.
+         *
+         * **Was 1.5, which contradicted every word above it.** It fired on a sandbox run at 2.2x -
+         * a program of two threads and a `Thread.sleep`, with no native call anywhere in it - and
+         * blamed a socket read. The real gap there is preemption: a thread that is runnable but
+         * waiting for a core reads `RUNNABLE` without being on one, and that is 14-18% of wall time
+         * on this machine on a bench that never blocks (see `Sampler.kt`). A threshold below that
+         * is measuring the scheduler, not the program.
+         *
+         * 4.0 still catches the case this exists for by a factor of thirteen. What it gives up is a
+         * genuine native-wait problem between 1.5x and 4x, which is a band this machine fills with
+         * noise anyway.
          */
-        const val WORKING_CEILING_SLACK = 1.5
+        const val WORKING_CEILING_SLACK = 4.0
 
         const val FLOOR_NANOS = 50.0
 
