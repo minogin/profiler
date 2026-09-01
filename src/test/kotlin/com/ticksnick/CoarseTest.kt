@@ -264,10 +264,13 @@ class CoarseTest {
             instanceTicks = 1_000, activeTicks = 1_000, name = "query",
         )
         val text = report(listOf(bad), labelledDuty = 0.01).render()
-        assertTrue("READS HIGHER THAN THE MEASURED CPU DUTY" in text, "the warning did not appear")
+        assertTrue("READS HIGHER THAN THE MEASURED TIME ON CPU" in text, "the warning did not appear")
         assertTrue("query" in text, "the warning did not name the operation")
-        // The printed cell carries both readings, so a reader who skips the block still sees it.
-        assertTrue(Regex("""3\.00/0\.0\d""").containsMatchIn(text), "the column did not print value over ceiling")
+        // The parallelism line carries both readings, so a reader who skips the block still sees it.
+        assertTrue(
+            Regex("""3\.00 of it on a CPU \(at most 0\.0\d\)""").containsMatchIn(text),
+            "the parallelism line did not print value over ceiling"
+        )
     }
 
     @Test
@@ -304,7 +307,7 @@ class CoarseTest {
     fun `the default legend is the traps and nothing else`() {
         val c = stat(count = 10, sumNanos = 10_000_000, hits = 100, running = 100, instanceTicks = 100)
         val text = report(listOf(c)).render()
-        assertTrue("occupancy% is sampled thread-time, NOT CPU" in text, "the traps are not printed")
+        assertTrue("NOT CPU" in text, "the traps are not printed")
         assertTrue("render(legend = true)" in text, "there is no way to find the rest")
         // The reference half is what makes it thirty-seven lines, and it is in output.md.
         assertTrue("noise is 1/sqrt(hits)" !in text, "the full legend printed by default")
@@ -318,7 +321,7 @@ class CoarseTest {
     fun `asking for the legend gets the whole thing`() {
         val c = stat(count = 10, sumNanos = 10_000_000, hits = 100, running = 100, instanceTicks = 100)
         val text = report(listOf(c)).render(legend = true)
-        assertTrue("occupancy% is sampled thread-time, NOT CPU" in text, "the traps went missing")
+        assertTrue("NOT CPU" in text, "the traps went missing")
         assertTrue("noise is 1/sqrt(hits)" in text, "the full legend was not printed")
         assertTrue("worth 275x when" in text, "the counterfactual argument was not printed")
         assertTrue("the 'was:' lines are the cross-tabulation" in text, "the coarse half was not printed")

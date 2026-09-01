@@ -1249,11 +1249,11 @@ class Report internal constructor(
         if (contradicted.isNotEmpty()) {
             appendLine()
             appendLine("!".repeat(WIDTH))
-            appendLine("`working` READS HIGHER THAN THE MEASURED CPU DUTY CYCLE CAN SUPPORT")
+            appendLine("`on a CPU` READS HIGHER THAN THE MEASURED TIME ON CPU CAN SUPPORT")
             for (c in contradicted.sortedByDescending { it.working }) {
                 appendLine(
                     String.format(
-                        Locale.ROOT, "  %-22s working %.2f, but the duty cycle bounds it at %.2f",
+                        Locale.ROOT, "  %-22s on a CPU %.2f, but the measured time on CPU bounds it at %.2f",
                         c.name, c.working, workingCeilingOf(c)
                     )
                 )
@@ -1265,7 +1265,7 @@ class Report internal constructor(
                     duty.labelledDuty * 100
                 )
             )
-            appendLine("  system's own clock. `working` is built on thread state, and a thread stopped inside a")
+            appendLine("  system's own clock. `on a CPU` is built on thread state, and a thread stopped inside a")
             appendLine("  NATIVE call - a socket read, a file read, an epoll wait - reads RUNNABLE to Java. So it")
             appendLine("  is counted as working, and `waiting` is short by the same amount.")
             appendLine("  `inside` is unaffected: it counts threads in the execution whatever they were doing.")
