@@ -47,6 +47,57 @@ something to do, it graduates into [ideas.md](ideas.md) and is marked here as ha
 
 ---
 
+### `Time on CPU` said the run was too short, on a run twice long enough
+*2026-09-01, Andrey, reading a pasted report. **Fixed the same day.***
+
+```
+Samples       2,946 taken over 1.6 s
+...
+Time on CPU   not measured
+  Why         the run is shorter than the 1.000 s window
+```
+
+1.6 seconds against a one-second window, four lines apart. The report was contradicting its own
+numbers - which is worse than saying nothing, because a reader who believes it goes and lengthens a
+run that was already long enough.
+
+**The message was wrong and so was the measurement.** Reproduced with two runs identical but for one
+thing, whether the worker threads were still alive at `stop()`:
+
+```
+=== THREADS DEAD AT stop() ===        === THREADS ALIVE AT stop() ===
+Samples  3,178 over 1.7 s             Samples  3,182 over 1.8 s
+Time on CPU   not measured            Time on CPU   97.81% of wall time
+```
+
+Three things conspired, and none of them is visible from any one place in the code:
+
+1. The first duty sample fires at `start()`, **before any worker has registered a slot** - threads
+   are created after the profiler is started - so it establishes no baselines and burns a window.
+2. The second sample finds the slots but has no previous reading for them, so it only *becomes* the
+   baseline. Still no window.
+3. That leaves the sample taken by `finish()` as the first one able to count anything - and
+   `finish()` runs at `stop()`, exactly when short-lived workers have already exited.
+   `getThreadCpuTime` returns -1 for a dead thread, nothing is counted, and `windows` ends at zero.
+
+So **on any run under about two windows, the only window that can close is the one at `stop()`** -
+the one moment guaranteed to fail if the threads finished their work and went home.
+
+**Why nothing caught it.** The bench and all four trials run long-lived pools, so the threads are
+always alive at `stop()` and the window always closes. Every measurement of the duty cycle this
+project has ever taken came from a shape that cannot exhibit the bug. It took a forty-line program
+that spawns two threads and joins them - the most ordinary thing anyone would write - to find it.
+
+**Fixed both halves.** A sample that finds nothing to measure no longer counts as a window boundary,
+so the grid starts when there is something to measure and a window closes *mid-run*, while the
+threads are alive; the same run now reads `99.90% of wall time, 1 window over 2 threads`. And the
+failure message names the condition it found instead of assuming the only cause it knew about -
+including *"N of the threads being measured exited before the run ended"*.
+
+*The cost:* the window grid starts marginally later than it used to, so duty figures are computed
+over slightly different intervals than the ones in [findings.md](findings.md). No bias in either
+direction, but not bit-identical.
+
 ### A column deleted and restored inside two hours, and both were right
 *2026-08-31 into 09-01, Andrey. **Fixed.***
 

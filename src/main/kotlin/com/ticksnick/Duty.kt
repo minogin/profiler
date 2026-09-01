@@ -142,11 +142,17 @@ internal class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
     /** The shortest window worth taking: below this the clock's own steps dominate the answer. */
     private val floorNanos = max(windowNanos / 10, max(resolution, 0) * 10)
 
-    /** Called every tick; takes a sample only once the window has elapsed. */
+    /**
+     * Called every tick; takes a sample only once the window has elapsed.
+     *
+     * Until the first sample finds a thread to measure, the window is not started: an empty walk
+     * would otherwise consume a window and push the first countable boundary a whole window later,
+     * out past the end of a short run.
+     */
     fun tick(now: Long) {
         if (!available || now < nextAt) return
         sample(now)
-        nextAt = now + windowNanos
+        nextAt = if (prevWall == 0L) now else now + windowNanos
     }
 
     /**
@@ -205,6 +211,24 @@ internal class DutyCycle(private val windowNanos: Long = DEFAULT_WINDOW_NANOS) {
             if (counted > maxThreads) maxThreads = counted
         }
         prevCpu = next
+        // A sample that found nothing to measure is not a window boundary, and taking it as one
+        // costs a whole window.
+        //
+        // The first sample fires at start(), before any worker has registered a slot - threads are
+        // usually created after the profiler is started - so it establishes no baselines. Treating
+        // it as a boundary meant the first window could never close, the second sample only became
+        // the baseline, and finish() was the first sample able to count anything. finish() runs at
+        // stop(), which is exactly when short-lived workers have already exited and their CPU clock
+        // reads -1. On any run under about two windows the two conspired and the duty cycle was
+        // never measured at all - see sandbox.md. The bench and the four trials never saw it,
+        // because a pool thread outlives the run.
+        //
+        // Leaving `prevWall` alone here means the next sample measures from the last boundary that
+        // meant something, so no wall time is attributed without the CPU time that goes with it.
+        // Only before the first baseline exists. Once the window grid has started, an empty walk
+        // is a boundary like any other - every thread having died is not a reason to walk the slots
+        // on every tick for the rest of the run.
+        if (next.isEmpty() && prevWall == 0L) return
         prevWall = now
         val cost = System.nanoTime() - entered
         if (cost > maxSampleNanos) maxSampleNanos = cost
@@ -438,7 +462,13 @@ class DutyReport internal constructor(
     fun boundsFor(share: Double): Pair<Double, Double> =
         max(0.0, (share - (1 - shareDuty)) / shareDuty) to min(1.0, share / shareDuty)
 
-    fun lines(): List<String> {
+    /**
+     * @param runNanos how long the session actually sampled for, so the failure can name the
+     *   condition it found rather than assuming the only cause it used to know about.
+     * @param reclaimedSlots threads that exited during the run. The other way to get no window:
+     *   the walk reads -1 from a dead thread's CPU clock, so it counts nothing.
+     */
+    fun lines(runNanos: Long, reclaimedSlots: Int): List<String> {
         // "Time on CPU" rather than "Duty cycle" in the report, while the code and the design docs
         // keep the term: a reader meeting this row for the first time meets it on a short run, where
         // it has no number to explain itself with, and a name that needs a glossary is then the whole
@@ -452,12 +482,31 @@ class DutyReport internal constructor(
         // The failure a first run hits, so it is the version most readers see first. It used to say
         // why the number was missing without ever saying what the number was - the one case where
         // the row has to introduce its own subject, because there is no figure beside it doing that.
+        // Three ways to finish with no window, and the message used to assert the first one
+        // whichever had happened. On a 1.7 s run against a 1.000 s window it therefore printed "the
+        // run is shorter than the 1.000 s window" four lines under "3,178 taken over 1.7 s" - a
+        // report contradicting its own numbers, which is worse than a report that says nothing.
         if (!available) return listOf(
             row("Time on CPU", "not measured"),
             subRow("What", MISSING_WHAT),
             subRow(
-                "Why",
-                String.format(Locale.ROOT, "the run is shorter than the %.3f s window", windowNanos / 1e9)
+                "Why", when {
+                    runNanos in 1..<windowNanos -> String.format(
+                        Locale.ROOT, "the %.1f s run is shorter than the %.3f s window",
+                        runNanos / 1e9, windowNanos / 1e9
+                    )
+                    // The clock reads -1 for a thread that has exited, so a walk that finds only
+                    // dead threads counts nothing - and the last walk happens at stop(), which is
+                    // when short-lived workers have already finished.
+                    reclaimedSlots > 0 -> String.format(
+                        Locale.ROOT,
+                        "no window closed: %d of the threads being measured exited before the run ended",
+                        reclaimedSlots
+                    )
+                    else -> String.format(
+                        Locale.ROOT, "no window closed in the %.1f s run", runNanos / 1e9
+                    )
+                }
             ),
             subRow("Bound", MISSING_BOUND),
         )

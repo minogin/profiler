@@ -1406,7 +1406,7 @@ class Report internal constructor(
             )
         }
 
-        for (l in duty.lines()) appendLine(l)
+        for (l in duty.lines(durationNanos, reclaimedSlots)) appendLine(l)
         appendLine()
         // FINE, not bare OPERATIONS. `OPERATIONS` beside `COARSE OPERATIONS` makes one tier the
         // default and the other the exception, which is the asymmetry `registerFine`/`registerCoarse`

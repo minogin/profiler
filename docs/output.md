@@ -89,13 +89,24 @@ there is no figure doing it:
 
 ```
 Time on CPU   not measured
-  What        how much of the occupancy was really CPU - it is what bounds every share below
-  Why         the run is shorter than the 1.000 s window
-  Bound       none - read the shares below as occupancy, with nothing limiting how much was waiting
+  What        how much of the thread-time below was really CPU - it is what bounds every share
+  Why         the 0.4 s run is shorter than the 1.000 s window
+  Bound       none - read the shares below as thread-time, with nothing limiting how much was waiting
 ```
 
-The window is one second, so **any run under about a second produces no bound on any share**. The
-shares themselves are still there and still occupancy; what is gone is the error bar on them.
+The window is one second, so **a run under about a second produces no bound on any share**. The
+shares themselves are still there and still thread-time; what is gone is the error bar on them.
+
+`Why` names the condition it actually found, and there are three:
+
+| what it says | what happened |
+|---|---|
+| *the 0.4 s run is shorter than the 1.000 s window* | not enough time for one window |
+| *no window closed: N of the threads being measured exited before the run ended* | the CPU clock reads −1 for a dead thread, so the walk counted nothing |
+| *no window closed in the N s run* | neither of the above — worth reporting |
+
+The middle one is the interesting case, and it was **printing the first message until 2026-09-01**:
+a 1.7 s run claiming to be shorter than a 1 s window, four lines under `3,178 taken over 1.7 s`.
 
 **And sometimes there is no bound at all:**
 

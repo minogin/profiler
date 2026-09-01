@@ -244,7 +244,7 @@ class ReportTest {
     fun `an unbounded duty explains itself instead of printing a number`() {
         val d = duty(labelled = 0.0, aggregate = 0.6563, invisible = 0.344, labelledFraction = 0.139)
         assertTrue(d.unbounded, "the Netty regime is no longer recognised as unbounded")
-        val lines = d.lines().joinToString("\n")
+        val lines = d.lines(runNanos = 20_000_000_000L, reclaimedSlots = 0).joinToString("\n")
         assertTrue(lines.contains("Bound") && lines.contains("none -"), "no diagnosis for an unbounded run")
         assertFalse(lines.contains("inside operations"), "printed a labelled duty it does not have")
         assertFalse(lines.contains("at most"), "printed a bound it does not have")
@@ -255,7 +255,7 @@ class ReportTest {
     fun `a real bound is printed as a bound`() {
         val d = duty(labelled = 0.9846, aggregate = 0.6927, invisible = 0.014, labelledFraction = 0.595)
         assertFalse(d.unbounded)
-        val lines = d.lines().joinToString("\n")
+        val lines = d.lines(runNanos = 20_000_000_000L, reclaimedSlots = 0).joinToString("\n")
         assertTrue(lines.contains("inside operations"), "the labelled duty was not printed")
         assertTrue(lines.contains("at most"), "the bound was not printed")
         assertFalse(lines.contains("none -"), "printed the diagnosis over a real bound")
