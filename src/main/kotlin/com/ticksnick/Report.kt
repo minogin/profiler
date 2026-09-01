@@ -500,22 +500,55 @@ class Report internal constructor(
      * first column to fit `Thread-time% v`. A range with an empty label is not a group; a span left
      * out entirely simply has no band over it.
      */
-    private fun band(widths: IntArray, vararg groups: Pair<IntRange, String>): String {
+    /** Where each column starts, and where the group bars fall, given [FINE_COLUMNS]. */
+    private fun layout(widths: IntArray, breaks: IntArray): Pair<IntArray, IntArray> {
         val starts = IntArray(widths.size)
+        val bars = ArrayList<Int>()
         var pos = 0
         for (i in widths.indices) {
             starts[i] = pos
             pos += widths[i] + 1
+            if (i in breaks && i < widths.size - 1) {
+                bars += pos
+                pos += 2
+            }
         }
-        val line = CharArray(pos - 1) { ' ' }
+        return starts to bars.toIntArray()
+    }
+
+    /** The full width of a table with these columns and these bars. */
+    private fun widthOf(widths: IntArray, breaks: IntArray): Int {
+        val (starts, _) = layout(widths, breaks)
+        return starts.last() + widths.last()
+    }
+
+    /** The rule under a grouped header: dashes, with a cross where each bar comes down. */
+    private fun rule(widths: IntArray, breaks: IntArray): String {
+        val (_, bars) = layout(widths, breaks)
+        val line = CharArray(widthOf(widths, breaks)) { '-' }
+        for (b in bars) line[b] = '+'
+        return String(line)
+    }
+
+    /**
+     * The band of group labels over a table's column heads.
+     *
+     * The labels are centred and unruled because the bars below them already say where each group
+     * starts and stops - dashes as well would be the same boundary drawn twice. A group whose label
+     * is empty still gets its bars: an unlabelled span says *these belong together and we have not
+     * settled why*, which is the honest state of `Calls` and `Impl/call`.
+     */
+    private fun band(widths: IntArray, breaks: IntArray, vararg groups: Pair<IntRange, String>): String {
+        val (starts, bars) = layout(widths, breaks)
+        val line = CharArray(widthOf(widths, breaks)) { ' ' }
         for ((range, name) in groups) {
             val from = starts[range.first]
             val span = starts[range.last] + widths[range.last] - from
-            if (name.isEmpty() || span < name.length + 4) continue
-            val pad = (span - name.length - 2) / 2
-            val text = "-".repeat(pad) + " " + name + " " + "-".repeat(span - name.length - 2 - pad)
-            for (i in text.indices) line[from + i] = text[i]
+            if (name.isEmpty() || span < name.length) continue
+            val pad = (span - name.length) / 2
+            for (i in name.indices) line[from + pad + i] = name[i]
         }
+        for (b in bars) line[b] = '|'
         return String(line).trimEnd()
     }
 
@@ -1383,14 +1416,15 @@ class Report internal constructor(
         // the groups are the reading order: how much time went here, how it was spread over
         // threads, and how far the row can be trusted.
         //
-        // The third group - `Calls` and `Impl/call` - is deliberately unlabelled. Andrey could not
-        // say what question it answers, and a band named on my guess would teach a grouping nobody
-        // had agreed to. An unlabelled span says "these two belong together and we have not settled
-        // why", which is true.
+        // The third band repeats the name of a column inside it, which is provisional and known to
+        // be so - "just name the group Calls for now". The group's natural name is the noun its
+        // first column already carries, and the ways out are to rename that column (`Count`, with
+        // the band acting as its prefix) or to leave the band empty and let the two heads speak for
+        // themselves. Recorded in ideas.md rather than settled here.
         if (operations.any { it.hits > 0 }) appendLine(
             band(
-                FINE_COLUMNS,
-                1..3 to "Load", 4..5 to "Spread", 8..10 to "Trust"
+                FINE_COLUMNS, FINE_BREAKS,
+                1..3 to "Load", 4..5 to "Spread", 6..7 to "Calls", 8..10 to "Trust"
             )
         )
         if (operations.any { it.hits > 0 }) appendLine(
@@ -1402,7 +1436,11 @@ class Report internal constructor(
                 // 22 and 12 rather than 26 and 8 so the wider label still ends where the values
                 // end. The header was already two columns out of step with its rows before the
                 // marker was added, because `Occupancy%` never fitted the 8 it was given.
-                Locale.ROOT, "%-20s %14s %11s %15s %9s %21s %13s %10s %8s %6s %7s",
+                // The bars force the header and the data rows onto the same column widths. They
+                // had differed - 20/14 against 26/8 - so that `Thread-time% v` could sit over an
+                // 8-wide number without shifting everything after it, and that trick is invisible
+                // until a vertical line is drawn through it and comes out crooked.
+                Locale.ROOT, "%-26s | %14s %11s %15s | %9s %21s | %13s %20s | %8s %6s %7s",
                 // `occupancy%` and not `share`, because it is the same quantity as the column beside
                 // it — one relative, one absolute. Calling one of them `share` invented a
                 // distinction that does not exist and hid the one that does: neither is CPU. A
@@ -1452,10 +1490,16 @@ class Report internal constructor(
                 "Concurrency / Threads",
                 // `Impl/call` sits beside `Calls` because it is hits x step / calls, and it had
                 // been stranded among the statistics.
-                "Calls", "Impl/call", "Hits", "Noise", "Over 1t"
+                // `Thread-time per call` and not `Impl/call`, which was Andrey's: "implied" singled
+                // this column out as inferred when every number in the table except `Calls` is
+                // sampled, and `Impl` reads as implementation. The name states the relationship
+                // instead - both operands are columns on the same row - and inherits the caveat
+                // that `Thread-time` already carries. It also drops a third meaning for the slash,
+                // which reads as "per" here and as "two values" twice to its left.
+                "Calls", "Thread-time per call", "Hits", "Noise", "Over 1t"
             )
         )
-        if (operations.any { it.hits > 0 }) appendLine("-".repeat(FINE_WIDTH))
+        if (operations.any { it.hits > 0 }) appendLine(rule(FINE_COLUMNS, FINE_BREAKS))
         // Operations the sampler never caught are folded away rather than printed as a screen of
         // zeroes — Calcite's report carried twenty-five rules at 0.000%. Folded, not dropped: the
         // count says how many there were, and a *called* operation with no samples is a real
@@ -1476,7 +1520,7 @@ class Report internal constructor(
         for (op in seen.sortedByDescending { it.hits }) {
             appendLine(
                 String.format(
-                    Locale.ROOT, "%-26s %7.3f%% %11s %15s %9s %21s %,13d %10s %8d %5.2f%% %6.2f%%",
+                    Locale.ROOT, "%-26s | %13.3f%% %11s %15s | %9s %21s | %,13d %20s | %8d %5.2f%% %6.2f%%",
                     op.name, shareOf(op) * 100, threadTime(occupancyNanosOf(op)),
                     runnableSplit(op.waitingShare), threadTime(elapsedNanosOf(op)),
                     inFlightOf(op),
@@ -1485,7 +1529,7 @@ class Report internal constructor(
                 )
             )
         }
-        if (operations.any { it.hits > 0 }) appendLine("-".repeat(FINE_WIDTH))
+        if (operations.any { it.hits > 0 }) appendLine(rule(FINE_COLUMNS, FINE_BREAKS))
         if (unseen.isNotEmpty()) {
             val called = unseen.filter { it.calls > 0 }
             // "called anyway" rather than "N of them did run", which reads as nonsense at N = 1 —
@@ -1640,10 +1684,11 @@ class Report internal constructor(
         /** Below this many ticks, an empty table is the run being short rather than a finding. */
         const val MIN_TICKS_FOR_A_TABLE = 50
 
-        // The report-level rules and the warning banners. 115 rather than the old 130 so that
-        // nothing on the page is wider than the widest table on it - a run printed rules of three
-        // different lengths before the tables and the constants were brought back together.
-        const val WIDTH = 144
+        // The report-level rules and the warning banners, matching the widest table on the page.
+        // The fine table no longer has a width constant of its own - it is computed from its
+        // columns and bars, because a hand-kept number is exactly how the rules came to print at
+        // three different lengths on one page.
+        const val WIDTH = 168
 
         /**
          * The coarse table alone, which is narrower than [WIDTH] since the three parallelism
@@ -1663,15 +1708,16 @@ class Report internal constructor(
          * 112 around the coarse one, 130 again to close - because the tables had been renamed and
          * resized while the rules stayed pinned to a constant that no longer described either.
          */
-        const val FINE_WIDTH = 144
-
         /**
          * The fine table's data-row widths, in order, so the group band can be laid over them.
          *
          * Operation, thread-time% and thread-time, runnable/wait, wall-time,
          * concurrency/threads, calls, implied per call, hits, noise, over one tick.
          */
-        val FINE_COLUMNS = intArrayOf(26, 8, 11, 15, 9, 21, 13, 10, 8, 6, 7)
+        val FINE_COLUMNS = intArrayOf(26, 14, 11, 15, 9, 21, 13, 20, 8, 6, 7)
+
+        /** After which columns a group bar comes down. */
+        val FINE_BREAKS = intArrayOf(0, 3, 5, 7)
 
         /**
          * `1 thread` rather than `1 threads`.

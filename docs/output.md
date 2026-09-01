@@ -236,22 +236,27 @@ exist.
 ## The table
 
 ```
-                           --------------- Load --------------- ----------- Spread ------------                          -------- Trust --------
-Operation            Thread-time% v Thread-time Runnable / Wait Wall-time Concurrency / Threads         Calls  Impl/call     Hits  Noise Over 1t
-flushBatch                  44.250%     38.54 s   100.0% / 0.0%   11.75 s              3.28 / 8   288,514,362   133.6 ns    38319  0.51%   0.01%
-validateRecord              41.222%     35.91 s   100.0% / 0.0%   11.68 s              3.07 / 8   288,514,362   124.5 ns    35697  0.53%   0.00%
-parseRecord                  9.478%      8.26 s    99.7% / 0.3%    6.14 s              1.34 / 8   288,514,362    28.6 ns     8208  1.10%   0.27%
-indexRecord                  5.050%      4.40 s   100.0% / 0.0%    3.73 s              1.18 / 8   288,514,362    15.2 ns     4373  1.51%   0.05%
+                           |                    Load                    |             Spread              |               Calls                |          Trust
+Operation                  | Thread-time% v Thread-time Runnable / Wait | Wall-time Concurrency / Threads |         Calls Thread-time per call |     Hits  Noise Over 1t
+---------------------------+--------------------------------------------+---------------------------------+------------------------------------+------------------------
+flushBatch                 |        44.250%     38.54 s   100.0% / 0.0% |   11.75 s              3.28 / 8 |   288,514,362             133.6 ns |    38319  0.51%   0.01%
+validateRecord             |        41.222%     35.91 s   100.0% / 0.0% |   11.68 s              3.07 / 8 |   288,514,362             124.5 ns |    35697  0.53%   0.00%
+parseRecord                |         9.478%      8.26 s    99.7% / 0.3% |    6.14 s              1.34 / 8 |   288,514,362              28.6 ns |     8208  1.10%   0.27%
+indexRecord                |         5.050%      4.40 s   100.0% / 0.0% |    3.73 s              1.18 / 8 |   288,514,362              15.2 ns |     4373  1.51%   0.05%
+---------------------------+--------------------------------------------+---------------------------------+------------------------------------+------------------------
 ```
 
-**The column heads carry a band naming the groups** — `Load` (thread-time% through runnable/wait),
-`Spread` (wall-time and concurrency), `Trust` (hits, noise, over 1t). Eleven columns is more than
-anyone reads as a flat list, and the groups are the reading order: how much time went here, how it
-was spread over threads, how far the row can be trusted.
+**The columns are grouped, with bars between the groups and a band naming them** — `Load`
+(thread-time% through runnable/wait), `Spread` (wall-time and concurrency), `Trust` (hits, noise,
+over 1t). Eleven columns is more than anyone reads as a flat list, and the groups are the reading
+order: how much time went here, how it was spread over threads, how far the row can be trusted.
 
-`Calls` and `Impl/call` sit together and **deliberately have no band**. They belong beside each other
-— the second is `hits × step ÷ calls` — but what question the pair answers has not been settled, and
-a label invented to fill the gap would teach a grouping nobody agreed to.
+The band labels are centred and unruled, because the bars below already say where each group starts
+and stops — dashes as well would draw the same boundary twice.
+
+The `Calls` band repeats the name of a column inside it, which is **provisional** — the group's
+natural name is the noun its first column already carries. [ideas.md](ideas.md) item 29 has the ways
+out.
 
 | column | what it is | what to watch for |
 |---|---|---|
@@ -263,7 +268,7 @@ a label invented to fill the gap would teach a grouping nobody agreed to.
 | **calls** | exact, counted by the hook | a share cannot tell *200M calls at 8 ns* from *1000 calls at 1.6 ms*, and those want opposite fixes |
 | **hits** | samples that caught this operation | the evidence behind the share |
 | **noise** | `1/√hits` — the error chance alone gives | **if two rows differ by less than their noise, they are not ranked, they are tied** |
-| **impl/call** | `occupancy ÷ calls` — implied duration per execution | the smell test you can apply and the tool cannot. An operation you know is 20 ns showing 500 ns is stalling on something |
+| **thread-time per call** | `thread-time ÷ calls`, both of them columns on the same row | the smell test you can apply and the tool cannot: an operation you know is 20 ns showing 500 ns is stalling on something. Inferred from sampling — the fine tier never times an individual call, which is what makes it cheap and what the coarse tier exists to do |
 | **over 1t** | occupancy inside executions that outlived a tick | for a label claiming nanoseconds this is four orders of magnitude out. See the verdicts below |
 
 Operations that were never sampled are folded into one line rather than printed as a screen of

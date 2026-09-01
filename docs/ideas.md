@@ -982,6 +982,62 @@ project has met before:
 **Not committed.** The inclusive total is the right key while there is no self time to sort by, and
 it is honest as long as the table says which it is.
 
+## 29. The `Calls` band repeats a column inside it · open
+
+From the sandbox on 2026-09-01, and explicitly provisional - *"just name the group Calls for now"*.
+
+The fine table's columns are banded into `Load`, `Spread`, `Calls` and `Trust`. The third band names
+the group after the noun its own first column already carries, which reads as a stutter. It is there
+because the group's natural name **is** that noun: the pair answers *how big is one call*, and the
+columns are `Calls` and `Thread-time per call`.
+
+Three ways out, none picked:
+
+- **Rename the column to `Count`**, with the band acting as a shared prefix - *Calls: count,
+  thread-time per call*. Reads well, but makes one band work differently from the other three, which
+  are categories rather than prefixes.
+- **Leave the band empty.** Once the column said `Thread-time per call` rather than `Impl/call`, the
+  two heads announce their own kinship and the bars alone group them. This suggests a rule worth
+  having: *label a group only when its columns do not say it themselves.*
+- **Find a fourth word.** `Size` was tried and rejected - `Calls` is a count, not a size, and the
+  name was carried entirely by the column beside it.
+
+## 30. The other three tables have no bands · open
+
+Only the fine table is grouped. The coarse table has eight columns and would take the same treatment;
+the header block is key-value rows and probably should not. The `band`, `rule` and `layout` helpers
+are already general over a width array and a set of break points, so this is a decision about whether
+the coarse table's columns fall into groups at all, not a piece of work.
+
+## 31. `Over 1t` was never examined · open
+
+It survived a session that renamed or removed every other column in the fine table - `occupancy`,
+`elapsed`, `in flight`, `waiting`, `Impl/call` - purely because nobody asked about it. It is the
+share of an operation's thread-time spent inside executions that outlived a tick, and the name says
+none of that. It is in the same family as the names that did get fixed, and the only reason it is
+still there is that the reader ran out of questions first.
+
+## 32. The long-execution line says nothing on a small run · open
+
+Printed unconditionally under the coarse table:
+
+```
+  run-wide 99.86%, of which the machine itself accounts for up to 99.93% (preemption and GC pauses)
+```
+
+On the sandbox run this is true and useless. Every execution was 1.4 seconds against a 1 ms step, so
+of course they all spanned a tick; the baseline is 99.86% and the machine floor above it, and the
+comparison the line exists to support - *is this operation stuck more often than the run as a whole* -
+has nothing to say when the answer is *everything, always*. Noticed on 2026-08-31 and not followed up.
+
+## 33. `render(unicode = true)` · open
+
+Offered when Andrey asked whether the sort marker could be a real arrow rather than `v`, and not
+taken. The library cannot know the encoding of the sink - `render()` returns a `String` and somebody
+else prints it - so the only safe default is ASCII. An explicit opt-in would move that decision to a
+caller who does know, and would let the report use an arrow, a proper dash and box-drawing rules for
+the bars. It also doubles the surface the ASCII test has to cover.
+
 ## Promoted to plan.md
 
 **Phase 3.5** is item 9 above, reframed from detecting bad operations to bounding the error on every
