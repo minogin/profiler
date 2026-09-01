@@ -47,6 +47,107 @@ something to do, it graduates into [ideas.md](ideas.md) and is marked here as ha
 
 ---
 
+### A column deleted and restored inside two hours, and both were right
+*2026-08-31 into 09-01, Andrey. **Fixed.***
+
+The concurrency ratio - `thread-time / wall-time`, how many threads were inside an operation at
+once - went through `threads`, then `in flight`, then deletion, then back as
+`Concurrency / Threads`, in one evening. Worth logging precisely because it looks like churn and is
+not.
+
+**Why deleting it was right.** Both names had failed on a reader who wanted exactly that number, and
+it is derivable from the two columns beside it - the argument that had already deleted `busy/exec`.
+Andrey, after three rounds of naming: *"honestly, i just don't get the whole thing / and this
+discussion makes me tired."* A number needing a paragraph before it can be read has not earned a
+column.
+
+**Why restoring it was also right**, and it is a better principle than the one that deleted it:
+
+> "otherwise threading is completely missing now (yes, you can look at thread-time and wall time, but
+> we should not ask a human to make this)"
+
+*Derivable* is not *available*. `busy/exec` was deleted for being derivable **and** misleading; this
+one was only derivable, and a report about a threaded program should not make a person compute
+whether it was threaded. The mistake was reading one precedent as covering both cases.
+
+**What made the restored version work** was not the name, it was doing the arithmetic. The two
+earlier attempts both printed the number and asked the reader to interpret an abstraction
+(*executions in flight*); the third prints it beside the operands it came from.
+
+*One thing settled on the way:* it is `Concurrency`, not `Parallelism`, which Andrey asked for and
+accepted the correction on. The sandbox run is the argument - `work1` at `2.00 / 2` concurrency and
+`7.2%` runnable, two threads inside and both asleep, so a real parallelism near `0.14`. Calling the
+2.00 parallelism would have been false about that very run.
+
+**And then the table needed a band.** Eleven columns is past what anyone reads as a flat list.
+Andrey grouped them - `Load`, `Spread`, and a group he could not name: *"this group I don't
+understand, postpone it for now"*. It prints as an **unlabelled span**. Naming it on my guess would
+have taught a grouping nobody agreed to; an empty band says *these belong together and we have not
+settled why*, which is the truth and can be filled in later without moving a column.
+
+### Is `Waiting` part of thread-time, or on top of it?
+*2026-08-31, Andrey. **Fixed the same day.***
+
+> "we have thread-time and waiting, but what exactly is 'thread-time minus waiting'?"
+
+It is part of it - `waitingHits / hits`, the same denominator - and nothing in the table said so. A
+bare noun beside a duration reads as an independent quantity.
+
+**The fix that did not work, and why it is worth recording:** print it as a duration, `2.68 s` beside
+`2.89 s`, so containment is visible in the magnitudes. Andrey killed it in one line - *"does not
+matter if it's sec or % - it will still be unclear"* - and he was right. Seconds beside seconds is
+exactly as ambiguous as a percentage. **The unit was never the problem; the header was.**
+
+Then his own answer, which is better than the `of which waiting` header I proposed next: print
+**both halves**, summing to 100%.
+
+```
+Thread-time Runnable / Wait
+     2.89 s    7.2% / 92.8%
+```
+
+Two shares that add to the whole cannot be read as an addition to it. No header phrasing has to carry
+the containment, because the arithmetic does.
+
+**The name cost an argument and was worth it.** Andrey asked for `Run / Wait`; the column says
+`Runnable`. The `-able` is the entire distinction - *not blocked*, rather than *executing* - and the
+gap is not pedantic: a preempted thread reads `RUNNABLE`, 14-18% of wall time on this machine on a
+bench that never blocks, and so does a thread stopped in a native call. That is the JDBC trial
+defect, where a number read as CPU was 55x what the machine had spent. Five characters to stop a
+reader believing the left half is CPU time.
+
+### The columns were named for the instrument, and the legend outlived them
+*2026-08-31, Andrey, from a pasted run. **Fixed the same day.***
+
+> "occupancy - cannot we use thread-time instead? below you say - occupancy IS thread-time"
+> "Elapsed - hmmm, what is it? wall time or elapsed sum of all threads...?"
+
+Both correct, and the first is the sharper one: the report **already** called that quantity
+thread-time everywhere except in the column - in `Coverage`, on the coarse lines, in half the
+warnings. One quantity with two names is worse than either name, and the one that lost was the one
+the reader meets first.
+
+`elapsed` failed differently. It is wall clock, not a sum, and that is the *only* reason it is
+printed beside a column that is a sum - yet its name did not say which it was, so the pair that
+exists to make the distinction did not make it. `Thread-time` and `Wall-time` name the distinction
+itself.
+
+**What the same pasted run then exposed, all of it drift rather than design:**
+
+- **Three of the five legend lines named columns that no longer existed**, and the full legend had
+  whole paragraphs on `in flight`, `inside` and `working` as columns. A legend is edited when a
+  column is, and had not been.
+- **The rules printed at three different lengths on one page** - 130 around the fine table, 112
+  around the coarse one, 130 again to close - because the tables had been resized while the rules
+  stayed pinned to a constant that no longer described either. Each table draws to itself now.
+- **`Time on CPU` still said "occupancy"** in both its sub-rows: the block whose job is to bound the
+  table, using the word the table had stopped using.
+- **`Runnable` in the header repeated `Coverage` to the decimal** - 99.9% both - because nothing was
+  parked. It prints only when parked time makes them differ.
+
+None of these are hard. All of them are what a report looks like when it is edited a column at a
+time, and none would have been noticed without someone reading the whole page cold.
+
 ### The word "parallelism" is not in the report, and it has three columns about it
 *2026-08-31, Andrey. **Fixed the same day.***
 
