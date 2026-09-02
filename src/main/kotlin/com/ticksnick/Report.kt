@@ -158,25 +158,88 @@ fun isSuspect(hits: Long, stuckHits: Long, stuckInstances: Long, machineFloor: D
  * a column of nanoseconds makes 1.5 ms and 9 µs look like the same kind of number, which is the
  * one distinction this column exists to draw.
  */
-fun duration(nanos: Double): String = when {
-    nanos.isNaN() -> "-"
-    nanos < 1_000 -> String.format(Locale.ROOT, "%.1f ns", nanos)
-    nanos < 1_000_000 -> String.format(Locale.ROOT, "%.1f us", nanos / 1e3)
-    else -> String.format(Locale.ROOT, "%.2f ms", nanos / 1e6)
+fun duration(nanos: Double): String {
+    if (nanos.isNaN()) return "-"
+    var i = 0
+    while (i + 1 < DURATION_UNITS.size && nanos >= DURATION_UNITS[i + 1].from) i++
+    // Rounding can reach the next unit - 999.7 ms is three significant digits of 1.00 s, not
+    // "1000 ms" - so the choice is made again against the value as it will actually print.
+    if (i + 1 < DURATION_UNITS.size && threeSignificant(nanos / DURATION_UNITS[i].scale) >= 1000.0) i++
+    return threeSignificantString(nanos / DURATION_UNITS[i].scale) + " " + DURATION_UNITS[i].name
+}
+
+/** One rung: the value it takes over at, what to divide by, and what to call it. */
+private class DurationUnit(val from: Double, val scale: Double, val name: String)
+
+/**
+ * The ladder, and where it stops.
+ *
+ * Seconds run to a thousand rather than to sixty, because a minute is the unit a reader has to
+ * convert back: `479 s` is comparable with the run length printed above it and `7.98 min` is not.
+ * Past a thousand seconds the digits win the argument instead.
+ */
+private val DURATION_UNITS = arrayOf(
+    DurationUnit(0.0, 1.0, "ns"),
+    DurationUnit(1e3, 1e3, "us"),
+    DurationUnit(1e6, 1e6, "ms"),
+    DurationUnit(1e9, 1e9, "s"),
+    // Minutes take over at a thousand seconds rather than at sixty, which is the whole point of
+    // separating where a unit starts from what it divides by.
+    DurationUnit(1e12, 60e9, "min"),
+    DurationUnit(6e13, 3600e9, "h"),
+)
+
+/** [v] rounded to three significant digits, as a number, for deciding which unit it lands in. */
+private fun threeSignificant(v: Double): Double = when {
+    v >= 100 -> Math.round(v).toDouble()
+    v >= 10 -> Math.round(v * 10) / 10.0
+    else -> Math.round(v * 100) / 100.0
+}
+
+/** Three significant digits and no more, which is every digit any number here can support. */
+private fun threeSignificantString(v: Double): String = when {
+    v >= 100 -> String.format(Locale.ROOT, "%.0f", v)
+    v >= 10 -> String.format(Locale.ROOT, "%.1f", v)
+    else -> String.format(Locale.ROOT, "%.2f", v)
+}
+
+/** Three significant digits and no unit, for a quantity that carries its own - `pp`, a ratio. */
+fun threeDigits(value: Double): String =
+    if (value.isNaN()) "-" else threeSignificantString(value)
+
+/**
+ * A percentage to three significant digits: `100%`, `40.3%`, `5.80%`, `0.512%`.
+ *
+ * The same rule as [duration] and for the same reason - the fourth digit of a sampled share is
+ * noise, and printing it invites a reader to compare two numbers that are not different. Sorting
+ * and every arithmetic use the full value; this is only what is shown.
+ */
+fun percent(value: Double): String = when {
+    value.isNaN() -> "-"
+    // Reserved for a real 100: the pair `100% / 0.003%` reads as a contradiction, and the halves of
+    // `Runnable / Wait` are supposed to add up on the page as well as in the arithmetic.
+    value >= 100.0 -> "100%"
+    value >= 99.95 -> ">99.9%"
+    value >= 9.995 -> String.format(Locale.ROOT, "%.1f%%", value)
+    value >= 0.9995 -> String.format(Locale.ROOT, "%.2f%%", value)
+    value > 0.0005 -> String.format(Locale.ROOT, "%.3f%%", value)
+    // Not "0.000%", which reads as measured zero. A share this small is one the report folds away.
+    value > 0 -> "<0.001%"
+    else -> "0%"
 }
 
 /**
  * A total of thread-time, in whatever unit keeps it readable.
  *
- * Separate from [duration] because the two live at opposite ends of the scale: a per-call duration
- * runs to nanoseconds and an occupancy total to seconds, and one formatter covering both would
- * print 40 seconds as "40080.00 ms".
+ * The same function as [duration], and kept only as a name: at the call sites it says which of the
+ * two quantities is being printed, and this report has confused thread-time with wall-time before.
+ *
+ * They were genuinely two formatters until the unit ladder arrived. [duration] stopped at
+ * milliseconds and printed a coarse total of eight minutes as `478505.87 ms`; this one started at
+ * milliseconds so that 40 seconds did not come out as `40080.00 ms`. Three significant digits and a
+ * full ladder answer both, and there is nothing left for a second implementation to do.
  */
-fun threadTime(nanos: Double): String = when {
-    nanos.isNaN() -> "-"
-    nanos < 1_000_000_000.0 -> String.format(Locale.ROOT, "%.1f ms", nanos / 1e6)
-    else -> String.format(Locale.ROOT, "%.2f s", nanos / 1e9)
-}
+fun threadTime(nanos: Double): String = duration(nanos)
 
 /**
  * `key            value`, with every value starting at the same column.
@@ -597,7 +660,7 @@ class Report internal constructor(
      * upper bound on the work, and the time-on-CPU block is the only thing that bounds it in turn.
      */
     fun runnableSplit(waiting: Double): String =
-        String.format(Locale.ROOT, "%.1f%% / %.1f%%", (1 - waiting) * 100, waiting * 100)
+        percent((1 - waiting) * 100) + " / " + percent(waiting * 100)
 
     fun occupancyNanosOf(op: OperationStat): Double = op.hits * stepNanos
 
@@ -1194,7 +1257,7 @@ class Report internal constructor(
         val seen = coarse.filter { it.count > 0 || it.inclusiveHits > 0 }
         if (seen.isEmpty()) return
         appendLine()
-        appendLine("COARSE OPERATIONS")
+        appendLine("COARSE OPERATIONS - inclusive time")
         appendLine(
             String.format(
                 // `busy/exec` is gone: it was `working x mean`, both of which are printed beside it,
@@ -1258,8 +1321,8 @@ class Report internal constructor(
             appendLine(
                 String.format(
                     Locale.ROOT,
-                    "  %s: %.3f%% of the thread-time inside operations INCLUDING what it contains, %s of it",
-                    c.name, shareOf(c) * 100, threadTime(c.inclusiveHits * stepNanos)
+                    "  %s: %s of the thread-time inside operations INCLUDING what it contains, %s of it",
+                    c.name, percent(shareOf(c) * 100), threadTime(c.inclusiveHits * stepNanos)
                 )
             )
             // The word the report never said, and the reason a reader with a parallelism question
@@ -1307,7 +1370,7 @@ class Report internal constructor(
                 .sortedByDescending { it.second }
             if (parts.isEmpty()) continue
             val shown = parts.take(6).joinToString(", ") {
-                String.format(Locale.ROOT, "%s %.1f%%", it.first, it.second * 100.0 / c.inclusiveHits)
+                it.first + " " + percent(it.second * 100.0 / c.inclusiveHits)
             }
             val rest = parts.size - 6
             appendLine("  ${c.name} was: $shown" + if (rest > 0) ", and $rest more" else "")
@@ -1321,7 +1384,7 @@ class Report internal constructor(
             appendLine(
                 String.format(
                     Locale.ROOT,
-                    "%n%.1f%% of thread-time inside fine operations (%s) was inside NO coarse span.",
+                    "%n%s of thread-time inside fine operations (%s) was inside NO coarse span.",
                     labelledOutsideCoarseShare * 100, threadTime(labelledOutsideCoarse * stepNanos)
                 )
             )
@@ -1372,7 +1435,7 @@ class Report internal constructor(
             appendLine(
                 String.format(
                     Locale.ROOT,
-                    "%.2f%% of the thread-time inside coarse executions (%s) was inside one that " +
+                    "%s of the thread-time inside coarse executions (%s) was inside one that " +
                             "had ALREADY BEEN CLOSED",
                     staleContextShare * 100, threadTime(staleContextHits * stepNanos)
                 )
@@ -1493,8 +1556,8 @@ class Report internal constructor(
             for (op in suspect()) add(
                 String.format(
                     Locale.ROOT,
-                    "%s: %,d executions lasted over a tick (%.1f%% of its thread-time against a %.1f%% machine floor, %s per call)",
-                    op.name, op.stuckInstances, op.stuckShare * 100, machineFloor * 100,
+                    "%s: %,d executions lasted over a tick (%s of its thread-time against a %s machine floor, %s per call)",
+                    op.name, op.stuckInstances, percent(op.stuckShare * 100), percent(machineFloor * 100),
                     duration(impliedNanosOf(op))
                 ) + "\n" + verdictFor(op)
             )
@@ -1591,9 +1654,9 @@ class Report internal constructor(
         appendLine(
             row(
                 "Coverage", String.format(
-                    Locale.ROOT, "%s of %s thread-time observed (%.1f%%)",
+                    Locale.ROOT, "%s of %s thread-time observed (%s)",
                     threadTime(labelledNanos), threadTime(observedNanos),
-                    labelledHits * 100.0 / (labelledHits + unlabelledHits).coerceAtLeast(1)
+                    percent(labelledHits * 100.0 / (labelledHits + unlabelledHits).coerceAtLeast(1))
                 )
             )
         )
@@ -1607,9 +1670,9 @@ class Report internal constructor(
             appendLine(
                 subRow(
                     "Outside", String.format(
-                        Locale.ROOT, "%s - %s parked (%.1f%%), %s runnable inside no operation",
+                        Locale.ROOT, "%s - %s parked (%s), %s runnable inside no operation",
                         threadTime(observedNanos - labelledNanos), threadTime(parked),
-                        unlabelledWaitingHits * 100.0 / unlabelledHits,
+                        percent(unlabelledWaitingHits * 100.0 / unlabelledHits),
                         threadTime(observedNanos - labelledNanos - parked)
                     )
                 )
@@ -1626,8 +1689,8 @@ class Report internal constructor(
             if (runnable > 0 && !sameAsCoverage) appendLine(
                 subRow(
                     "Runnable", String.format(
-                        Locale.ROOT, "operations cover %s of %s (%.1f%%)",
-                        threadTime(labelledNanos), threadTime(runnable), labelledNanos * 100.0 / runnable
+                        Locale.ROOT, "operations cover %s of %s (%s)",
+                        threadTime(labelledNanos), threadTime(runnable), percent(labelledNanos * 100.0 / runnable)
                     )
                 )
             )
@@ -1645,7 +1708,11 @@ class Report internal constructor(
         // FINE, not bare OPERATIONS. `OPERATIONS` beside `COARSE OPERATIONS` makes one tier the
         // default and the other the exception, which is the asymmetry `registerFine`/`registerCoarse`
         // was introduced to remove — reproduced in the output an hour after it was fixed in the API.
-        appendLine("ALL OPERATIONS")
+        // The heading carries the one thing a reader has to hold between the two tables. A coarse
+        // operation appears in both with different numbers - `request` at 5.03% of its own work
+        // here and 99.6% including everything it contains below - and without the two words that
+        // reads as a contradiction rather than as two questions.
+        appendLine("ALL OPERATIONS - own time")
         // The band over the column heads. Eleven columns is more than anyone reads as a list, and
         // the groups are the reading order: how much time went here, how it was spread over
         // threads, and how far the row can be trusted.
@@ -1655,13 +1722,18 @@ class Report internal constructor(
         // first column already carries, and the ways out are to rename that column (`Count`, with
         // the band acting as its prefix) or to leave the band empty and let the two heads speak for
         // themselves. Recorded in ideas.md rather than settled here.
-        if (operations.any { it.hits > 0 }) appendLine(
+        // Both tiers, sorted together further down. Computed here because everything from the
+        // band downwards is printed only if some row survived - and until the tiers shared a table
+        // that test was "any fine operation was sampled", which printed a headerless table of
+        // coarse rows the first time a sandbox labelled everything coarse.
+        val (seen, unseen) = rows().partition { it.hits > 0 }
+        if (seen.isNotEmpty()) appendLine(
             band(
                 FINE_COLUMNS, FINE_BREAKS,
                 1..3 to "Load", 4..7 to "Spread", 8..9 to "Calls", 10..12 to "Trust"
             )
         )
-        if (operations.any { it.hits > 0 }) appendLine(
+        if (seen.isNotEmpty()) appendLine(
             String.format(
                 // `v` marks the column the table is sorted by, which nothing said before - and at
                 // two rows a reader cannot tell a sorted table from an unsorted one by looking.
@@ -1753,12 +1825,13 @@ class Report internal constructor(
                 "Calls", "Thread-time per call", "Hits", "Noise", "Over 1t"
             )
         )
-        if (operations.any { it.hits > 0 }) appendLine(rule(FINE_COLUMNS, FINE_BREAKS))
+        if (seen.isNotEmpty()) appendLine(rule(FINE_COLUMNS, FINE_BREAKS))
         // Operations the sampler never caught are folded away rather than printed as a screen of
         // zeroes — Calcite's report carried twenty-five rules at 0.000%. Folded, not dropped: the
         // count says how many there were, and a *called* operation with no samples is a real
         // finding, since it means the label is on something too small to see.
-        val (seen, unseen) = rows().partition { it.hits > 0 }
+        // Partitioned above the header rather than here, because whether the header prints at
+        // all depends on it. See where `seen` is declared.
         // A table with no rows is two rules around nothing, and the twenty lines of column
         // explanation that used to follow it explained columns that had no data. Say what happened
         // instead: an empty table is nearly always a run too short for the sampler to catch, and
@@ -1779,20 +1852,20 @@ class Report internal constructor(
         for (r in seen.sortedByDescending { it.hits }) {
             appendLine(
                 String.format(
-                    Locale.ROOT, "%-26s | %13.3f%% %11s %15s | %9s %11s %7s %5s | %,13d %20s | %8d %5.2f%% %7s",
-                    r.label, r.shareOf() * 100, threadTime(r.hits * stepNanos),
+                    Locale.ROOT, "%-26s | %14s %11s %15s | %9s %11s %7s %5s | %,13d %20s | %8d %6s %7s",
+                    r.label, percent(r.shareOf() * 100), threadTime(r.hits * stepNanos),
                     runnableSplit(r.waitingShare), threadTime(r.activeTicks * stepNanos),
                     r.concurrency(), r.workers(), r.pool(),
                     r.calls, duration(r.perCallNanos()),
-                    r.hits, r.noiseFloor() * 100,
+                    r.hits, percent(r.noiseFloor() * 100),
                     // Blank for a coarse row rather than 0.00%: the long-execution detector is a
                     // fine-tier instrument, and a coarse operation has percentiles below, which
                     // answer the same question exactly instead of by a threshold.
-                    if (r.stuckShare == null) "-" else String.format(Locale.ROOT, "%.2f%%", r.stuckShare * 100)
+                    if (r.stuckShare == null) "-" else percent(r.stuckShare * 100)
                 )
             )
         }
-        if (operations.any { it.hits > 0 }) appendLine(rule(FINE_COLUMNS, FINE_BREAKS))
+        if (seen.isNotEmpty()) appendLine(rule(FINE_COLUMNS, FINE_BREAKS))
         if (unseen.isNotEmpty()) {
             val called = unseen.filter { it.calls > 0 }
             // Named, in both branches: "1 operation never sampled" leaves the reader to work out
@@ -1820,8 +1893,8 @@ class Report internal constructor(
         appendLine(
             String.format(
                 Locale.ROOT,
-                "  run-wide %.2f%%, of which the machine itself accounts for up to %.2f%% (preemption and GC pauses)",
-                stuckBaseline * 100, machineFloor * 100
+                "  run-wide %s, of which the machine itself accounts for up to %s (preemption and GC pauses)",
+                percent(stuckBaseline * 100), percent(machineFloor * 100)
             )
         )
         renderCoarse()

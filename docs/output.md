@@ -244,17 +244,40 @@ A name that carries its own caveat needs no paragraph, and unlike a paragraph it
 tenth run. A column that needs a paragraph *and* divides two of its neighbours does not need to
 exist.
 
+## Three significant digits, and units that follow the number
+
+Every duration and every percentage in the report is printed to **three significant digits**, in
+whatever unit keeps it there: `124 ns`, `36.6 ns`, `1.15 us`, `58.4 s`, `478 s`, and past a thousand
+seconds `3.42 h`. Percentages the same: `100%`, `38.4%`, `5.03%`, `0.234%`, and `<0.001%` for a share
+too small to write, which is not the same statement as `0%`.
+
+The fourth digit is never evidence. A sampled share carries a noise floor printed two columns to its
+right - `0.234%` here - and the coarse tier's percentiles come from a histogram that reports the top
+of the bucket a value fell into, about 1%. `44.250%` invited a reader to compare two operations that
+differ by less than the error on either.
+
+**Sorting and every calculation use the full value.** This is only what is shown.
+
+**A rounded value moves up a unit rather than borrowing a fourth digit**: 999.7 ms prints as `1.00 s`,
+never `1000 ms`. And `100%` is reserved for a real 100, so a `runnable / wait` pair reads
+`>99.9% / 0.003%` rather than appearing not to add up.
+
+Seconds run to a thousand before minutes take over, because a minute is a unit the reader has to
+convert back: `479 s` sits next to the run length and `7.98 min` does not. This replaced two
+formatters that disagreed about where to stop - one printed an eight-minute coarse total as
+`478505.87 ms`, the other existed to stop 40 seconds coming out as `40080.00 ms`.
+
 ## The operations table
 
 ```
                            |                    Load                    |               Spread                |               Calls                |          Trust
 Operation                  | Thread-time% v Thread-time Runnable / Wait | Wall-time Concurrency Workers  Pool |         Calls Thread-time per call |     Hits  Noise Over 1t
 ---------------------------+--------------------------------------------+-------------------------------------+------------------------------------+------------------------
-flushBatch                 |        40.308%    192.74 s   100.0% / 0.0% |   58.92 s        3.27       8     8 | 1,392,364,672             138.4 ns |   192556  0.23%   0.12%
-validateRecord             |        39.431%    188.55 s   100.0% / 0.0% |   58.82 s        3.21       8     8 | 1,392,364,672             135.4 ns |   188364  0.23%   0.04%
-parseRecord                |        11.276%     53.92 s   100.0% / 0.0% |   36.67 s        1.47       6     8 | 1,392,364,672              38.7 ns |    53866  0.43%   0.44%
-indexRecord                |         6.443%     30.81 s   100.0% / 0.0% |   24.13 s        1.28       5     8 | 1,392,364,672              22.1 ns |    30779  0.57%   0.01%
-request *                  |         2.542%     12.15 s   100.0% / 0.0% |   10.68 s        1.14       7     8 |    19,706,673             616.7 ns |    12141  0.91%       -
+flushBatch                 |          38.4%       183 s       100% / 0% |    58.4 s        3.14       8     8 | 1,483,486,016               124 ns |   183317 0.234%  0.034%
+validateRecord             |          37.7%       180 s       100% / 0% |    58.4 s        3.08       8     8 | 1,483,486,016               121 ns |   180044 0.236%  0.074%
+parseRecord                |          11.4%      54.3 s       100% / 0% |    36.4 s        1.49       6     8 | 1,483,486,016              36.6 ns |    54298 0.429%  0.004%
+indexRecord                |          7.58%      36.3 s       100% / 0% |    26.8 s        1.36       6     8 | 1,483,486,016              24.5 ns |    36240 0.525%      0%
+request *                  |          5.03%      24.1 s       100% / 0% |    20.0 s        1.20       7     8 |    20,998,546              1.15 us |    24033 0.645%       -
 ---------------------------+--------------------------------------------+-------------------------------------+------------------------------------+------------------------
   * a coarse operation, showing its OWN work - its full span is in the table below
 ```
@@ -324,13 +347,13 @@ means *not blocked*, not *executing*.
 
 ### `concurrency` is not parallelism, and not a property of your code
 
-`thread-time ÷ wall-time` is how many threads were inside an operation at the same time — `192.74 s`
-over `58.92 s` is 3.27. **Do the division for the reader**: a report about a threaded program should
+`thread-time ÷ wall-time` is how many threads were inside an operation at the same time — `183 s`
+over `58.4 s` is 3.14. **Do the division for the reader**: a report about a threaded program should
 not make a person compute whether it was threaded. That is why the column exists, after two failed
 names (`threads`, then `in flight`) and a spell with no column at all.
 
-**Why it matters:** `flushBatch` at `192.74 s` of thread-time is not three minutes of your life — the
-clock advanced `58.92 s` while it ran. Delete it entirely and you save the wall-time, not the
+**Why it matters:** `flushBatch` at `183 s` of thread-time is not three minutes of your life — the
+clock advanced `58.4 s` while it ran. Delete it entirely and you save the wall-time, not the
 thread-time.
 
 **It is `concurrency`, not `parallelism`**, and the difference is not pedantry. The number counts
@@ -342,7 +365,7 @@ itself only an upper bound on executing.
 
 **And it is a property of your load.** It tracks arrival rate below saturation — twice the clients,
 twice the number, not a line changed — and at the ceiling it stops tracking load and sits at the pool
-size. That is what `workers` and `pool` are for, and why they are beside it: `3.27` with `workers 8`
+size. That is what `workers` and `pool` are for, and why they are beside it: `3.14` with `workers 8`
 of a `pool` of 8 is *the pool is pinned inside this label*, which is a finding about the pool rather
 than the operation, while the same 3.27 with `workers 4` is a label that never used more than half
 of what it had.

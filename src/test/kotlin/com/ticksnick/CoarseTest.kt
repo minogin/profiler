@@ -447,7 +447,9 @@ class CoarseTest {
         val r = report(coarse = listOf(stat(count = 1_000_000, sumNanos = 200_000_000, hits = 200, running = 200)))
         assertEquals(listOf("req"), r.coarseTooSmall().map { it.name })
         val msg = coarseTooSmallMessage("req", 1_000_000, 200.0, r.coarseFloorNanosOf(r.coarse[0]))
-        assertTrue(msg.contains("200.0 ns"), "the message does not name the measured duration: $msg")
+        // "200 ns" and not "200.0 ns": durations print to three significant digits, so the fourth
+        // one - which for a sampled or bucketed number is noise - never reaches the page.
+        assertTrue(msg.contains("200 ns"), "the message does not name the measured duration: $msg")
         assertTrue(msg.contains("op(id)"), "the message does not say what to do instead: $msg")
     }
 

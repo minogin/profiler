@@ -562,7 +562,8 @@ class DutyReport internal constructor(
         out += subRow(
             "Bound",
             String.format(
-                Locale.ROOT, "at most %.2f pp of any share is a thread waiting rather than working", boundPp
+                Locale.ROOT, "at most %s pp of any share is a thread waiting rather than working",
+                threeDigits(boundPp)
             )
         )
         out += subRow(

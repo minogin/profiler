@@ -1198,6 +1198,35 @@ batching rather than more threads.
 **Related:** the same "how does this scale" question from the modelling end is item 35, and the
 serialization case is the sigma term named there.
 
+## 37. Own time in the coarse table, and the subtraction that must not be invited · open
+
+Andrey, after the merged table landed: *"probably in the coarse table we should show both - total
+and own time."* Right, and the obvious version is wrong in a way worth writing down before someone
+builds it.
+
+**The trap.** `Total` in the coarse table is the sum of **measured spans** - elapsed time per
+execution. Own time is **sampled thread-time**. Side by side they invite `Total - Own = delegated`,
+which holds only while each execution runs on one thread. Under fan-out it fails exactly where the
+coarse tier is most interesting: a request whose helpers work three threads for 10 ms has a span
+total of 10 ms and a thread-time of 30 ms, so the subtraction can come out negative.
+
+**The version that works.** Pair like with like - own thread-time against *inclusive* thread-time,
+both sampled, both already computed. The inclusive figure is on the line under the table, so it is
+one clause:
+
+```
+  request: 99.6% of the thread-time inside operations INCLUDING what it contains, 478 s of it,
+           of which 24.1 s (5.03%) was its own work
+```
+
+That also puts the reconciliation for the two `request` rows on one line: the 5.03% here is the
+5.03% in the table above, which is the number a reader needs when the merged row says concurrency
+1.00 and the parallelism line says four threads per execution.
+
+**Not a column.** Every column in the coarse table is a measured-span statistic; a sampled column
+among them is the mixed-provenance table that [plan.md](plan.md) argued against when the tiers were
+merged. Left open rather than built because the coarse table is about to be reworked wholesale.
+
 ## Promoted to plan.md
 
 **Phase 3.5** is item 9 above, reframed from detecting bad operations to bounding the error on every

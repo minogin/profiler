@@ -1787,6 +1787,11 @@ which, and whose values answer different questions: inclusive wall per execution
 thread-time per call. Those stay in the coarse table. `Over 1t` prints `-` for a coarse row for the
 same reason in reverse: it is a fine-tier threshold, and the percentiles below answer it exactly.
 
+**Both headings now say which time they are**, `ALL OPERATIONS - own time` and `COARSE OPERATIONS -
+inclusive time`, because the same operation appears in both with different numbers - `request` at
+5.03% of its own work in one and 99.6% including what it contains in the other - and two words at
+the place the eye lands is cheaper than a reader deciding one of them is a bug.
+
 **The one friction, accepted knowingly.** A coarse operation's `Concurrency` in the merged table is
 about its own work; the coarse table's `parallelism:` line is inclusive, over the whole span. In the
 sandbox that is 1.0 against 4.0 for the same name. Three things carry it: the two tables use
@@ -1795,6 +1800,65 @@ different words (the coarse table says *threads per execution* and *executions a
 the operation's own work. If it still reads as a contradiction in use, the fallback is to print the
 self figure beside the inclusive one in the coarse table - not done up front, for a confusion nobody
 has hit yet.
+
+## Three significant digits, everywhere · 2026-09-02
+
+Andrey, reading `12835.38 ms`: *we never need more than three meaningful digits.* Right, and the
+number was also evidence of a missing branch - `duration()` stopped at milliseconds, so every coarse
+total, mean and percentile above a second printed as a pile of them, an eight-minute total reading
+`478505.87 ms`.
+
+Both formatters now go through one ladder - ns, us, ms, s, then min above a thousand seconds and h
+above a thousand minutes - at three significant digits. `threadTime` survives as a name because it
+says which quantity a call site is printing, but it is `duration`. The two existed because one
+stopped too low and the other started too high; a ladder answers both and there is nothing left for
+a second implementation to do.
+
+Percentages follow the same rule, also Andrey's: `40.3%`, not `40.308%`. **Sorting and arithmetic use
+the full value; three digits is only what is shown.**
+
+Two details that are not obvious and were both found in the output:
+
+- **A rounded value moves up a unit rather than growing a fourth digit.** 999.7 ms is `1.00 s`, never
+  `1000 ms`, so the unit is chosen again after rounding.
+- **`100%` is reserved for a real 100.** Rounding 99.997% to `100%` printed `100% / 0.003%` for a
+  pair whose halves are supposed to add up on the page as well as in the arithmetic. Anything in
+  between now prints `>99.9%`.
+
+**Why three and not four.** The fourth digit is never evidence: a sampled share carries a noise floor
+printed two columns away - typically 0.2-0.5% - and the coarse percentiles come from a histogram
+that reports the top of a bucket, about 1%. `44.250%` invited comparisons between operations that
+differ by less than the error on either of them.
+
+## Next session: the coarse output · opened 2026-09-02
+
+Written as a handover, because the work is Andrey's to start and the context is a day old.
+
+**Where it stands.** The fine table became `ALL OPERATIONS` and now carries a starred row per coarse
+operation, on own time. The coarse table below it is unchanged from when it was built, and is the
+one part of the report Andrey has never worked through - his words: *"I will look into coarse output
+and 100% we will need to change it as I don't like it now."* So expect the shape to move, not just
+the wording.
+
+**What is already known to be wrong or missing there**, so the next session does not rediscover it:
+
+- **No self time**, so `Total` is inclusive and a parent always outranks its children -
+  [ideas.md](ideas.md) item 28, with the cross-thread race that makes it non-trivial. Note that the
+  merged table did **not** need this: its own-time figures are sampled, and item 28 is about
+  subtracting *measured spans*.
+- **The lines under the table carry three different things** - a share, a parallelism sentence, and
+  a "was made of" breakdown - and they were moved out of columns for a reason worth re-reading
+  before moving them back: two questions (*is one execution split across threads* / *how many
+  executions run at once*) were adjacent columns with nothing saying they differed.
+- **An own-time figure was proposed and not built** - [ideas.md](ideas.md) item 37, including the
+  trap that killed the obvious version.
+- **`Workers` and `Pool` are fine-tier columns.** The coarse equivalents would be threads per
+  execution, which is what the parallelism line already says in prose.
+
+**What not to break.** The share denominator is now `fineHits + coarseSelfHits` and the two
+partition; the coverage block reads `unlabelledHits`, which is `idleHits` minus the coarse self
+hits. A run labelled only with coarse spans used to report zero coverage, and that is the test case
+to keep re-running - the sandbox does exactly this today.
 
 ## Phase 7 — library surface · not started
 
