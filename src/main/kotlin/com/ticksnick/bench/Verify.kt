@@ -8,6 +8,41 @@ import kotlin.math.sqrt
 internal class Cell(val stepMillis: Double, val seconds: Int)
 
 /**
+ * The per-operation thread count, against the bench's own roster.
+ *
+ * Counts against counts, so it belongs to the same family as the fan-out conservation check and is
+ * clock-independent: every active worker runs the same graph, so every operation that was called at
+ * all was called by all of them, and the profiler should say so.
+ *
+ * **This check could not have found the defect it guards.** The denominator used to be the run's
+ * slot high-water mark, and on this workload - one pool, every thread doing everything - that is
+ * the same number, which is why it took a sandbox with a `main` thread beside a pool to expose it.
+ * What the check is for is the other direction: a regression in the counting, which is easy, since
+ * the count is assembled from two halves (live slots, and the fold that retires a dying one) that
+ * can each drop or double a thread on their own.
+ */
+internal fun checkThreads(bench: Bench, sampler: Sampler): Boolean {
+    val expected = bench.workers.count { w -> w.rootCalls.any { it > 0 } }
+    val offenders = (0 until Profiler.registeredCount())
+        .filter { sampler.sessionCalls(it) > 0 && sampler.sessionThreads(it) != expected }
+    if (offenders.isEmpty()) {
+        val n = (0 until Profiler.registeredCount()).count { sampler.sessionCalls(it) > 0 }
+        println("\nthreads per operation: all $n on $expected threads, matching the bench's own roster")
+        return true
+    }
+    println("\nTHREADS PER OPERATION DISAGREES WITH THE BENCH'S ROSTER of $expected working threads")
+    for (id in offenders) {
+        println(
+            String.format(
+                Locale.ROOT, "  %-22s %,15d calls, reported on %d threads",
+                Profiler.nameOf(id), sampler.sessionCalls(id), sampler.sessionThreads(id)
+            )
+        )
+    }
+    return false
+}
+
+/**
  * Four points spanning a 20x range of sample counts. That spread is the whole point: if the
  * sampler carries a bias, the error bar shrinks with samples while the bias does not, so the
  * disagreement measured in error bars grows by about sqrt(20) across this range. A narrower

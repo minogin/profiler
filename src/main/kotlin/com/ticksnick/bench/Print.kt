@@ -207,6 +207,7 @@ private fun printSampler(
                 id, Profiler.nameOf(id), sampler.counters[id], sampler.sessionCalls(id),
                 sampler.stuckHits[id], sampler.stuckInstances[id],
                 sampler.waitingHits[id], sampler.stuckWaitingHits[id], sampler.activeTicks[id],
+                sampler.sessionThreads(id),
             )
         },
         idleHits = sampler.counters[NO_OP_INDEX],

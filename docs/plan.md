@@ -1673,6 +1673,34 @@ numbers they qualify.
 reason zero-hit operations are folded: Calcite produces one warning per rule, and a section that runs
 to fifty entries teaches the reader to skip the section.
 
+## The `Threads` denominator is per operation · 2026-09-02
+
+`Concurrency / Threads` used to divide by `Report.threads` - the run's slot high-water mark - on
+every row. That is the pool an operation could spread over only when every thread does everything,
+which is true of the bench and of the four trials and false of the first sandbox that put a `main`
+thread beside a pool. Recorded because the column's meaning changed while its heading did not.
+
+**What it is now:** `OperationStat.threads`, the distinct threads that *called* the operation during
+the session. Callers rather than samples on purpose - a thread that entered once and was never
+sampled still ran it, and `1.00 / 1` should mean *serial by construction*, which is a fact about the
+code and not about the run.
+
+**How it is counted, and why it is free.** Live threads are read at `stop()` from the per-operation
+counters the hook writes anyway. Exiting threads are counted where their counters are already being
+folded into `retiredCounts` (`release`, `reclaimDeadSlots`) - the last point at which the identity of
+who contributed still exists. Nothing was added to the hot path.
+
+**Session-scoped by subtraction**, mirroring `sessionCalls`: the sampler snapshots the count at
+`start()`. This is what keeps the bench honest, since its warm-up runs on a separate set of workers
+that exit before the measured run - the same defect that `callsAtStart` exists to prevent, which
+once had the floor check accusing a 20 ns operation of being under 7.9 ns. The failure mode it
+costs, named rather than hidden: a thread that called the operation before `start()` **and** goes on
+calling it during the session is subtracted out. Threads created after `start()` are exact, which is
+every case the bench, the trials and the sandbox have.
+
+**Deliberately not built:** a per-slot snapshot that would make the cross-session case exact too. It
+is 32 KB of bitset in the sampler for a case nothing here exhibits.
+
 ## Phase 7 — library surface · not started
 
 What someone else has to touch to use this. The *placement essentials* were pulled forward into

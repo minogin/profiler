@@ -349,6 +349,16 @@ object Profiler {
     /** Calls from threads that have already exited, folded in so a report does not lose them. */
     private val retiredCounts = LongArray(MAX_OPERATIONS)
 
+    /**
+     * How many threads that have already exited had called each operation at least once.
+     *
+     * Counted at the moment a slot is folded away, because that is the last point at which the
+     * thread's own per-operation counters still exist: [retiredCounts] sums them and the identity
+     * of who contributed is gone one instruction later. One increment per exiting thread per
+     * operation it touched, on the thread's way out and never on the hot path.
+     */
+    private val retiredThreads = IntArray(MAX_OPERATIONS)
+
     @Volatile
     private var sampler: Sampler? = null
     private var startedAt: Long = 0
@@ -664,7 +674,13 @@ object Profiler {
         val s = local.get()
         if (s.index >= 0) slotByIndex.set(s.index, null)
         synchronized(retiredCounts) {
-            for (id in 0 until MAX_OPERATIONS) retiredCounts[id] += s.countOf(id)
+            for (id in 0 until MAX_OPERATIONS) {
+                val n = s.countOf(id)
+                if (n > 0) {
+                    retiredCounts[id] += n
+                    retiredThreads[id]++
+                }
+            }
         }
         retire(s.coarseAgg)
         // Removed from the walk list first, so the sampler cannot be reading this slot at the
@@ -706,7 +722,13 @@ object Profiler {
             if (s.thread.get() != null) continue
             if (!slotByIndex.compareAndSet(i, s, null)) continue
             synchronized(retiredCounts) {
-                for (id in 0 until MAX_OPERATIONS) retiredCounts[id] += s.countOf(id)
+                for (id in 0 until MAX_OPERATIONS) {
+                    val n = s.countOf(id)
+                    if (n > 0) {
+                        retiredCounts[id] += n
+                        retiredThreads[id]++
+                    }
+                }
             }
             retire(s.coarseAgg)
             freeIndexes.add(i)
@@ -723,6 +745,22 @@ object Profiler {
      * sampler and the duty walk use [forEachSlot], which does not.
      */
     fun slots(): List<OpSlot> = buildList { forEachSlot { add(it) } }
+
+    /**
+     * Distinct threads that have called an operation: live ones plus those that have exited.
+     *
+     * The denominator of the `Concurrency / Threads` column, and the reason it is a count of
+     * *callers* rather than of samples: a thread that entered the operation once and was never
+     * caught by the sampler still ran it, and an operation that only ever runs on one thread is a
+     * fact about the code rather than about the run. Free, because the per-operation call counters
+     * it reads are written by the hook anyway - nothing here is on the hot path.
+     */
+    internal fun threadsOf(id: Int): Int =
+        synchronized(retiredCounts) { retiredThreads[id] }.let { retired ->
+            var live = 0
+            forEachSlot { if (it.countOf(id) > 0) live++ }
+            retired + live
+        }
 
     /** Total calls of an operation: live threads plus those that have already exited. */
     internal fun callsOf(id: Int): Long =
@@ -763,7 +801,7 @@ object Profiler {
         val stats = (0 until registeredCount()).map { id ->
             OperationStat(
                 id, nameOf(id), s.counters[id], s.sessionCalls(id), s.stuckHits[id], s.stuckInstances[id],
-                s.waitingHits[id], s.stuckWaitingHits[id], s.activeTicks[id],
+                s.waitingHits[id], s.stuckWaitingHits[id], s.activeTicks[id], s.sessionThreads(id),
             )
         }
         // A label still open when the session ends is a leak by definition: nothing can close it

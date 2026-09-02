@@ -356,6 +356,24 @@ internal class Sampler(
     /** Calls made since this session began. See [callsAtStart]. */
     internal fun sessionCalls(id: Int): Long = (Profiler.callsOf(id) - callsAtStart[id]).coerceAtLeast(0)
 
+    /**
+     * Threads that had already called each operation when this session started, for the same reason
+     * as [callsAtStart]: the bench warms up on a separate set of workers that exit before the
+     * measured run, and counting them would report a thread count for work no sample could cover.
+     */
+    private val threadsAtStart = IntArray(MAX_OPERATIONS)
+
+    /**
+     * Distinct threads that have called an operation since this session began.
+     *
+     * A scalar difference, like [sessionCalls], which costs one failure mode worth naming: a thread
+     * that called the operation *before* sampling started and goes on calling it during the session
+     * is subtracted out and not counted again. Threads created after `start()` - the ordinary case,
+     * and every case the bench and the trials have - are exact.
+     */
+    internal fun sessionThreads(id: Int): Int =
+        (Profiler.threadsOf(id) - threadsAtStart[id]).coerceAtLeast(0)
+
     init {
         isDaemon = true
         priority = MAX_PRIORITY
@@ -364,6 +382,7 @@ internal class Sampler(
     override fun run() {
         // Before the first tick, so that no call is counted whose sample could not have been taken.
         for (id in 0 until MAX_OPERATIONS) callsAtStart[id] = Profiler.callsOf(id)
+        for (id in 0 until MAX_OPERATIONS) threadsAtStart[id] = Profiler.threadsOf(id)
         var next = System.nanoTime() + nextInterval()
         var prev = 0L
         var first = 0L

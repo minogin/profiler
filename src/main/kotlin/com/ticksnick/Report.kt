@@ -208,6 +208,8 @@ class OperationStat internal constructor(
     val stuckWaitingHits: Long = 0,
     /** Ticks at which at least one thread was inside this operation. */
     val activeTicks: Long = 0,
+    /** Distinct threads that called this operation during the session. See [Profiler.threadsOf]. */
+    val threads: Int = 0,
 ) {
     /** The fraction of this operation's occupancy spent inside executions longer than a tick. */
     val stuckShare: Double get() = if (hits == 0L) 0.0 else stuckHits.toDouble() / hits
@@ -588,7 +590,7 @@ class Report internal constructor(
     fun elapsedNanosOf(op: OperationStat): Double = op.activeTicks * stepNanos
 
     /**
-     * [OperationStat.inFlight] printed **over the threads it could have been**, as `3.28/8`.
+     * [OperationStat.inFlight] printed **over the threads that ever entered it**, as `3.28/8`.
      *
      * The denominator is not decoration and it is not there to save the reader an arithmetic step.
      * The numerator alone invites the one reading it cannot support — *"this operation used 3.28
@@ -597,16 +599,31 @@ class Report internal constructor(
      *
      * - **below saturation** it tracks the arrival rate, so twice the clients is twice the number
      *   and the code is unchanged;
-     * - **at the ceiling** it stops tracking the load at all and reports the pool size, because
-     *   there is nothing left to spread the work onto.
+     * - **at the ceiling** it stops tracking the load at all and reports how many threads there
+     *   were, because there is nothing left to spread the work onto.
      *
      * The ratio is the only part of the column that survives that objection: it says which of the
-     * two regimes produced the number. `3.28/8` is *tracking your load*; `7.9/8` is *the pool is
-     * pinned inside this label*, which is a finding — about the pool, not about the operation.
+     * two regimes produced the number. `3.28/8` is *tracking your load*; `7.9/8` is *every thread
+     * that runs this label is inside it at once*, which is a finding.
+     *
+     * **The denominator is per operation, and used not to be.** It was the run's own thread
+     * high-water mark, which is the pool size only on a workload where every thread does
+     * everything — the bench, which is where the column was designed. The first workload here with
+     * a `main` thread beside a pool broke it immediately: an operation that never left `main`
+     * printed `1.00 / 5`, measured against four threads that could not have entered it. A count of
+     * the threads that actually called it makes `1.00 / 1` say what it should have said all along,
+     * which is *this operation is serial by construction*. The run-wide count still exists, in the
+     * header line, where it is a fact about the run and is not pretending to be about a row.
      */
     fun inFlightOf(op: OperationStat): String {
         val n = op.inFlight
-        return if (n.isNaN()) "-" else String.format(Locale.ROOT, "%.2f / %d", n, threads)
+        return when {
+            n.isNaN() -> "-"
+            // Zero means the caller built this stat without a thread count - the bench's synthetic
+            // rows and the tests do - and a denominator of 0 would read as a defect in the run.
+            op.threads <= 0 -> String.format(Locale.ROOT, "%.2f", n)
+            else -> String.format(Locale.ROOT, "%.2f / %d", n, op.threads)
+        }
     }
 
     /** Thread-time spent inside any label. */

@@ -47,6 +47,42 @@ something to do, it graduates into [ideas.md](ideas.md) and is marked here as ha
 
 ---
 
+### `Threads` counted threads the operation had never run on
+*2026-09-02, Andrey, on a sandbox with a `main` thread and a pool of 4. **Fixed the same day.***
+
+*"Why does it show 5 threads for work2?"* - and then, when told the number was the run's own thread
+count: *"is there a real reason to have the overall thread count in the denominator? I have an app
+which runs in 1 thread, then runs highly concurrent stuff, then 1 thread again. Why would I ever be
+interested in that number?"*
+
+```
+work2   ...   1.83 / 5      <- 4 pool threads
+work1   ...   1.00 / 5      <- main only, and it still says 5
+```
+
+The denominator was `Report.threads`, the high-water mark of registered slots for the whole run. It
+is the pool size **only on a workload where every thread does everything** - which is the bench, and
+the bench is where the column was designed. The first workload here with a `main` thread beside a
+pool broke it at once: `work1` was measured against four threads that could not have entered it, and
+in Andrey's three-phase example both single-threaded phases would be measured against the peak of
+the concurrent one.
+
+The fix was cheaper than the argument: every slot already keeps per-operation call counters, so the
+threads that called an operation are known exactly. The only gap was threads that exit - `release()`
+and `reclaimDeadSlots()` fold their counters into the retired totals and lose who contributed - and
+both fold sites already loop over the operations, so counting them there costs nothing and happens
+on a thread that is leaving.
+
+```
+work2   ...   1.54 / 4
+work1   ...   1.00 / 1      <- serial by construction, and now it says so
+```
+
+The run-wide count still exists in the header (`x 5 threads`), where it is a fact about the run
+rather than one pretending to be about a row.
+
+---
+
 ### The floor warning was there, under the wrong heading
 *2026-09-02, Andrey, on a 1M-iteration loop in the sandbox. **Fixed the same day.***
 

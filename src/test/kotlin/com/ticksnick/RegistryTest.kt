@@ -1,5 +1,6 @@
 package com.ticksnick
 
+import java.util.concurrent.CountDownLatch
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -393,4 +394,93 @@ class RegistryTest {
             )
         }
     }
+
+    // ------------------------------------------------- threads per operation
+
+    /**
+     * The denominator of `Concurrency / Threads`, and the defect it was found by.
+     *
+     * It used to be the run's own slot high-water mark, printed identically on every row, so an
+     * operation that only ever ran on `main` was measured against a pool it could not enter. What
+     * the column has to be able to say is *this operation is serial by construction*, and that is
+     * a statement about one operation, not about the run.
+     */
+    @Test
+    fun `the thread count is per operation and not per run`() {
+        val serial = Profiler.registerFine("test:threads-serial")
+        val spread = Profiler.registerFine("test:threads-spread")
+
+        // All four threads are held alive across stop(), which is the live half of the count -
+        // every other test here lets its threads exit, and that goes through the retired half.
+        val called = CountDownLatch(4)
+        val until = CountDownLatch(1)
+        val workers = listOf(serial, spread, spread, spread).mapIndexed { i, id ->
+            Thread({
+                op(id) { }
+                called.countDown()
+                until.await()
+                Profiler.release()
+            }, "threads-worker-$i")
+        }
+
+        Profiler.start(stepMillis = 1.0, strict = false)
+        workers.forEach { it.start() }
+        called.await()
+        val r = Profiler.stop()
+        until.countDown()
+        workers.forEach { it.join() }
+
+        assertEquals(1, r.threadsOf("test:threads-serial"), "an operation on one thread did not say so")
+        assertEquals(3, r.threadsOf("test:threads-spread"), "an operation on three threads was miscounted")
+    }
+
+    /**
+     * The path where the number can silently vanish.
+     *
+     * A slot's per-operation counters are the only record of which operations its thread touched,
+     * and `release` folds them into the retired totals and loses the identity one instruction
+     * later. So the count has to be taken inside that fold; a test that only ever asked about live
+     * threads would pass against a version that never counted a departed one.
+     */
+    @Test
+    fun `threads that have exited are still counted`() {
+        val id = Profiler.registerFine("test:threads-retired")
+
+        Profiler.start(stepMillis = 1.0, strict = false)
+        repeat(3) { i ->
+            onOwnThread("retired-worker-$i") {
+                repeat(5) { op(id) { } }
+                Profiler.release()
+            }
+        }
+        val r = Profiler.stop()
+
+        assertEquals(3, r.threadsOf("test:threads-retired"), "threads that exited were lost")
+        assertEquals(15, r.operations.first { it.name == "test:threads-retired" }.calls)
+    }
+
+    /**
+     * Per session, for the reason `callsAtStart` exists.
+     *
+     * The bench warms up on a separate set of workers that exit before the measured run. Counting
+     * them would report threads for work no sample could have covered - the same mismatch that
+     * once had the floor check accusing a 20 ns operation of being under 7.9 ns, and the reason
+     * every count in a report is session-scoped rather than lifetime-scoped.
+     */
+    @Test
+    fun `a session does not count threads that ran before it`() {
+        val id = Profiler.registerFine("test:threads-warmup")
+
+        repeat(3) { i -> onOwnThread("warmup-worker-$i") { op(id) { }; Profiler.release() } }
+
+        Profiler.start(stepMillis = 1.0, strict = false)
+        onOwnThread("measured-worker") { op(id) { }; Profiler.release() }
+        val r = Profiler.stop()
+
+        assertEquals(1, r.threadsOf("test:threads-warmup"), "the session counted the warm-up's threads")
+    }
+
+    /** The row for one operation by name, since ids are shared with every other test in the JVM. */
+    private fun Report.threadsOf(name: String): Int =
+        operations.first { it.name == name }.threads
 }

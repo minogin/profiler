@@ -380,7 +380,10 @@ fun main(args: Array<String>) {
         // it. Only with both switches on: the coarse numbers need labels to be placed and a sampler
         // to have read them.
         val coarseOk = if (coarseLabels && sampler != null && labels) checkCoarse(bench, outcome, sampler, stepMillis) else true
-        val good = printVerdict(outcome, warmedUp) && coarseOk
+        // Counts against counts, so it holds whatever the machine was doing. Needs the labels to
+        // have been placed and the sampler to have snapshotted the roster at its own start.
+        val threadsOk = if (sampler != null && labels) checkThreads(bench, sampler) else true
+        val good = printVerdict(outcome, warmedUp) && coarseOk && threadsOk
         bench.stop()
         good
     }
