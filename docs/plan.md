@@ -1748,6 +1748,54 @@ comparison - against what the reader **intended** - is the one nothing else in t
 and it is the argument for the column: `Concurrency` cannot make it, since a mean of 1.1 is
 consistent with two workers or eight, and `Pool` cannot, since the threads exist either way.
 
+## One table for both tiers · 2026-09-02
+
+`FINE OPERATIONS` is now `ALL OPERATIONS` and carries a row per coarse operation as well, starred.
+Andrey's, from the premise this project had been repeating without following: *a coarse label gives
+you everything a fine one does and more*. If that is true, promoting an operation should not move it
+to a different table with different columns - which is the report's shape changing with the label
+rather than with the program.
+
+**What made it possible, and it is not what item 28 is about.** The blocker looked like
+inclusive-versus-self: coarse numbers are inclusive by construction, the fine table is a self-time
+ranking, and mixing them puts a parent above its own children with the column summing past 100%.
+That is true of the *measured spans* - subtracting a child's timed span from its parent's is item 28,
+with the cross-thread race it names. It is not true of the sampled numbers, which is all the table
+needs: the sampler already knows the innermost coarse type and whether a fine label is open, so
+**one counter** at a site that had both in hand gives the coarse operation's own work.
+
+- `coarseSelfHits[t]` - innermost coarse `t`, no fine label - with its runnable, active-tick, and
+  peak counterparts, all in the same branch.
+- `Pool` for a coarse row comes from the per-slot span aggregates, which `resetCoarse` already
+  scopes to the session, so it needs no snapshot the way the fine side does.
+
+**The partition is the whole argument.** A fine operation's hits are the samples where it was the
+innermost label; a coarse operation's self hits are the samples inside its span with no fine label.
+Disjoint, and together every labelled sample - so one share column ranks both tiers and adds to
+100%. In the demo: four fine operations at 40.3, 39.4, 11.3 and 6.4%, `request *` at 2.5%, and the
+`was made of` line under the coarse table reports the same 2.5% as its unlabelled share.
+
+**It fixed a bug nobody had noticed.** `labelledHits` was the fine sum, so time inside a coarse span
+with no fine label counted as *outside every operation*. A run labelled only with coarse spans
+reported **zero coverage**. The split is now `labelledHits = fineHits + coarseSelfHits` and
+`unlabelledHits = idleHits - coarseSelfHits`, with the coverage block reading the second.
+
+**One provenance per column.** Every column in the merged table is sampled, both tiers. The coarse
+tier knows two of them exactly - the measured span mean, and wall time as a union of measured
+intervals - and using them would make a column whose rows are exact or inferred with nothing saying
+which, and whose values answer different questions: inclusive wall per execution against self
+thread-time per call. Those stay in the coarse table. `Over 1t` prints `-` for a coarse row for the
+same reason in reverse: it is a fine-tier threshold, and the percentiles below answer it exactly.
+
+**The one friction, accepted knowingly.** A coarse operation's `Concurrency` in the merged table is
+about its own work; the coarse table's `parallelism:` line is inclusive, over the whole span. In the
+sandbox that is 1.0 against 4.0 for the same name. Three things carry it: the two tables use
+different words (the coarse table says *threads per execution* and *executions at once*, never
+`concurrency`), the `was made of` line reconciles them on screen, and the star's key says the row is
+the operation's own work. If it still reads as a contradiction in use, the fallback is to print the
+self figure beside the inclusive one in the coarse table - not done up front, for a confusion nobody
+has hit yet.
+
 ## Phase 7 — library surface · not started
 
 What someone else has to touch to use this. The *placement essentials* were pulled forward into

@@ -175,6 +175,33 @@ internal class Sampler(
     internal val coarseRunningHits = LongArray(MAX_COARSE_TYPES)
 
     /**
+     * Samples inside this coarse type, innermost, with **no fine label open**: the span's own work.
+     *
+     * The quantity that lets both tiers share one table. A fine operation's hits are self time by
+     * construction - the hook keeps only the innermost id - so fine hits partition the labelled
+     * samples between fine operations. These are the samples left over inside a span: work the
+     * coarse operation did itself rather than delegated to something also labelled. Fine hits and
+     * these are disjoint and together cover every labelled sample, so one share column can rank
+     * both tiers without double counting a parent and its children.
+     */
+    internal val coarseSelfHits = LongArray(MAX_COARSE_TYPES)
+
+    /** Of [coarseSelfHits], the ones whose thread was runnable. */
+    internal val coarseSelfRunningHits = LongArray(MAX_COARSE_TYPES)
+
+    /** Ticks at which at least one thread was doing this type's own work. */
+    internal val coarseSelfActiveTicks = LongArray(MAX_COARSE_TYPES)
+
+    /** The most threads seen doing this type's own work at one tick. See `Report.workersOf`. */
+    internal val coarseSelfPeak = IntArray(MAX_COARSE_TYPES)
+
+    /** As `seenAt`, for [coarseSelfActiveTicks]. */
+    private val coarseSelfSeenAt = LongArray(MAX_COARSE_TYPES) { -1L }
+
+    /** How many threads this tick has found doing each type's own work. See [coarseSelfPeak]. */
+    private val coarseSelfInsideThisTick = IntArray(MAX_COARSE_TYPES)
+
+    /**
      * Samples caught anywhere **under** this coarse type, itself included.
      *
      * The self/inclusive distinction the fine tier never needed: a fine operation is atomic, so its
@@ -478,6 +505,23 @@ internal class Sampler(
                     if (stillMounted != 1) {
                         coarseHits[t]++
                         if (!waiting) coarseRunningHits[t]++
+                        // No fine label open, so this sample is the span's own work rather than
+                        // something nested in it. Counted here, where the innermost context and the
+                        // fine label are both already in hand.
+                        if (c < 0) {
+                            coarseSelfHits[t]++
+                            if (!waiting) coarseSelfRunningHits[t]++
+                            if (coarseSelfSeenAt[t] != ticks) {
+                                coarseSelfSeenAt[t] = ticks
+                                coarseSelfActiveTicks[t]++
+                                coarseSelfInsideThisTick[t] = 1
+                            } else {
+                                coarseSelfInsideThisTick[t]++
+                            }
+                            if (coarseSelfInsideThisTick[t] > coarseSelfPeak[t]) {
+                                coarseSelfPeak[t] = coarseSelfInsideThisTick[t]
+                            }
+                        }
                     }
                     val fine = if (c < 0) NO_OP_INDEX else c
                     // Everything else is credited up the chain, each type at most once per sample.

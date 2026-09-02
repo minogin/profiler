@@ -244,23 +244,33 @@ A name that carries its own caveat needs no paragraph, and unlike a paragraph it
 tenth run. A column that needs a paragraph *and* divides two of its neighbours does not need to
 exist.
 
-## The table
+## The operations table
 
 ```
                            |                    Load                    |               Spread                |               Calls                |          Trust
 Operation                  | Thread-time% v Thread-time Runnable / Wait | Wall-time Concurrency Workers  Pool |         Calls Thread-time per call |     Hits  Noise Over 1t
 ---------------------------+--------------------------------------------+-------------------------------------+------------------------------------+------------------------
-flushBatch                 |        44.250%     38.54 s   100.0% / 0.0% |   11.75 s        3.28       8     8 |   288,514,362             133.6 ns |    38319  0.51%   0.01%
-validateRecord             |        41.222%     35.91 s   100.0% / 0.0% |   11.68 s        3.07       8     8 |   288,514,362             124.5 ns |    35697  0.53%   0.00%
-parseRecord                |         9.478%      8.26 s    99.7% / 0.3% |    6.14 s        1.34       6     8 |   288,514,362              28.6 ns |     8208  1.10%   0.27%
-indexRecord                |         5.050%      4.40 s   100.0% / 0.0% |    3.73 s        1.18       5     8 |   288,514,362              15.2 ns |     4373  1.51%   0.05%
+flushBatch                 |        40.308%    192.74 s   100.0% / 0.0% |   58.92 s        3.27       8     8 | 1,392,364,672             138.4 ns |   192556  0.23%   0.12%
+validateRecord             |        39.431%    188.55 s   100.0% / 0.0% |   58.82 s        3.21       8     8 | 1,392,364,672             135.4 ns |   188364  0.23%   0.04%
+parseRecord                |        11.276%     53.92 s   100.0% / 0.0% |   36.67 s        1.47       6     8 | 1,392,364,672              38.7 ns |    53866  0.43%   0.44%
+indexRecord                |         6.443%     30.81 s   100.0% / 0.0% |   24.13 s        1.28       5     8 | 1,392,364,672              22.1 ns |    30779  0.57%   0.01%
+request *                  |         2.542%     12.15 s   100.0% / 0.0% |   10.68 s        1.14       7     8 |    19,706,673             616.7 ns |    12141  0.91%       -
 ---------------------------+--------------------------------------------+-------------------------------------+------------------------------------+------------------------
+  * a coarse operation, showing its OWN work - its full span is in the table below
 ```
 
-*(`Workers` and `Pool` above are reconstructed: this example comes from a run that predates both
-columns, and every other number in it is that run's. Eight threads all running the same graph is
-what makes 8 the right pool, and the right `Workers` for the two operations that hold most of the
-time.)*
+**Both tiers are in one table, and the shares add to 100%.** A coarse label collects everything a
+fine one does and more, so an operation that is promoted should not vanish into a different table
+with different columns - the report's shape would be changing with the label rather than with the
+program. What makes one table honest is that the hits partition: a fine row's samples are the ones
+where it was the innermost label, a starred coarse row's are the samples inside its span with **no
+fine label open** - its own work - and no sample is counted twice. `request` above did 2.542% of the
+labelled work itself and delegated the rest to the four operations above it, which is the same
+2.5% the *was made of* line reports under the coarse table.
+
+An **inclusive** coarse number could not share this column: `request` covers 99.5% of the run's
+labelled time, so it would outrank every operation it contains and the column would sum to about
+200%. The inclusive view is the coarse table's job, below.
 
 **The columns are grouped, with bars between the groups and a band naming them** — `Load`
 (thread-time% through runnable/wait), `Spread` (wall-time and concurrency), `Trust` (hits, noise,
@@ -314,13 +324,13 @@ means *not blocked*, not *executing*.
 
 ### `concurrency` is not parallelism, and not a property of your code
 
-`thread-time ÷ wall-time` is how many threads were inside an operation at the same time — `38.54 s`
-over `11.75 s` is 3.28. **Do the division for the reader**: a report about a threaded program should
+`thread-time ÷ wall-time` is how many threads were inside an operation at the same time — `192.74 s`
+over `58.92 s` is 3.27. **Do the division for the reader**: a report about a threaded program should
 not make a person compute whether it was threaded. That is why the column exists, after two failed
 names (`threads`, then `in flight`) and a spell with no column at all.
 
-**Why it matters:** `flushBatch` at `38.54 s` of thread-time is not 38 seconds of your life — the
-clock advanced `11.75 s` while it ran. Delete it entirely and you save the wall-time, not the
+**Why it matters:** `flushBatch` at `192.74 s` of thread-time is not three minutes of your life — the
+clock advanced `58.92 s` while it ran. Delete it entirely and you save the wall-time, not the
 thread-time.
 
 **It is `concurrency`, not `parallelism`**, and the difference is not pedantry. The number counts
@@ -331,9 +341,11 @@ Multiply the two columns if you want that number; the report does not print it, 
 itself only an upper bound on executing.
 
 **And it is a property of your load.** It tracks arrival rate below saturation — twice the clients,
-twice the number, not a line changed — and at the ceiling it stops tracking load and reports the pool
-size. That is what the denominator is for: `3.28 / 8` is *tracking your load*; `7.9 / 8` is *the pool
-is pinned inside this label*, which is a finding about the pool, not the operation.
+twice the number, not a line changed — and at the ceiling it stops tracking load and sits at the pool
+size. That is what `workers` and `pool` are for, and why they are beside it: `3.27` with `workers 8`
+of a `pool` of 8 is *the pool is pinned inside this label*, which is a finding about the pool rather
+than the operation, while the same 3.27 with `workers 4` is a label that never used more than half
+of what it had.
 
 **One more thing it is not:** one execution split across threads. A fine operation is an integer in a
 thread's slot and never leaves the thread that entered it, so three threads inside the label means

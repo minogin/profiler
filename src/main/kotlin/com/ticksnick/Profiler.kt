@@ -432,12 +432,22 @@ object Profiler {
      */
     private val retiredCoarse = arrayOfNulls<CoarseAgg>(MAX_COARSE_TYPES)
 
+    /**
+     * Threads that ran an execution of each coarse type and have since exited.
+     *
+     * The coarse half of [threadsOf], and session-scoped for free: [resetCoarse] clears it at the
+     * start of every session, where the fine side has to snapshot and subtract because its counters
+     * are cumulative.
+     */
+    private val retiredCoarseThreads = IntArray(MAX_COARSE_TYPES)
+
     /** Folds one departing thread's span statistics into [retiredCoarse]. */
     private fun retire(aggs: Array<CoarseAgg?>?) {
         if (aggs == null) return
         synchronized(retiredCoarse) {
             for (t in 0 until MAX_COARSE_TYPES) {
                 val a = aggs[t] ?: continue
+                if (a.count > 0) retiredCoarseThreads[t]++
                 val into = retiredCoarse[t] ?: CoarseAgg(t).also { retiredCoarse[t] = it }
                 into.mergeFrom(a)
             }
@@ -486,9 +496,30 @@ object Profiler {
      * count came out 11.06% high, which is precisely the warm-up.
      */
     internal fun resetCoarse() {
-        synchronized(retiredCoarse) { for (t in 0 until MAX_COARSE_TYPES) retiredCoarse[t] = null }
+        synchronized(retiredCoarse) {
+            for (t in 0 until MAX_COARSE_TYPES) {
+                retiredCoarse[t] = null
+                retiredCoarseThreads[t] = 0
+            }
+        }
         forEachSlot { s -> s.coarseAgg?.forEach { it?.reset() } }
     }
+
+    /**
+     * Distinct threads that ran an execution of coarse type [t]: live ones plus those that exited.
+     *
+     * The `Pool` column for a coarse row, and exact for the same reason the fine one is - it counts
+     * threads that *ran* the operation rather than threads a sample happened to catch inside it.
+     */
+    internal fun coarseThreadsOf(t: Int): Int =
+        synchronized(retiredCoarse) { retiredCoarseThreads[t] }.let { retired ->
+            var live = 0
+            forEachSlot { s ->
+                val a = s.coarseAgg?.get(t)
+                if (a != null && a.count > 0) live++
+            }
+            retired + live
+        }
 
     /** Threads inside a coarse execution right now, which at the end of a session is a leak. */
     internal fun openContexts(): Int {
@@ -821,6 +852,11 @@ object Profiler {
                 spanMaxNanos = a?.maxNanos ?: 0L,
                 hist = a?.hist ?: LongArray(SpanHistogram.BUCKETS),
                 hits = s.coarseHits[t],
+                selfHits = s.coarseSelfHits[t],
+                selfRunningHits = s.coarseSelfRunningHits[t],
+                selfActiveTicks = s.coarseSelfActiveTicks[t],
+                selfPeak = s.coarseSelfPeak[t],
+                threads = coarseThreadsOf(t),
                 runningHits = s.coarseRunningHits[t],
                 inclusiveHits = s.coarseInclusiveHits[t],
                 runningInclusiveHits = s.coarseRunningInclusiveHits[t],
