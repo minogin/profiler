@@ -149,6 +149,19 @@ internal class Sampler(
     internal val activeTicks = LongArray(MAX_OPERATIONS)
 
     /**
+     * The most threads ever seen inside an operation at one tick.
+     *
+     * The mean concurrency beside it - `hits / activeTicks` - cannot say whether three threads sat
+     * inside throughout or six were there half the time, and those are different programs. A peak
+     * is a lower bound by construction, since a burst between two ticks is a burst nobody saw, and
+     * it inherits the same noise floor as every other sampled number here.
+     */
+    internal val peakInside = IntArray(MAX_OPERATIONS)
+
+    /** How many threads this tick has found inside each operation so far. See [peakInside]. */
+    private val insideThisTick = IntArray(MAX_OPERATIONS)
+
+    /**
      * The tick at which each operation was last seen, so [activeTicks] counts ticks and not slots.
      * A stamp rather than a flag array cleared each tick: one write when an operation first appears
      * in a tick, and nothing at all for the operations that did not.
@@ -423,7 +436,13 @@ internal class Sampler(
                     if (seenAt[c] != ticks) {
                         seenAt[c] = ticks
                         activeTicks[c]++
+                        insideThisTick[c] = 1
+                    } else {
+                        insideThisTick[c]++
                     }
+                    // Two array writes on the sampling thread, inside a walk that is already
+                    // reading every slot. The application's hook is untouched.
+                    if (insideThisTick[c] > peakInside[c]) peakInside[c] = insideThisTick[c]
                     if (waiting) waitingHits[c]++
                 } else if (waiting) {
                     idleWaitingHits++

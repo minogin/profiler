@@ -47,6 +47,32 @@ something to do, it graduates into [ideas.md](ideas.md) and is marked here as ha
 
 ---
 
+### `Workers 2` when three were dispatched, and the tool could not say why
+*2026-09-02, Andrey, on the pool sandbox. **Recorded as [ideas.md](ideas.md) item 36.***
+
+The new column did its job on the first read - *"workers 2: I planned 3 workers, but there was only
+2, something is off"* - and then the report had nothing further to offer. Three things produce that
+number and it prints the same word for each: the overlap was too brief for any tick to catch, the
+threads are serialized by contention, or the work is smaller than the cost of handing it to another
+thread.
+
+It was the third, and Andrey's explanation is the one the tool should have been able to reach: *the
+op is so tiny that it takes the same or less than the thread work handover, so what looks like
+multithreading is effectively serialized - before a new thread even gets the work, the previous one
+is over.*
+
+Two runs of the same sandbox in the same session, differing only in the size of the body:
+
+| work per call | Concurrency | Workers | Pool |
+|---|---|---|---|
+| ~200 ns loop | 1.01 | 2 | 4 |
+| 691 ms loop | 2.99 | 3 | 4 |
+
+Same pool, same three tasks per round. The wide-pool-that-never-overlaps case is worth naming in the
+report, and the numbers it would take are already on the row.
+
+---
+
 ### `Threads` counted threads the operation had never run on
 *2026-09-02, Andrey, on a sandbox with a `main` thread and a pool of 4. **Fixed the same day.***
 

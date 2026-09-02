@@ -1153,6 +1153,51 @@ the headline? Does anyone believe a three-parameter fit on five noisy points? An
 useful half is much smaller: print the per-operation table *at two thread counts side by side* and
 let the reader see which label grew, which is item 1's counterfactual shape without the model.
 
+## 36. `Workers` is a lower bound and the row does not say so · open
+
+The `Workers` column invites one specific reading, which is the argument for having it: *I
+dispatched three, it says two, something is off.* The reading is right often enough to be worth
+printing - and it can also be manufactured by the sampler, because `Workers` is `max(k)` over ticks
+and two threads that overlap for 3% of a run will frequently show 1. The evidence that would settle
+it is already on the row - `Hits` and `Noise`, two columns to the right - and nothing connects them.
+The serialization warning is gated at `MIN_HITS_FOR_SERIAL` for exactly this reason; the column
+itself is gated at nothing.
+
+**Three different things produce a low `Workers`, and the column says the same word for all of
+them.**
+
+1. **Undersampling.** The overlap was real and brief, and no tick landed in it.
+2. **Serialization.** Threads queue through one at a time - a lock, or a single-threaded stage. This
+   is the one the warning names.
+3. **The work is shorter than the handover.** Andrey's, from the sandbox: *"as the op is super tiny
+   it takes the same or less than the thread work handover, so what seems to be multithreading is
+   effectively serialized - before a new thread even gets the work, the previous one is over."* The
+   pool is wide, the tasks are dispatched, and they still never overlap, because a `submit` costs
+   more than the body.
+
+**Two runs of the same sandbox in one session are the evidence for the third**, and they differ only
+in the size of the work inside the label:
+
+| work per call | Concurrency | Workers | Pool |
+|---|---|---|---|
+| ~200 ns loop | 1.01 | 2 | 4 |
+| 691 ms loop | 2.99 | 3 | 4 |
+
+Same structure, same pool, three tasks dispatched per round in both. With a big enough body the pool
+parallelizes exactly as written; with a tiny one it degenerates to a serial queue with extra steps.
+That is a real finding about a real program, and a profiler that could name it would be earning its
+place - the numbers it needs are the ones already in the row.
+
+**Ways out, none costed yet.** Print `>= 2` rather than `2` when the hits cannot exclude more.
+Report the share of active ticks with two or more threads inside rather than only the maximum, which
+separates *brief overlap* from *never overlapped* without a threshold. Or say the third case out
+loud when it is visible - an operation whose `Thread-time per call` is at or under the cost of a
+dispatch, spread across a `Pool` larger than its `Workers`, is dispatch-bound, and the fix is
+batching rather than more threads.
+
+**Related:** the same "how does this scale" question from the modelling end is item 35, and the
+serialization case is the sigma term named there.
+
 ## Promoted to plan.md
 
 **Phase 3.5** is item 9 above, reframed from detecting bad operations to bounding the error on every

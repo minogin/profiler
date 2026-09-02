@@ -247,15 +247,20 @@ exist.
 ## The table
 
 ```
-                           |                    Load                    |             Spread              |               Calls                |          Trust
-Operation                  | Thread-time% v Thread-time Runnable / Wait | Wall-time Concurrency / Threads |         Calls Thread-time per call |     Hits  Noise Over 1t
----------------------------+--------------------------------------------+---------------------------------+------------------------------------+------------------------
-flushBatch                 |        44.250%     38.54 s   100.0% / 0.0% |   11.75 s              3.28 / 8 |   288,514,362             133.6 ns |    38319  0.51%   0.01%
-validateRecord             |        41.222%     35.91 s   100.0% / 0.0% |   11.68 s              3.07 / 8 |   288,514,362             124.5 ns |    35697  0.53%   0.00%
-parseRecord                |         9.478%      8.26 s    99.7% / 0.3% |    6.14 s              1.34 / 8 |   288,514,362              28.6 ns |     8208  1.10%   0.27%
-indexRecord                |         5.050%      4.40 s   100.0% / 0.0% |    3.73 s              1.18 / 8 |   288,514,362              15.2 ns |     4373  1.51%   0.05%
----------------------------+--------------------------------------------+---------------------------------+------------------------------------+------------------------
+                           |                    Load                    |               Spread                |               Calls                |          Trust
+Operation                  | Thread-time% v Thread-time Runnable / Wait | Wall-time Concurrency Workers  Pool |         Calls Thread-time per call |     Hits  Noise Over 1t
+---------------------------+--------------------------------------------+-------------------------------------+------------------------------------+------------------------
+flushBatch                 |        44.250%     38.54 s   100.0% / 0.0% |   11.75 s        3.28       8     8 |   288,514,362             133.6 ns |    38319  0.51%   0.01%
+validateRecord             |        41.222%     35.91 s   100.0% / 0.0% |   11.68 s        3.07       8     8 |   288,514,362             124.5 ns |    35697  0.53%   0.00%
+parseRecord                |         9.478%      8.26 s    99.7% / 0.3% |    6.14 s        1.34       6     8 |   288,514,362              28.6 ns |     8208  1.10%   0.27%
+indexRecord                |         5.050%      4.40 s   100.0% / 0.0% |    3.73 s        1.18       5     8 |   288,514,362              15.2 ns |     4373  1.51%   0.05%
+---------------------------+--------------------------------------------+-------------------------------------+------------------------------------+------------------------
 ```
+
+*(`Workers` and `Pool` above are reconstructed: this example comes from a run that predates both
+columns, and every other number in it is that run's. Eight threads all running the same graph is
+what makes 8 the right pool, and the right `Workers` for the two operations that hold most of the
+time.)*
 
 **The columns are grouped, with bars between the groups and a band naming them** — `Load`
 (thread-time% through runnable/wait), `Spread` (wall-time and concurrency), `Trust` (hits, noise,
@@ -275,7 +280,9 @@ out.
 | **thread-time** | `hits × step`, summed across threads | **absolute**, so unlike `thread-time%` it does not move when a label is added, moved or removed. This is the column to compare between two runs |
 | **runnable / wait** | the two halves of the `thread-time` beside it, summing to 100% | printed as a pair because a share on its own does not say whether it is *part of* thread-time or *on top of* it, and no unit settles that. **`runnable` is not `working`** — see below |
 | **wall-time** | wall clock with at least one thread inside | not latency: it is every execution's interval unioned, so it says the operation had *somebody* in it for this long and nothing about any single execution |
-| **concurrency / threads** | `thread-time ÷ wall-time`, over **the distinct threads that called this operation** — **how many threads were inside it at once**, running or parked. The denominator is per operation, not the run's thread count: `1.00 / 1` is an operation that only ever runs on one thread, which is a fact about your code, and `7.9 / 8` is every thread that runs it being inside it at once | **not parallelism, and not a property of your code** — see below. It is what turns a big thread-time back into real cost: 100 s of waiting at a concurrency of 15 is a convoy to break up; at 1.7 it is steady contention to design out |
+| **concurrency** | `thread-time ÷ wall-time` — **the mean number of threads inside this operation** while anybody was. The step cancels: the numerator is thread-ticks and the denominator is ticks, so the ratio is a count | **not parallelism, and not a property of your code** — see below. It is what turns a big thread-time back into real cost: 100 s of waiting at a concurrency of 15 is a convoy to break up; at 1.7 it is steady contention to design out |
+| **workers** | **how many threads were ever actually working on this at once** — the most found inside at one tick | the column to compare against what you *dispatched*: three submitted and `workers 2` means something is off, and neither of its neighbours can tell you that - a `concurrency` of 1.1 is consistent with two workers or eight, and `pool` counts threads that exist rather than threads that overlapped. Detected rather than measured, so it is a **lower bound**: a burst that starts and ends between two ticks is a burst nobody saw |
+| **pool** | the distinct threads that ever **called** this operation. Counted by the hook, so unlike its two neighbours this one is exact | `workers 1` with `pool 8` is a serialization point - eight threads queueing through one at a time - and the report says so in a warning. It counts the pool's threads *that were used*: a `ThreadPoolExecutor` opens a new core thread on every submit until the core size is reached, idle workers or not, so a pool of four running three tasks at a time still reaches 4. On a thread-per-task workload it reads ten thousand, which is what that deployment is | **not parallelism, and not a property of your code** — see below. It is what turns a big thread-time back into real cost: 100 s of waiting at a concurrency of 15 is a convoy to break up; at 1.7 it is steady contention to design out |
 | **calls** | exact, counted by the hook | a share cannot tell *200M calls at 8 ns* from *1000 calls at 1.6 ms*, and those want opposite fixes |
 | **hits** | samples that caught this operation | the evidence behind the share |
 | **noise** | `1/√hits` — the error chance alone gives | **if two rows differ by less than their noise, they are not ranked, they are tied** |

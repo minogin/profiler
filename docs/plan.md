@@ -1701,6 +1701,53 @@ every case the bench, the trials and the sandbox have.
 **Deliberately not built:** a per-slot snapshot that would make the cross-session case exact too. It
 is 32 KB of bitset in the sampler for a case nothing here exhibits.
 
+## `Concurrency`, `Workers`, `Pool` · 2026-09-02
+
+Three columns where there was one pair, after three tries at the same question - *how did this
+operation use threads?* Written down because two of the three answers were true numbers that
+answered something else, and the next person to look at the column will reach for them again.
+
+1. **`Concurrency / Threads`, threads being the run's slot high-water mark.** Right only where every
+   thread does everything, which is the bench and all four trials.
+2. **`Concurrency / Threads`, threads being the distinct callers.** Exact, and still not about
+   parallelism: a sandbox pool of four running three tasks at a time printed `3.00 / 4`, where the 4
+   is a `ThreadPoolExecutor` detail - it opens a new core thread on every submit until the core size
+   is reached, idle workers or not. Andrey: *"it does not say anything about how we actually
+   parallelize the work, and in this case we always run only 3 threads."*
+3. **`Concurrency / Peak`.** The maximum is the right third number, but the pair is wrong: it reads
+   as the name of one quantity - peak concurrency - while the number to its left is a mean, and a
+   fractional average and an integer maximum are not two views of one whole the way `Runnable /
+   Wait` is.
+
+**The shape that survived:** `Concurrency` (mean threads inside), `Workers` (most at one tick),
+`Pool` (distinct threads that ever called it). No slash between them - each is its own measure with
+its own heading. The names are Andrey's, and they ended an argument that better arguments had not:
+`Peak` invites *peak of what*, and `Threads` beside a column already about threads says nothing.
+
+**Concurrency is a count, which the ratio hides.** `thread-time / wall-time = hits / activeTicks`,
+and `hits` is the sum of threads-inside over ticks while `activeTicks` counts them, so the ratio is
+`mean(k)` and `Workers` is `max(k)` of the same series. Worth stating because "concurrency is not a
+number of threads at all" is a reasonable reading of a ratio of two times, and it is wrong.
+
+**What `Workers` costs:** two array writes per labelled slot per tick, on the sampling thread,
+inside a walk that already reads every slot. The hook is untouched. It is a lower bound, like every
+sampled number, so the serialization warning it feeds asks for `MIN_HITS_FOR_SERIAL` (25) hits
+first - `Workers 1` from a handful of samples is what a *short* operation looks like, not a
+serialized one.
+
+**The naming objections, and why they did not survive.** Two were raised against `Workers` and
+`Pool` and both were wrong. *That `Workers` says nothing about "at once", where `Max` or `Peak`
+would* - backwards: `Max` names a statistic and leaves the noun to the reader, while `Workers` names
+what was counted, and "detected" is a more honest word for a sampled maximum than "peak" is. *That
+`Pool` would lie on a thread-per-task workload by printing ten thousand* - that deployment really
+does have ten thousand threads, and printing it describes the shape correctly.
+
+**What the three columns are for, in one reading:** *concurrency 1.1, so concurrency here is poor;
+workers 2, but I dispatched 3, so something is off; pool 4, which is what I configured.* The middle
+comparison - against what the reader **intended** - is the one nothing else in the report supports,
+and it is the argument for the column: `Concurrency` cannot make it, since a mean of 1.1 is
+consistent with two workers or eight, and `Pool` cannot, since the threads exist either way.
+
 ## Phase 7 — library surface · not started
 
 What someone else has to touch to use this. The *placement essentials* were pulled forward into

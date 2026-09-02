@@ -210,6 +210,8 @@ class OperationStat internal constructor(
     val activeTicks: Long = 0,
     /** Distinct threads that called this operation during the session. See [Profiler.threadsOf]. */
     val threads: Int = 0,
+    /** The most threads seen inside it at one tick. See [Sampler.peakInside]. */
+    val peakInside: Int = 0,
 ) {
     /** The fraction of this operation's occupancy spent inside executions longer than a tick. */
     val stuckShare: Double get() = if (hits == 0L) 0.0 else stuckHits.toDouble() / hits
@@ -617,14 +619,51 @@ class Report internal constructor(
      */
     fun inFlightOf(op: OperationStat): String {
         val n = op.inFlight
-        return when {
-            n.isNaN() -> "-"
-            // Zero means the caller built this stat without a thread count - the bench's synthetic
-            // rows and the tests do - and a denominator of 0 would read as a defect in the run.
-            op.threads <= 0 -> String.format(Locale.ROOT, "%.2f", n)
-            else -> String.format(Locale.ROOT, "%.2f / %d", n, op.threads)
-        }
+        return if (n.isNaN()) "-" else String.format(Locale.ROOT, "%.2f", n)
     }
+
+    /**
+     * The `Workers` column: **how many threads were ever actually working on this at once.**
+     *
+     * The question it answers is the one a reader brings with them - *I dispatched three, how many
+     * ran?* - and nothing else in the table can answer it. `Concurrency` cannot: a mean of 1.1 is
+     * consistent with two workers or eight. `Pool` cannot: the threads exist either way. A row
+     * reading `1.10  2  4` says the pool is four, at most two were ever in here together, and on
+     * average barely one - and if three were dispatched, something is off.
+     *
+     * Mechanically it is `max(k)` where `k` is the threads found inside at one tick, the same
+     * series whose mean is `Concurrency`. Detected rather than measured, so it is a lower bound: a
+     * burst that begins and ends between two ticks is a burst nobody saw.
+     */
+    fun workersOf(op: OperationStat): String =
+        if (op.peakInside <= 0) "-" else op.peakInside.toString()
+
+    /**
+     * The `Pool` column: distinct threads that ever *called* the operation.
+     *
+     * Counted by the hook rather than sampled, so unlike the two columns beside it this one is
+     * exact - it counts callers, and a thread that entered once and was never sampled still ran it.
+     *
+     * It is the pool, and that holds in the cases that look like exceptions: a thread-per-task
+     * workload really does have ten thousand of them, which is what virtual threads are for, and a
+     * label fed by two pools really is run by both. What it counts is the threads that *were used*,
+     * which is why a `ThreadPoolExecutor` of four reaches 4 while never running more than three
+     * tasks at once - it opens a new core thread on every submit until the core size is reached.
+     */
+    fun poolOf(op: OperationStat): String = if (op.threads <= 0) "-" else op.threads.toString()
+
+    /**
+     * Operations every thread queues through one at a time.
+     *
+     * `Workers 1` beside `Pool 8` is a serialization point: eight threads run it and no two are
+     * ever inside together, which is the contention term of a scalability model showing up in a
+     * table of shares. It is a *warning* and not a verdict because `Workers` is sampled - a burst
+     * between two ticks is a burst nobody saw - so it asks for enough hits that a second thread
+     * would have been caught if there had been one.
+     */
+    fun serialised(): List<OperationStat> = operations
+        .filter { it.threads > 1 && it.peakInside == 1 && it.hits >= MIN_HITS_FOR_SERIAL }
+        .sortedByDescending { it.threads }
 
     /** Thread-time spent inside any label. */
     val labelledNanos: Double get() = labelledHits * stepNanos
@@ -1348,6 +1387,12 @@ class Report internal constructor(
                     duration(impliedNanosOf(op))
                 ) + "\n" + verdictFor(op)
             )
+            // The `Workers` and `Pool` columns, read together and said out loud.
+            for (op in serialised()) add(
+                "${op.name}: ${plural(op.threads.toLong(), "thread")} ran this operation and no two " +
+                        "were ever inside it at once.\nEvery thread that enters waits for the last " +
+                        "one to leave, so this is a serialization point rather than parallel work."
+            )
             // The other end of the same question, and a warning rather than a verdict: a label
             // below the floor cannot move a ranking, so the cost of being wrong about one is the
             // loudest failure this tool has — stopping a run that was fine. It did exactly that in
@@ -1501,7 +1546,7 @@ class Report internal constructor(
         if (operations.any { it.hits > 0 }) appendLine(
             band(
                 FINE_COLUMNS, FINE_BREAKS,
-                1..3 to "Load", 4..5 to "Spread", 6..7 to "Calls", 8..10 to "Trust"
+                1..3 to "Load", 4..7 to "Spread", 8..9 to "Calls", 10..12 to "Trust"
             )
         )
         if (operations.any { it.hits > 0 }) appendLine(
@@ -1517,7 +1562,7 @@ class Report internal constructor(
                 // had differed - 20/14 against 26/8 - so that `Thread-time% v` could sit over an
                 // 8-wide number without shifting everything after it, and that trick is invisible
                 // until a vertical line is drawn through it and comes out crooked.
-                Locale.ROOT, "%-26s | %14s %11s %15s | %9s %21s | %13s %20s | %8s %6s %7s",
+                Locale.ROOT, "%-26s | %14s %11s %15s | %9s %11s %7s %5s | %13s %20s | %8s %6s %7s",
                 // `occupancy%` and not `share`, because it is the same quantity as the column beside
                 // it — one relative, one absolute. Calling one of them `share` invented a
                 // distinction that does not exist and hid the one that does: neither is CPU. A
@@ -1563,8 +1608,28 @@ class Report internal constructor(
                 // needs them executing. The run that asked for this column is the argument - two
                 // threads inside `work1` at 7.2% runnable, so concurrency 2.00 and a parallelism of
                 // about 0.14, and calling the 2.00 parallelism would have been flatly false.
+                //
+                // `Concurrency`, `Workers`, `Pool` - three columns and no slash between them, which
+                // took three tries. The concurrency figure used to carry a denominator: first the
+                // run's own thread high-water mark, then the threads that ever ran the operation,
+                // and both answer a question about the deployment from inside a row about an
+                // operation. A pool of four that never runs more than three tasks at once printed
+                // `3.00 / 4`, where the 4 is a ThreadPoolExecutor detail - it opens a new core
+                // thread on every submit until the core size is reached, idle workers or not.
+                //
+                // Pairing the mean with the maximum instead was no better: `Concurrency / Peak`
+                // reads as the name of one quantity while the number to its left is a mean, and a
+                // fractional average and an integer maximum are not two views of one whole the way
+                // `Runnable / Wait` is. Three numbers, three headings, each saying what it is.
+                //
+                // The names are Andrey's, and the argument for them is that each row is then read
+                // off its own heading with no arithmetic: *concurrency 1.1, so concurrency here is
+                // poor; workers 2, but I dispatched 3, so something is off; pool 4, which is what I
+                // configured.* `Max`, `Peak` and `Most` name a statistic and leave the reader to
+                // supply the noun; `Workers` names what was counted, and says "detected" rather
+                // than "measured", which is what a sampled maximum honestly is.
                 "Operation", "Thread-time% v", "Thread-time", "Runnable / Wait", "Wall-time",
-                "Concurrency / Threads",
+                "Concurrency", "Workers", "Pool",
                 // `Impl/call` sits beside `Calls` because it is hits x step / calls, and it had
                 // been stranded among the statistics.
                 // `Thread-time per call` and not `Impl/call`, which was Andrey's: "implied" singled
@@ -1602,10 +1667,10 @@ class Report internal constructor(
         for (op in seen.sortedByDescending { it.hits }) {
             appendLine(
                 String.format(
-                    Locale.ROOT, "%-26s | %13.3f%% %11s %15s | %9s %21s | %,13d %20s | %8d %5.2f%% %6.2f%%",
+                    Locale.ROOT, "%-26s | %13.3f%% %11s %15s | %9s %11s %7s %5s | %,13d %20s | %8d %5.2f%% %6.2f%%",
                     op.name, shareOf(op) * 100, threadTime(occupancyNanosOf(op)),
                     runnableSplit(op.waitingShare), threadTime(elapsedNanosOf(op)),
-                    inFlightOf(op),
+                    inFlightOf(op), workersOf(op), poolOf(op),
                     op.calls, duration(impliedNanosOf(op)),
                     op.hits, noiseFloorOf(op) * 100, op.stuckShare * 100
                 )
@@ -1783,10 +1848,19 @@ class Report internal constructor(
          * Operation, thread-time% and thread-time, runnable/wait, wall-time,
          * concurrency/threads, calls, implied per call, hits, noise, over one tick.
          */
-        val FINE_COLUMNS = intArrayOf(26, 14, 11, 15, 9, 21, 13, 20, 8, 6, 7)
+        val FINE_COLUMNS = intArrayOf(26, 14, 11, 15, 9, 11, 7, 5, 13, 20, 8, 6, 7)
 
         /** After which columns a group bar comes down. */
-        val FINE_BREAKS = intArrayOf(0, 3, 5, 7)
+        val FINE_BREAKS = intArrayOf(0, 3, 7, 9)
+
+        /**
+         * Hits below which `Peak 1` is not evidence of anything.
+         *
+         * A peak of one drawn from a handful of samples is what a *short* operation looks like, not
+         * what a serialized one looks like. At 25 hits a second thread present a tenth of the time
+         * would have been caught nine times in ten.
+         */
+        const val MIN_HITS_FOR_SERIAL = 25
 
         /**
          * `1 thread` rather than `1 threads`.
