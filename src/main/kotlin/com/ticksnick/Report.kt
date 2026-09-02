@@ -24,8 +24,9 @@ fun tooSmallMessage(name: String, calls: Long, upperNanos: Double): String = Str
             "5-9%%,%n" +
             "    and C2 can move work across the boundaries of adjacent short labels without leaving a " +
             "trace in the numbers.%n" +
-            "    Put an operation label on the enclosing loop instead and divide by the iteration count.",
-    name, calls, duration(upperNanos), Report.FLOOR_NANOS
+            "    Put the label on the enclosing loop instead, as op(%s, times = n) { }, which keeps the%n" +
+            "    calls and the per-call duration in this operation's own units, not the loop's.",
+    name, calls, duration(upperNanos), Report.FLOOR_NANOS, name
 )
 
 /**

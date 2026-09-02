@@ -1085,6 +1085,74 @@ achieved step and resync count at 1, 0.5, 0.25 and 0.1 ms at a few thread counts
 can already run (`--step`). Item 27 is the same shape of problem - a diagnostic that can only be
 stated after the run - and if either is built they should be built together.
 
+## 35. Tooling for the Universal Scalability Law - sweep the thread count and fit it · open
+
+Andrey's, 2026-09-02. The profiler answers *where did the time go at this thread count*. The
+question underneath most performance work is *what happens when I add threads*, and there is a
+standard model for it - Gunther's Universal Scalability Law:
+
+```
+X(N) = lambda*N / (1 + sigma*(N-1) + kappa*N*(N-1))
+```
+
+**lambda** is one worker's throughput, **sigma** is the serialized fraction (Amdahl on its own), and
+**kappa** is coherency - the cost of workers keeping each other consistent. Kappa grows as N^2, so
+it bends the curve back down: the retrograde region where more threads do less work. A fit gives the
+peak, which is the number a reader actually wants.
+
+**Why it belongs here rather than in a spreadsheet.** A USL fit on total throughput says *the system
+stops scaling at 24 threads* and nothing about why. This tool already measures, per operation and at
+every N, the two things the model only infers: the **runnable/wait split**, which is contention
+made visible, and **concurrency** - threads inside an operation at once. So the interesting output
+is not one curve but a curve *per label*, with the operations whose waiting share grows with N named
+as the candidates for sigma, and the ones whose implied per-call duration grows with N as the
+candidates for kappa - a cache line getting hotter costs time per call without anyone waiting on a
+lock. That decomposition is the thing no throughput fit can do, and it is a short step from numbers
+we already print.
+
+**What would have to exist.**
+
+1. A driver that runs the same workload at several thread counts. The bench already takes
+   `--threads` and has a sweep mode, so the *bench* could do this today; a user's workload could not,
+   for the same reason item 1 cannot re-run theirs - the tool does not own the loop. The honest first
+   version is bench-only, and it is worth knowing whether that is interesting or circular.
+2. A throughput number the profiler can see. Today it counts calls, which is a throughput
+   denominator only if the caller says which operation is the unit of work.
+3. The fit, three parameters over the sweep, with the residuals shown rather than a bare peak.
+
+**The objection that has to be answered first, and it is this machine.** A sweep is a *series of
+runs*, and CLAUDE.md exists partly because a series of runs on this laptop cannot be compared: the
+clock swings 2x within a run, heat soak decayed one configuration from 23M to 12M calls/s over an
+hour, and idling restored it. Points taken at N=1,2,4,8,16 in that order have the machine cooling
+and heating monotonically *along the x axis*, which manufactures exactly the retrograde curve USL is
+famous for finding. Any sweep would have to interleave thread counts rather than walk them, repeat
+each point, and carry the processor-performance trace beside every point - and even then the fit
+would need the clock as a covariate before kappa means anything.
+
+There is already a hint of this in [findings.md](findings.md): one spinning thread reads 98.81% on
+CPU, eight read 95.57%, and eight plus the sampler read 90.08%. That is a descheduling curve against
+N taken for another purpose, and it is the shape sigma would have to be separated from.
+
+**Walking the sweep downwards does not fix it - it flips the sign.** Andrey's question, and worth
+recording because the answer is not obvious. Ascending, the high-N points run last and hottest, so
+they read low, the curve bends down and kappa is inflated: a fake retrograde region, which at least
+looks alarming enough to investigate. Descending, N=1 runs last and slowest, so **lambda** is
+underestimated and every other point looks good against it - the fit comes back flattering, with
+small sigma and small kappa, and a result that says *you scale fine* is the one nobody re-checks.
+The drift is not even monotone in that direction, because heat tracks the load rather than the
+clock: 16 threads front-loads it, and the 1-2 thread points then run on a machine that is partly
+recovering, which is harder to correct for than a straight trend.
+
+So interleaving with repeats is the fix. But running the sweep in **both** directions is worth doing
+as the instrument: fit ascending and descending separately, and the gap between the two fits
+measures how far the machine moved during the sweep. Agreement makes the sweep trustworthy;
+disagreement is thermal, and no amount of fitting recovers it.
+
+**Open.** Is the fit the product, or is the per-label decomposition the product and the fit merely
+the headline? Does anyone believe a three-parameter fit on five noisy points? And it may be that the
+useful half is much smaller: print the per-operation table *at two thread counts side by side* and
+let the reader see which label grew, which is item 1's counterfactual shape without the model.
+
 ## Promoted to plan.md
 
 **Phase 3.5** is item 9 above, reframed from detecting bad operations to bounding the error on every
