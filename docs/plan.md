@@ -1631,6 +1631,48 @@ Java source** until phase 7 adds `@JvmName` — [ideas.md](ideas.md) item 26, wi
 **Also done here:** the coarse table gained `share` and `occupancy`, which the fine table had all
 along. Coarse was already strictly more informative in the data; only the printed report was short.
 
+## `stepMillis` is not a resolution dial · 2026-09-02
+
+Decided while reading the empty-table message in the sandbox, and recorded because the code now says
+*less* than it used to and a later reader would otherwise read the deletion as an oversight.
+
+The message on a run too short to sample used to end *"Run for longer, or lower stepMillis."* The
+second clause is unreachable: the message fires below 50 ticks, and a 2 ms run would need a 0.04 ms
+step to clear that bar — a sampler waking 25,000 times a second, measuring itself, for fifty samples
+that still say nothing. It now says **"Run for longer."** and the README no longer describes the
+step as trading samples against sampler CPU.
+
+**What replaced that framing.** The step is a knob for *thread count*, and it points upward: the
+sampler walks every registered slot every tick, which is 0.2% of a 1 ms step at 8 threads and about
+10% of it at the 1024-slot ceiling. The floor is the machine and it is close — spin achieves 1.001 ms
+at a 1 ms request where parking cannot — so there is little room below the default and a real reason
+to go above it.
+
+**Deliberately not built:** having the profiler derive the step from the live slot count, or warn
+when the walk is eating the tick. Both are plausible and neither is measured — nothing below 1 ms has
+been characterised at all. Kept as [ideas.md](ideas.md) item 34, together with the sweep that would
+settle it.
+
+## One warning section, numbered and capped · 2026-09-02
+
+Warnings used to be printed where each was computed, which scattered them: the fine tier's floor and
+long-execution warnings landed *after* the coarse table, and the coarse tier's open-context warning
+inside it. A reader who found one had no way to know it was about the table two sections up. Found
+in the sandbox, where a 50 ns floor warning about a fine operation read as being about a coarse one.
+
+They are now collected by `renderWarnings()` into a single `WARNINGS (n)` section after both tables,
+numbered, each entry hanging-indented under its own number.
+
+**Why the word and not the `!`.** The [severity ladder](#what-the-tool-does-about-it--the-severity-ladder)
+already separates *fatal* from *warning* from *note*, and the report was spending the same `!` on all
+three. The section now carries the word, which is what the ladder always meant; the fatal blocks keep
+their own full-width banners, and notes - the stuck baseline, the noise floor - stay beside the
+numbers they qualify.
+
+**Capped at ten** (`MAX_WARNINGS`), with the remainder counted rather than listed, for the same
+reason zero-hit operations are folded: Calcite produces one warning per rule, and a section that runs
+to fifty entries teaches the reader to skip the section.
+
 ## Phase 7 — library surface · not started
 
 What someone else has to touch to use this. The *placement essentials* were pulled forward into

@@ -1038,6 +1038,53 @@ else prints it - so the only safe default is ASCII. An explicit opt-in would mov
 caller who does know, and would let the report use an arrow, a proper dash and box-drawing rules for
 the bars. It also doubles the surface the ASCII test has to cover.
 
+## 34. What bounds the step, above and below - and whether the user should be choosing it · open
+
+`stepMillis` is presented as a dial the caller turns, and everything this project has ever measured
+was taken at the one value, 1 ms. The evidence already collected says the usable range is narrow and
+that its edges are set by the *workload*, not by taste - which makes a free-form parameter the wrong
+shape for it. Raised by Andrey from the newest entry in the [sandbox friction log](sandbox.md):
+*"should we not find a proper value and fix it?"*
+
+**The floor is the machine, and it is close.** At a 1 ms request with 8 workers on 16 cores the
+spinning sampler achieves **1.001 ms with one resync**, while `parkNanos` achieves 1.62 ms with 2534
+resyncs of 6177 and degrades to **13.5 ms** with every core loaded ([findings.md](findings.md),
+"Parking cannot hold a millisecond step"). Spin holds 1 ms; nothing below 1 ms has ever been
+measured here. And the once-a-second thread-CPU walk costs up to **214.7 us** - already a fifth of a
+1 ms tick, and larger than a whole tick at any step below about 0.2 ms, at which point the duty
+cycle's own instrument would be displacing the samples it exists to bound.
+
+**The ceiling is the thread count, and the tool knows it and the user does not.** The sampler walks
+every registered slot every tick: **0.2% of a 1 ms step at 8 threads**, and about **95 us - 10% of
+the step - at the 1024-slot ceiling**. So past some thread count 1 ms is itself the wrong default
+and the step should be *raised*, which is the opposite of the direction everyone reaches for. The
+number that decides this is the live slot count, which the profiler observes at run time and the
+caller has to guess before `start()`.
+
+**And there is a third bound that is not about cost at all**: a step only buys a table if the run
+lasts `MIN_TICKS_FOR_A_TABLE` (50) ticks, and a share is only worth reading well above that. Step
+and duration multiply, so the same report is unreadable for two unrelated reasons that currently
+produce two unrelated messages.
+
+**What could be built, in increasing order of nerve.**
+
+1. *Say when the step did not hold.* Mostly there: the report prints achieved beside requested, plus
+   the resync count. What is missing is the sentence that reads them - a step the OS could not hold
+   is a defect in the run, not a statistic.
+2. *Warn when the walk is eating the tick.* Slot count x per-slot walk against the step is a live
+   number, and 10% of the step going to the sampler is worth saying out loud.
+3. *Stop asking.* Derive the step from the observed slot count and keep it inside the affordable
+   band, leaving `stepMillis` as an override for people who know why they want one. This is the one
+   that matches the evidence - the affordable step is a function of something the tool measures -
+   and also the one that would need a real experiment behind it, because a step that changes
+   mid-run changes what `hits x step` means.
+
+**What is unresolved.** Nothing below 1 ms has been characterised at all, so the floor above is
+inferred from adjacent measurements rather than measured: the honest first step is a sweep of
+achieved step and resync count at 1, 0.5, 0.25 and 0.1 ms at a few thread counts, which the bench
+can already run (`--step`). Item 27 is the same shape of problem - a diagnostic that can only be
+stated after the run - and if either is built they should be built together.
+
 ## Promoted to plan.md
 
 **Phase 3.5** is item 9 above, reframed from detecting bad operations to bounding the error on every

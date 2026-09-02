@@ -1289,11 +1289,71 @@ class Report internal constructor(
             appendLine("  early, before the work it covers has finished.")
             appendLine("!".repeat(WIDTH))
         }
-        if (openContextsAtEnd > 0) {
-            appendLine(
-                "! $openContextsAtEnd coarse executions were still open when sampling stopped: their spans are " +
-                        "missing here, and every sample taken inside them was billed to them"
+    }
+
+    /**
+     * Every warning in one place, headed by the word and numbered.
+     *
+     * They used to be printed where each was computed, which put the fine tier's warnings *below
+     * the coarse table* — fifteen lines from the number they were about and under the wrong
+     * heading, so a warning about a fine operation read as one about a coarse one. A leading `!`
+     * did not say "warning" either, and by the severity ladder in plan.md that is what these are:
+     * the measurement is honest, but the label is in the wrong tier or the run limits what its
+     * numbers mean.
+     *
+     * Capped at [MAX_WARNINGS], with the remainder counted rather than listed. Calcite would
+     * produce one of these per rule, and a section that runs to fifty entries is one the reader
+     * learns to scroll past.
+     */
+    private fun StringBuilder.renderWarnings() {
+        // Ordered by what each costs the reader: numbers that are missing or inflated first, then
+        // labels in the wrong tier, which are honest measurements of the wrong-sized thing.
+        val warnings = buildList {
+            if (untrackedSlots > 0) add(
+                "$untrackedSlots threads arrived past the $MAX_SLOTS-slot ceiling and were NOT SAMPLED -\n" +
+                        "their thread-time is missing from every number above, including the denominators"
             )
+            if (reclaimedSlots > 0) add(
+                "$reclaimedSlots threads exited without Profiler.release() and were reclaimed -\n" +
+                        "call it when a thread finishes; until a slot is reclaimed it reads as an idle\n" +
+                        "thread and inflates the denominator every share above is taken over"
+            )
+            if (openContextsAtEnd > 0) add(
+                "$openContextsAtEnd coarse executions were still open when sampling stopped: their spans\n" +
+                        "are missing above, and every sample taken inside them was billed to them"
+            )
+            for (op in suspect()) add(
+                String.format(
+                    Locale.ROOT,
+                    "%s: %,d executions lasted over a tick (%.1f%% of its thread-time against a %.1f%% machine floor, %s per call)",
+                    op.name, op.stuckInstances, op.stuckShare * 100, machineFloor * 100,
+                    duration(impliedNanosOf(op))
+                ) + "\n" + verdictFor(op)
+            )
+            // The other end of the same question, and a warning rather than a verdict: a label
+            // below the floor cannot move a ranking, so the cost of being wrong about one is the
+            // loudest failure this tool has — stopping a run that was fine. It did exactly that in
+            // two consecutive trials. Every offender is named; the reader decides.
+            for (op in tooSmall()) add(tooSmallMessage(op.name, op.calls, impliedUpperNanosOf(op)))
+            // The same boundary from the other side. Unlike the fine floor this one is exact,
+            // because the duration it compares is measured rather than inferred — see
+            // coarseTooSmall.
+            for (c in coarseTooSmall()) add(
+                coarseTooSmallMessage(c.name, c.count, c.meanSpanNanos, coarseFloorNanosOf(c))
+            )
+        }
+        if (warnings.isEmpty()) return
+        appendLine()
+        appendLine("WARNINGS (${warnings.size})")
+        warnings.take(MAX_WARNINGS).forEachIndexed { i, w ->
+            // The number is the hanging indent: continuation lines align under the first line's
+            // text rather than under its number, whatever indentation the message arrived with.
+            val lines = w.lines()
+            appendLine(String.format(Locale.ROOT, "  %2d. %s", i + 1, lines.first().trim()))
+            for (line in lines.drop(1)) appendLine("      " + line.trim())
+        }
+        if (warnings.size > MAX_WARNINGS) {
+            appendLine("      ... and ${warnings.size - MAX_WARNINGS} more")
         }
     }
 
@@ -1508,11 +1568,16 @@ class Report internal constructor(
         // explanation that used to follow it explained columns that had no data. Say what happened
         // instead: an empty table is nearly always a run too short for the sampler to catch, and
         // that is worth naming rather than leaving the reader to infer from a blank.
+        // It says "run for longer" and not "or lower stepMillis", which it used to: below
+        // MIN_TICKS_FOR_A_TABLE there is no step that rescues the run. Two ticks would need a step
+        // of 0.04 ms to reach fifty, which measures the sampler rather than the program, and fifty
+        // samples still says nothing. Lowering the step is real advice for an operation that is
+        // called but never caught in a run long enough to be real - that case is the fold below.
         if (seen.isEmpty()) {
             appendLine(
                 if (labelledHits == 0L && ticks < MIN_TICKS_FOR_A_TABLE)
                     "  nothing was sampled - $ticks ticks is too few for the sampler to catch anything. " +
-                            "Run for longer, or lower stepMillis."
+                            "Run for longer."
                 else "  nothing was sampled."
             )
         }
@@ -1531,18 +1596,23 @@ class Report internal constructor(
         if (operations.any { it.hits > 0 }) appendLine(rule(FINE_COLUMNS, FINE_BREAKS))
         if (unseen.isNotEmpty()) {
             val called = unseen.filter { it.calls > 0 }
+            // Named, in both branches: "1 operation never sampled" leaves the reader to work out
+            // which of their labels it was, and on a short run — where this line fires most — the
+            // answer is usually the whole point. Capped at four, since the other reason this line
+            // exists is that Calcite folded twenty-five.
+            fun names(ops: List<OperationStat>) =
+                ops.take(4).joinToString { it.name } + (if (ops.size > 4) ", ..." else "")
             // "called anyway" rather than "N of them did run", which reads as nonsense at N = 1 —
             // and one is the common case on a short run, which is exactly when a reader is most
             // likely to be new to the report.
             appendLine(
                 "  ${plural(unseen.size.toLong(), "operation")} never sampled and folded away" +
-                        (if (called.isEmpty()) " (none of them ran at all)"
-                        else "; called anyway: " +
-                                called.sortedByDescending { it.calls }.take(4).joinToString { it.name } +
-                                (if (called.size > 4) ", ..." else ""))
+                        (if (called.isEmpty()) ", and never called: " + names(unseen)
+                        else "; called anyway: " + names(called.sortedByDescending { it.calls }))
             )
         }
-        renderCoarse()
+        // A note and not a warning: it is the baseline the `Over 1t` column is read against, so it
+        // belongs under the table that has that column rather than in the warning section.
         appendLine(
             String.format(
                 Locale.ROOT,
@@ -1550,40 +1620,8 @@ class Report internal constructor(
                 stuckBaseline * 100, machineFloor * 100
             )
         )
-        for (op in suspect()) {
-            appendLine(
-                String.format(
-                    Locale.ROOT,
-                    "  ! %s: %,d executions lasted over a tick (%.1f%% of its thread-time against a %.1f%% machine floor, %s per call)",
-                    op.name, op.stuckInstances, op.stuckShare * 100, machineFloor * 100,
-                    duration(impliedNanosOf(op))
-                )
-            )
-            appendLine("    " + verdictFor(op))
-        }
-        // The other end of the same question, and a warning rather than a verdict: a label below
-        // the floor cannot move a ranking, so the cost of being wrong about one is the loudest
-        // failure this tool has — stopping a run that was fine. It did exactly that in two
-        // consecutive trials. Every offender is named; the reader decides.
-        for (op in tooSmall()) {
-            appendLine("  ! " + tooSmallMessage(op.name, op.calls, impliedUpperNanosOf(op)))
-        }
-        // The same boundary from the other side. Unlike the fine floor this one is exact, because
-        // the duration it compares is measured rather than inferred — see coarseTooSmall.
-        for (c in coarseTooSmall()) {
-            appendLine(
-                "  ! " + coarseTooSmallMessage(c.name, c.count, c.meanSpanNanos, coarseFloorNanosOf(c))
-            )
-        }
-        if (reclaimedSlots > 0) {
-            appendLine("    ! $reclaimedSlots threads exited without Profiler.release() and were reclaimed -")
-            appendLine("      call it when a thread finishes; until a slot is reclaimed it reads as an idle")
-            appendLine("      thread and inflates the denominator every share above is taken over")
-        }
-        if (untrackedSlots > 0) {
-            appendLine("    ! $untrackedSlots threads arrived past the $MAX_SLOTS-slot ceiling and were NOT SAMPLED -")
-            appendLine("      their thread-time is missing from every number above, including the denominators")
-        }
+        renderCoarse()
+        renderWarnings()
         // A leaked label does not look like an error. It looks like a finding: one operation
         // quietly accumulating everybody else's samples, with a plausible number beside it.
         if (imbalances > 0 || openAtEnd > 0) {
@@ -1656,6 +1694,9 @@ class Report internal constructor(
         const val WORKING_CEILING_SLACK = 4.0
 
         const val FLOOR_NANOS = 50.0
+
+        /** How many warnings are printed before the rest are counted rather than listed. */
+        const val MAX_WARNINGS = 10
 
         /**
          * What one coarse context costs: an allocation, two `nanoTime` calls and the accumulate.

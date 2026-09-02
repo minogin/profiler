@@ -152,7 +152,13 @@ println(Profiler.stop().render())
 there is a working example to copy. Up to 256 operations, registered by name at runtime.
 
 `Profiler.start()` also takes `strict` (below), `sampleState = false` to switch off the per-sample
-thread-state read, and `stepMillis` — a smaller step is more samples and more sampler CPU.
+thread-state read, and `stepMillis`, which defaults to 1 ms. That default is the one to leave alone:
+it is there for thread count, not for resolution. The sampler walks every registered thread on every
+tick, which is 0.2% of a 1 ms step at 8 threads and about 10% of it at the 1024-slot ceiling, so a
+workload with hundreds of live threads is the case for *raising* it. Lowering it buys much less than
+it looks: a run too short to sample is fixed by running for longer, and 1 ms is already near what
+the OS will hold — the spinning sampler achieves 1.001 ms, while parking drifts to 1.62 ms and to
+13.5 ms with every core loaded.
 
 **One verb, and the tier is chosen once.** `Profiler.registerFine` gives back a `FineOp`,
 `Profiler.registerCoarse` a `CoarseOp`, and `op(x) { }` takes either — so promoting an operation

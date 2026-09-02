@@ -47,6 +47,89 @@ something to do, it graduates into [ideas.md](ideas.md) and is marked here as ha
 
 ---
 
+### The floor warning was there, under the wrong heading
+*2026-09-02, Andrey, on a 1M-iteration loop in the sandbox. **Fixed the same day.***
+
+Andrey's question was *"I have 8 ns/op and it does not say it's bad - do we really have any bottom
+limit?"* We do: `FLOOR_NANOS` is 50 ns and the check had fired. It just printed fifteen lines below
+the number it was about, after the coarse table:
+
+```
+FINE OPERATIONS
+work1   ...   1,000,000 calls   8.0 ns/call     <- the number
+COARSE OPERATIONS
+request ...
+  request was: unlabelled 72.2%, work1 27.8%
+-----------------------------------------------------------------
+  ! work1: 1,000,000 calls at under 12.4 ns each, below the 50 ns floor.
+```
+
+Everything between the row and its warning belongs to the coarse tier, so the warning reads as being
+about `request`. **A warning that is present and unfindable is worse than absent** - the reader
+concludes the tool has nothing to say about a label that is, in fact, below the floor.
+
+Two causes, and the second was Andrey's: `render()` called `renderCoarse()` before the fine tier's
+warnings, and a bare `!` never says the word *warning*. It now gathers all of them into one section,
+numbered, with the count in the heading and a cap at ten:
+
+```
+WARNINGS (1)
+   1. work1: 1,000,000 calls at under 16.7 ns each, below the 50 ns floor.
+      The hook is a large fraction of an operation that size, the sampler reads it low by 5-9%,
+      ...
+```
+
+The stuck-baseline line moved up under the fine table instead, since it is a note that the `Over 1t`
+column is read against rather than a warning about anything.
+
+---
+
+### The fold said how many operations it hid, but not which
+*2026-09-02, Andrey, reading a sandbox report. **Fixed the same day.***
+
+```
+  1 operation never sampled and folded away (none of them ran at all)
+```
+
+With one label of a handful missing, the reader has to diff the report against their own source to
+find out which one it was - and on a short run, where this line fires most, *which* is the whole
+question: a label that never ran is either a code path that did not execute or a label in the wrong
+place, and those are different bugs.
+
+The count was there because the line was built for Calcite's twenty-five folded rules, where a list
+would be the screenful the fold exists to prevent. But a cap solves that and a bare count does not.
+Both branches now name the operations, four at most:
+
+```
+  1 operation never sampled and folded away, and never called: decode
+```
+
+---
+
+### The empty-table message advised a knob that cannot rescue the run
+*2026-09-02, Andrey, running a short loop in the sandbox. **Fixed the same day.***
+
+```
+  nothing was sampled - 2 ticks is too few for the sampler to catch anything. Run for longer, or
+  lower stepMillis.
+```
+
+The question it drew was *"is `stepMillis` effectively chosen or not?"* - and the second half of the
+advice does not survive it. Two ticks is a run of about 2 ms. Reaching the fifty ticks the table
+wants would need a step of **0.04 ms**: a sampler waking 25,000 times a second, which measures the
+sampler rather than the program, and fifty samples would still say nothing. There is no step that
+rescues a 2 ms run, so half the sentence pointed at a door that does not open.
+
+Lowering the step *is* real advice, but for a different symptom - an operation that is called and
+never caught in a run long enough to be real - and that case already has its own line, in the fold
+of zero-hit operations.
+
+The message now says **"Run for longer."** and nothing else, and the README no longer describes the
+step as a resolution dial. What bounds the step in each direction, and whether the tool should be
+choosing it rather than asking, is [ideas.md](ideas.md) item 34.
+
+---
+
 ### `Time on CPU` said the run was too short, on a run twice long enough
 *2026-09-01, Andrey, reading a pasted report. **Fixed the same day.***
 
